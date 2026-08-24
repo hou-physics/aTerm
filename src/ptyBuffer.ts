@@ -25,10 +25,16 @@ export const ptyEventsReady: Promise<void> = (async () => {
 })().then(() => undefined).catch((err) => { console.error('pty 事件监听注册失败', err) })
 
 export function attachPty(id: string, sink: Sink, onExit: () => void): () => void {
-  const pending = buffers.get(id)
-  if (pending) { pending.forEach(sink); buffers.delete(id) }
-  sinks.set(id, sink)
+  const replayed = buffers.get(id) ?? []
+  buffers.delete(id)
+  replayed.forEach(sink)
+  let live = false
+  sinks.set(id, (bytes) => { live = true; sink(bytes) })
   exitSinks.set(id, onExit)
   if (exited.has(id)) onExit()
-  return () => { sinks.delete(id); exitSinks.delete(id) }
+  return () => {
+    if (!live && replayed.length > 0) buffers.set(id, replayed)
+    sinks.delete(id)
+    exitSinks.delete(id)
+  }
 }
