@@ -1,25 +1,28 @@
-import reactLogo from "./assets/react.svg";
-import "./App.css";
+import './ptyBuffer'
+import './App.css'
+import { TabBar } from './components/TabBar'
+import { TerminalView } from './components/TerminalView'
+import { useTabs } from './store/tabs'
 
-function App() {
+export default function App() {
+  const { tabs, activeId, openTerminal } = useTabs()
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <div className="app">
+      <aside className="sidebar">{/* Task 9: <Sidebar/> */}</aside>
+      <div className="main">
+        <TabBar />
+        <div className="content">
+          <div style={{ display: activeId === 'home' ? 'block' : 'none', padding: 24 }}>
+            {/* Task 9 将替换为 <HomePage/> */}
+            <button onClick={() => void openTerminal({ title: 'zsh' })}>＋ 新终端</button>
+          </div>
+          {tabs.filter((t) => t.kind === 'term').map((t) => (
+            <div key={t.id} className="term-wrap" style={{ display: activeId === t.id ? 'block' : 'none' }}>
+              <TerminalView ptyId={t.ptyId!} active={activeId === t.id} />
+            </div>
+          ))}
+        </div>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-    </main>
-  );
+    </div>
+  )
 }
-
-export default App;
