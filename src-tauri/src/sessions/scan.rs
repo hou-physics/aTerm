@@ -87,6 +87,12 @@ pub fn scan_projects(projects_dir: &Path) -> Vec<ProjectInfo> {
     projects
 }
 
+#[tauri::command]
+pub fn list_projects() -> Result<Vec<ProjectInfo>, String> {
+    let home = dirs::home_dir().ok_or("找不到用户目录")?;
+    Ok(scan_projects(&home.join(".claude").join("projects")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
