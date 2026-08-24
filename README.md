@@ -1,7 +1,11 @@
-# Tauri + React + Typescript
+# aTerm
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+macOS 上专为 Claude Code agent 工作流设计的终端（Tauri 2 + React + xterm.js）。
 
-## Recommended IDE Setup
+设计文档：docs/superpowers/specs/2026-08-24-aterm-design.md
+当前进度：P1（终端 + 主页 + 会话恢复）✅；P2 总览方块页开发中。
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## 开发
+npm install && npm run tauri dev
+测试：cd src-tauri && cargo test；npx vitest run
+打包：npm run tauri build
