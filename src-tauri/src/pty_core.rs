@@ -56,6 +56,7 @@ pub fn spawn(
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Ok(0) | Err(_) => break,
                 Ok(n) => on_output(&buf[..n]),
             }

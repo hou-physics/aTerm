@@ -7,6 +7,7 @@ vi.mock('../ipc', () => ({
   ptyKill: vi.fn(async () => {}),
   listProjects: vi.fn(async () => []),
 }))
+vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 import * as ipc from '../ipc'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'

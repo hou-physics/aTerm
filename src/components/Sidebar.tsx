@@ -12,7 +12,7 @@ export function Sidebar() {
     <>
       <div className="section-label">最近会话</div>
       {recent.map(({ p, t }) => (
-        <div key={t.rootKey} className="side-item" title={t.title} onClick={() => void resumeThread(p.cwd, t)}>
+        <div key={`${p.dirName}:${t.rootKey}`} className="side-item" title={t.title} onClick={() => void resumeThread(p.cwd, t)}>
           {t.title}
           <div className="sub">{basename(p.cwd)} · {formatRelative(t.lastActivityMs)}</div>
         </div>

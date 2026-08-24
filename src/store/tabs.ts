@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { ptyIsAlive, ptyKill, ptySpawn } from '../ipc'
+import { ptyEventsReady } from '../ptyBuffer'
 
 export type Tab = { id: string; kind: 'home' | 'term'; title: string; ptyId?: string }
 let nextTab = 1
@@ -23,6 +24,7 @@ export const useTabs = create<TabsState>((set, get) => ({
   activeId: 'home',
   setActive: (id) => set({ activeId: id }),
   openTerminal: async ({ title, cwd, inject }) => {
+    await ptyEventsReady
     const ptyId = await ptySpawn({ cwd, inject, cols: 80, rows: 24 })
     const id = `tab-${nextTab++}`
     set((s) => ({ tabs: [...s.tabs, { id, kind: 'term', title, ptyId }], activeId: id }))

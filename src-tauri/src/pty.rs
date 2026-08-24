@@ -55,8 +55,8 @@ fn with_pty<T>(map: &Mutex<HashMap<String, Arc<PtyHandle>>>, id: &str, f: impl F
     h.map(|h| f(&h)).ok_or_else(|| format!("pty 不存在: {id}"))
 }
 
-#[tauri::command]
-pub fn pty_write(state: State<PtyManager>, id: String, data: String) -> Result<(), String> {
+#[tauri::command(async)]
+pub fn pty_write(state: State<'_, PtyManager>, id: String, data: String) -> Result<(), String> {
     with_pty(&state.0, &id, |h| h.write(data.as_bytes()))?
 }
 #[tauri::command]

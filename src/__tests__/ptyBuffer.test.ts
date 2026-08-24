@@ -66,6 +66,27 @@ describe('ptyBuffer.attachPty', () => {
     expect(s2.calls).toHaveLength(0)
   })
 
+  it('先缓冲后实时：attach 收到回放之后又收到实时事件，detach 不应恢复缓冲，新 sink 收不到任何数据', async () => {
+    const { attachPty } = await freshModule()
+
+    handlers['pty-output']({ payload: { id: 'Z', data: toB64('buffered-chunk') } })
+
+    const s1 = trackedSink()
+    const detach1 = attachPty('Z', s1.sink, () => {})
+    expect(s1.calls).toHaveLength(1)
+    expect(s1.calls[0]).toEqual(bytesOf('buffered-chunk'))
+
+    handlers['pty-output']({ payload: { id: 'Z', data: toB64('live-chunk') } }) // 实时事件到达，live 应被置 true
+    expect(s1.calls).toHaveLength(2)
+    expect(s1.calls[1]).toEqual(bytesOf('live-chunk'))
+
+    detach1() // live 已为 true：即使 replayed 非空也不应重新入队
+
+    const s2 = trackedSink()
+    attachPty('Z', s2.sink, () => {})
+    expect(s2.calls).toHaveLength(0) // 若 !live 门控被移除，这里会收到重放的 'buffered-chunk'
+  })
+
   it('退出语义：先退出后 attach 立即触发 onExit；未知 id 的事件不抛错', async () => {
     const { attachPty } = await freshModule()
 
