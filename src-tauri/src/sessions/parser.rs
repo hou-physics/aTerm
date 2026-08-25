@@ -70,13 +70,19 @@ pub fn parse_meta(head: &[String], tail: &[String]) -> ParsedMeta {
         }
     }
 
-    // title 优先级①：头部第一条 type=="summary" 记录。不论它在头部出现的顺序，
-    // 只要存在就必须胜出，不能被更早出现的用户消息抢先锁定标题。
-    for v in &parsed_head {
+    // title 优先级①：头部 + 尾部窗口内所有 type=="summary" 记录中，文件序最靠后
+    // （最新）的一条胜出——摘要通常在文件中段/尾部追加（如 compaction 时），仅扫
+    // 头部会错过大多数会话的 AI 摘要；空白摘要一律跳过，不允许其锁定为空标题。
+    let parsed_tail: Vec<Value> = tail
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    for v in parsed_head.iter().chain(parsed_tail.iter()) {
         if v.get("type").and_then(|t| t.as_str()) == Some("summary") {
             if let Some(summary) = as_str(v, "summary") {
-                m.title = Some(summary);
-                break;
+                if !summary.trim().is_empty() {
+                    m.title = Some(summary);
+                }
             }
         }
     }
@@ -96,9 +102,8 @@ pub fn parse_meta(head: &[String], tail: &[String]) -> ParsedMeta {
         }
     }
 
-    for line in tail {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if let Some(ts) = as_str(&v, "timestamp") {
+    for v in &parsed_tail {
+        if let Some(ts) = as_str(v, "timestamp") {
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
                 m.last_ts_ms = Some(dt.timestamp_millis());
             }
@@ -229,5 +234,42 @@ mod tests {
         let m = parse_meta(&head, &[]);
         assert_eq!(m.title.as_deref(), Some("后到的摘要"));
         assert_eq!(m.first_user_uuid.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn summary_in_tail_wins_over_head_user_message() {
+        let head = vec![
+            line_user("u1", "写一个贪吃蛇", "2026-08-20T10:00:00.000Z"),
+        ];
+        let tail = vec![
+            r#"{"type":"assistant","uuid":"u9","timestamp":"2026-08-21T08:30:00.000Z","message":{"role":"assistant","model":"claude-opus-5"}}"#.to_string(),
+            r#"{"type":"summary","summary":"尾部总结","leafUuid":"x"}"#.to_string(),
+        ];
+        let m = parse_meta(&head, &tail);
+        assert_eq!(m.title.as_deref(), Some("尾部总结"));
+        assert_eq!(m.first_user_uuid.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn last_summary_wins_when_multiple() {
+        let head = vec![
+            r#"{"type":"summary","summary":"旧总结","leafUuid":"x"}"#.to_string(),
+        ];
+        let tail = vec![
+            r#"{"type":"assistant","uuid":"u9","timestamp":"2026-08-21T08:30:00.000Z","message":{"role":"assistant","model":"claude-opus-5"}}"#.to_string(),
+            r#"{"type":"summary","summary":"新总结","leafUuid":"y"}"#.to_string(),
+        ];
+        let m = parse_meta(&head, &tail);
+        assert_eq!(m.title.as_deref(), Some("新总结"));
+    }
+
+    #[test]
+    fn empty_summary_is_skipped() {
+        let head = vec![
+            r#"{"type":"summary","summary":"  "}"#.to_string(),
+            line_user("u1", "写贪吃蛇", "2026-08-20T10:00:00.000Z"),
+        ];
+        let m = parse_meta(&head, &[]);
+        assert_eq!(m.title.as_deref(), Some("写贪吃蛇"));
     }
 }
