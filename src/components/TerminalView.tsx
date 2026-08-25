@@ -54,10 +54,11 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
 
     let resizeFrame = 0
     const ro = new ResizeObserver(() => {
-      if (el.clientWidth === 0) return // 隐藏时跳过
-      if (resizeFrame) cancelAnimationFrame(resizeFrame)
+      if (resizeFrame) { cancelAnimationFrame(resizeFrame); resizeFrame = 0 }
+      if (el.clientWidth === 0) return // 隐藏时跳过，并已取消挂起帧
       resizeFrame = requestAnimationFrame(() => {
         resizeFrame = 0
+        if (el.clientWidth === 0) return // 帧执行时容器可能已被隐藏
         fit.fit()
         void ptyResize(ptyId, term.cols, term.rows)
       })
