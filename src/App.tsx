@@ -23,7 +23,7 @@ export default function App() {
       <div className="main">
         <TabBar />
         <div className="content">
-          <div style={{ display: activeId === 'home' ? 'block' : 'none' }}>
+          <div className="home-wrap" style={{ display: activeId === 'home' ? 'block' : 'none' }}>
             <HomePage />
           </div>
           {tabs.filter((t) => t.kind === 'term').map((t) => (

@@ -23,6 +23,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       fontFamily: '"SF Mono", Menlo, monospace',
       fontSize: 13,
       cursorBlink: true,
+      scrollback: 10000,
       theme: XTERM_THEME[useTheme.getState().resolved],
     })
     const fit = new FitAddon()
