@@ -52,13 +52,21 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       () => term.write('\r\n\x1b[90m[进程已退出，可关闭此标签]\x1b[0m\r\n'),
     )
 
+    let resizeFrame = 0
     const ro = new ResizeObserver(() => {
       if (el.clientWidth === 0) return // 隐藏时跳过
-      fit.fit()
-      void ptyResize(ptyId, term.cols, term.rows)
+      if (resizeFrame) cancelAnimationFrame(resizeFrame)
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0
+        fit.fit()
+        void ptyResize(ptyId, term.cols, term.rows)
+      })
     })
     ro.observe(el)
-    return () => { ro.disconnect(); detach(); unsubTheme(); term.dispose() }
+    return () => {
+      if (resizeFrame) cancelAnimationFrame(resizeFrame)
+      ro.disconnect(); detach(); unsubTheme(); term.dispose()
+    }
   }, [ptyId])
 
   useEffect(() => {
