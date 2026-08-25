@@ -70,24 +70,39 @@ pub fn parse_meta(head: &[String], tail: &[String]) -> ParsedMeta {
         }
     }
 
-    // title 优先级①：头部 + 尾部窗口内所有 type=="summary" 记录中，文件序最靠后
-    // （最新）的一条胜出——摘要通常在文件中段/尾部追加（如 compaction 时），仅扫
-    // 头部会错过大多数会话的 AI 摘要；空白摘要一律跳过，不允许其锁定为空标题。
     let parsed_tail: Vec<Value> = tail
         .iter()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .collect();
+
+    // title 优先级①：头部 + 尾部窗口内所有 type=="ai-title" 记录中，文件序最靠后
+    // （最新）的一条胜出——本版本 Claude Code 会随对话推进反复重写 aiTitle（一份
+    // 文件里可能有几十条），只有最后一条才是当前标题；空白标题一律跳过。
     for v in parsed_head.iter().chain(parsed_tail.iter()) {
-        if v.get("type").and_then(|t| t.as_str()) == Some("summary") {
-            if let Some(summary) = as_str(v, "summary") {
-                if !summary.trim().is_empty() {
-                    m.title = Some(summary);
+        if v.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
+            if let Some(ai_title) = as_str(v, "aiTitle") {
+                if !ai_title.trim().is_empty() {
+                    m.title = Some(truncate_chars(ai_title.trim(), 60));
                 }
             }
         }
     }
 
-    // title 优先级②：仍未命中 summary 时，回退到第一条非注入的真实用户消息文本。
+    // title 优先级②：未命中 ai-title 时，退回旧版本 Claude Code 的 type=="summary"
+    // 记录（头部 + 尾部窗口，文件序最靠后者胜出）；空白摘要一律跳过。
+    if m.title.is_none() {
+        for v in parsed_head.iter().chain(parsed_tail.iter()) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("summary") {
+                if let Some(summary) = as_str(v, "summary") {
+                    if !summary.trim().is_empty() {
+                        m.title = Some(truncate_chars(summary.trim(), 60));
+                    }
+                }
+            }
+        }
+    }
+
+    // title 优先级③：仍未命中时，回退到第一条非注入的真实用户消息文本。
     if m.title.is_none() {
         for v in &parsed_head {
             let sidechain = v.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false);
@@ -271,5 +286,40 @@ mod tests {
         ];
         let m = parse_meta(&head, &[]);
         assert_eq!(m.title.as_deref(), Some("写贪吃蛇"));
+    }
+
+    #[test]
+    fn ai_title_wins_over_summary_and_user_message() {
+        let head = vec![
+            line_user("u1", "先写的用户消息", "2026-08-20T10:00:00.000Z"),
+            r#"{"type":"summary","summary":"总结","leafUuid":"x"}"#.to_string(),
+        ];
+        let tail = vec![
+            r#"{"type":"ai-title","aiTitle":"AI 标题","sessionId":"s"}"#.to_string(),
+        ];
+        let m = parse_meta(&head, &tail);
+        assert_eq!(m.title.as_deref(), Some("AI 标题"));
+    }
+
+    #[test]
+    fn last_ai_title_wins() {
+        let head = vec![
+            r#"{"type":"ai-title","aiTitle":"旧标题","sessionId":"s"}"#.to_string(),
+        ];
+        let tail = vec![
+            r#"{"type":"ai-title","aiTitle":"新标题","sessionId":"s"}"#.to_string(),
+        ];
+        let m = parse_meta(&head, &tail);
+        assert_eq!(m.title.as_deref(), Some("新标题"));
+    }
+
+    #[test]
+    fn empty_ai_title_falls_through_to_summary() {
+        let head = vec![
+            r#"{"type":"ai-title","aiTitle":"  ","sessionId":"s"}"#.to_string(),
+            r#"{"type":"summary","summary":"总结","leafUuid":"x"}"#.to_string(),
+        ];
+        let m = parse_meta(&head, &[]);
+        assert_eq!(m.title.as_deref(), Some("总结"));
     }
 }
