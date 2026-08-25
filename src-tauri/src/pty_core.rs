@@ -39,6 +39,13 @@ pub fn spawn(
     cmd.args(args);
     cmd.env("TERM", "xterm-256color");
     if std::env::var("LANG").is_err() { cmd.env("LANG", "en_US.UTF-8"); }
+    // aTerm 可能从 Claude 会话内启动；剥离继承的 CLAUDE* 变量，避免内部 claude 误判为子会话。
+    // zsh -l 会重新 source 用户 profile，用户自己 export 的变量不受影响。
+    for (key, _) in std::env::vars() {
+        if key.starts_with("CLAUDE") {
+            cmd.env_remove(&key);
+        }
+    }
     if let Some(d) = cwd { cmd.cwd(d); }
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
@@ -115,5 +122,24 @@ mod tests {
         h.kill();
         let _ = erx.recv_timeout(Duration::from_secs(5)).expect("kill 后应收到退出事件");
         assert!(!h.is_alive());
+    }
+
+    #[test]
+    fn claude_env_vars_are_stripped_from_child() {
+        std::env::set_var("CLAUDE_PROBE_FOR_TEST", "1");
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (etx, erx) = std::sync::mpsc::channel::<u32>();
+        let _h = spawn("/usr/bin/env", &[], None, None, 80, 24,
+            Box::new(move |b| { let _ = tx.send(b.to_vec()); }),
+            Box::new(move |c| { let _ = etx.send(c); }),
+        ).unwrap();
+        let code = erx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(code, 0);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut all = Vec::new();
+        while let Ok(chunk) = rx.try_recv() { all.extend(chunk); }
+        let out = String::from_utf8_lossy(&all);
+        assert!(out.contains("TERM=xterm-256color"), "sanity: env output visible, got: {out}");
+        assert!(!out.contains("CLAUDE_PROBE_FOR_TEST"), "CLAUDE* var leaked into child: {out}");
     }
 }
