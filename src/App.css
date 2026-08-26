@@ -41,6 +41,8 @@ body {
 .sidebar-list { flex: 1; min-height: 0; overflow-y: auto; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .tabbar { display: flex; gap: 4px; padding: 6px 8px 0; background: var(--color-panel); border-bottom: 1px solid var(--color-border); overflow-x: auto; }
+.sidebar-toggle { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-right: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.sidebar-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 .tab { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 7px 7px 0 0; background: var(--color-elevated); color: var(--color-text-dim); cursor: default; white-space: nowrap; font-size: 13px; }
 .tab.active { background: var(--color-bg); color: var(--color-text); }
 .tab-close { padding: 0 2px; border-radius: 4px; }

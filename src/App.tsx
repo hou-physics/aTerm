@@ -5,21 +5,35 @@ import { HomePage } from './components/HomePage'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
 import { TerminalView } from './components/TerminalView'
+import { useLayout } from './store/layout'
 import { useSessions } from './store/sessions'
 import { useTabs } from './store/tabs'
 
 export default function App() {
   const { tabs, activeId } = useTabs()
   const refresh = useSessions((s) => s.refresh)
+  const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed)
   useEffect(() => {
     refresh().catch(console.error)
     const onFocus = () => { refresh().catch(console.error) }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [refresh])
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.metaKey) return
+      const key = e.key.toLowerCase()
+      if (key === 'b') {
+        e.preventDefault()
+        useLayout.getState().toggleSidebar()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
   return (
     <div className="app">
-      <aside className="sidebar"><Sidebar /></aside>
+      {!sidebarCollapsed && <aside className="sidebar"><Sidebar /></aside>}
       <div className="main">
         <TabBar />
         <div className="content">
