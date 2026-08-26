@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { wheelDeltaToLines } from '../wheel'
+import { createWheelAmplifier, wheelDeltaToLines } from '../wheel'
 
 describe('wheelDeltaToLines', () => {
   it('像素模式按 cellH 换算并放大 multiplier 倍', () => {
@@ -32,5 +32,39 @@ describe('wheelDeltaToLines', () => {
     const second = wheelDeltaToLines(1, 1, 24, 17, 0.5, first.remainder)
     expect(second.lines).toBe(1)
     expect(second.remainder).toBeCloseTo(0)
+  })
+})
+
+describe('createWheelAmplifier', () => {
+  it('重入守卫使一次真实事件恰好产生 multiplier-1 次真正补发，而非无限递归', () => {
+    // 模拟 xterm 的行为：target 上挂的监听器对合成事件也会再次调用 amplify——
+    // 若没有重入守卫，这会无限递归下去；有守卫时，嵌套调用应直接空转。
+    const target = document.createElement('div')
+    const multiplier = 4
+    const amplify = createWheelAmplifier(multiplier)
+    let invocationCount = 0
+    target.addEventListener('wheel', (e) => {
+      invocationCount++
+      amplify(target, e as WheelEvent)
+    })
+
+    const original = new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true })
+    target.dispatchEvent(original)
+
+    // 监听器被调用次数 = 1 次真实事件 + (multiplier - 1) 次真正补发的合成事件；
+    // 若守卫失效，嵌套调用会继续补发，次数会远大于此。
+    expect(invocationCount).toBe(multiplier)
+  })
+
+  it('multiplier=1 时不补发任何合成事件', () => {
+    const target = document.createElement('div')
+    const amplify = createWheelAmplifier(1)
+    let invocationCount = 0
+    target.addEventListener('wheel', (e) => {
+      invocationCount++
+      amplify(target, e as WheelEvent)
+    })
+    target.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true }))
+    expect(invocationCount).toBe(1)
   })
 })

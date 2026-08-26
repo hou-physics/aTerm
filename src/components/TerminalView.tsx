@@ -7,10 +7,12 @@ import { ptyResize, ptyWrite } from '../ipc'
 import { attachPty } from '../ptyBuffer'
 import { useLayout } from '../store/layout'
 import { useTheme } from '../store/theme'
-import { wheelDeltaToLines } from '../wheel'
+import { createWheelAmplifier, wheelDeltaToLines } from '../wheel'
 
 // alt-screen（Claude Code 等 TUI）下滚轮换算的放大倍数，便于调参。
 const ALT_WHEEL_MULTIPLIER = 3
+// 应用自己接管鼠标上报（如 Claude TUI）时，每个真实滚轮事件额外补发 (n-1) 个合成事件的倍数，便于调参。
+const ALT_WHEEL_MOUSE_MULTIPLIER = 4
 
 // 滚动条滑块颜色必须走主题设置：xterm 的 SmoothScrollableElement 把颜色写成内联样式，CSS 规则会被覆盖。
 const XTERM_THEME: Record<'dark' | 'light', ITheme> = {
@@ -73,10 +75,16 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     })
 
     // alt-screen 下 xterm 把滚轮转成方向键序列发给应用，scrollSensitivity 不生效，默认体验很慢很粘；
-    // 这里接管滚轮事件自己换算成方向键，实现加速。应用自己接管鼠标上报时原样放行。
+    // 这里接管滚轮事件自己换算成方向键，实现加速。
+    const amplifyMouseWheel = createWheelAmplifier(ALT_WHEEL_MOUSE_MULTIPLIER)
     term.attachCustomWheelEventHandler((ev) => {
       if (term.buffer.active.type !== 'alternate') return true
-      if (term.modes.mouseTrackingMode !== 'none') return true
+      if (term.modes.mouseTrackingMode !== 'none') {
+        // 应用自己在处理鼠标滚轮（Claude TUI 即如此）。不自行拼接转义序列——
+        // 编码协议未知（SGR 1006 / urxvt / X10）；改为在同一目标上补发合成事件，交由 xterm 按当前协议编码。
+        if (ev.target) amplifyMouseWheel(ev.target, ev)
+        return true // 原始事件仍交给 xterm 正常处理
+      }
       const rows = term.rows || 1
       const cellH = (el.clientHeight || rows * 17) / rows
       const { lines, remainder } = wheelDeltaToLines(ev.deltaY, ev.deltaMode, rows, cellH, ALT_WHEEL_MULTIPLIER, wheelRemainder)
@@ -96,10 +104,14 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       e.preventDefault()
       const rows = term.rows || 1
       const cellH = (el.clientHeight || rows * 17) / rows
+      const wheelAmp =
+        term.buffer.active.type !== 'alternate' ? 'off' :
+        term.modes.mouseTrackingMode !== 'none' ? `mouse×${ALT_WHEEL_MOUSE_MULTIPLIER}` :
+        `keys×${ALT_WHEEL_MULTIPLIER}`
       term.write(
         `\r\n\x1b[90m[aTerm 诊断] buffer=${term.buffer.active.type} mouse=${term.modes.mouseTrackingMode} ` +
         `appCursor=${term.modes.applicationCursorKeysMode} rows=${term.rows} cols=${term.cols} ` +
-        `cellH=${cellH.toFixed(1)} fontSize=${term.options.fontSize}\x1b[0m\r\n`,
+        `cellH=${cellH.toFixed(1)} fontSize=${term.options.fontSize} wheelAmp=${wheelAmp}\x1b[0m\r\n`,
       )
     }
     window.addEventListener('keydown', onDiagKeyDown)
