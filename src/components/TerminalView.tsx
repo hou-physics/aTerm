@@ -5,6 +5,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { ptyResize, ptyWrite } from '../ipc'
 import { attachPty } from '../ptyBuffer'
+import { useLayout } from '../store/layout'
 import { useTheme } from '../store/theme'
 
 const XTERM_THEME: Record<'dark' | 'light', ITheme> = {
@@ -21,7 +22,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     const el = elRef.current!
     const term = new Terminal({
       fontFamily: '"SF Mono", Menlo, monospace',
-      fontSize: 13,
+      fontSize: useLayout.getState().fontSize,
       cursorBlink: true,
       scrollback: 10000,
       theme: XTERM_THEME[useTheme.getState().resolved],
@@ -47,6 +48,20 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       }
     })
 
+    let fontSizeFrame = 0
+    const unsubFontSize = useLayout.subscribe((state, prevState) => {
+      if (state.fontSize === prevState.fontSize) return
+      term.options.fontSize = state.fontSize
+      if (fontSizeFrame) { cancelAnimationFrame(fontSizeFrame); fontSizeFrame = 0 }
+      if (el.clientWidth === 0) return // 隐藏标签跳过 fit，激活时的 fit 会带上新字号
+      fontSizeFrame = requestAnimationFrame(() => {
+        fontSizeFrame = 0
+        if (el.clientWidth === 0) return // 帧执行时容器可能已被隐藏
+        fit.fit()
+        void ptyResize(ptyId, term.cols, term.rows)
+      })
+    })
+
     const detach = attachPty(
       ptyId,
       (bytes) => term.write(bytes),
@@ -67,7 +82,8 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     ro.observe(el)
     return () => {
       if (resizeFrame) cancelAnimationFrame(resizeFrame)
-      ro.disconnect(); detach(); unsubTheme(); term.dispose()
+      if (fontSizeFrame) cancelAnimationFrame(fontSizeFrame)
+      ro.disconnect(); detach(); unsubTheme(); unsubFontSize(); term.dispose()
     }
   }, [ptyId])
 

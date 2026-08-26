@@ -26,6 +26,15 @@ export default function App() {
       if (key === 'b') {
         e.preventDefault()
         useLayout.getState().toggleSidebar()
+      } else if (e.key === '=' || e.key === '+') {
+        e.preventDefault()
+        useLayout.getState().adjustFontSize(1)
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault()
+        useLayout.getState().adjustFontSize(-1)
+      } else if (e.key === '0') {
+        e.preventDefault()
+        useLayout.getState().resetFontSize()
       }
     }
     window.addEventListener('keydown', onKeyDown)
