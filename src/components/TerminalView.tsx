@@ -8,9 +8,20 @@ import { attachPty } from '../ptyBuffer'
 import { useLayout } from '../store/layout'
 import { useTheme } from '../store/theme'
 
+// 滚动条滑块颜色必须走主题设置：xterm 的 SmoothScrollableElement 把颜色写成内联样式，CSS 规则会被覆盖。
 const XTERM_THEME: Record<'dark' | 'light', ITheme> = {
-  dark: { background: '#15161e', foreground: '#c0caf5', cursor: '#c0caf5', selectionBackground: '#3d59a166' },
-  light: { background: '#ffffff', foreground: '#2a2a35', cursor: '#2a2a35', selectionBackground: '#3d59a133' },
+  dark: {
+    background: '#15161e', foreground: '#c0caf5', cursor: '#c0caf5', selectionBackground: '#3d59a166',
+    scrollbarSliderBackground: 'rgba(192,202,245,0.35)',
+    scrollbarSliderHoverBackground: 'rgba(192,202,245,0.55)',
+    scrollbarSliderActiveBackground: 'rgba(192,202,245,0.75)',
+  },
+  light: {
+    background: '#ffffff', foreground: '#2a2a35', cursor: '#2a2a35', selectionBackground: '#3d59a133',
+    scrollbarSliderBackground: 'rgba(42,42,53,0.35)',
+    scrollbarSliderHoverBackground: 'rgba(42,42,53,0.55)',
+    scrollbarSliderActiveBackground: 'rgba(42,42,53,0.75)',
+  },
 }
 
 export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean }) {
@@ -26,7 +37,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       cursorBlink: true,
       scrollback: 10000,
       // 默认 1 档对触控板过慢；按住 Option 走 fastScroll 档。
-      scrollSensitivity: 3,
+      scrollSensitivity: 5,
       fastScrollSensitivity: 12,
       theme: XTERM_THEME[useTheme.getState().resolved],
     })
