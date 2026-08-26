@@ -25,6 +25,9 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       fontSize: useLayout.getState().fontSize,
       cursorBlink: true,
       scrollback: 10000,
+      // 默认 1 档对触控板过慢；按住 Option 走 fastScroll 档。
+      scrollSensitivity: 3,
+      fastScrollSensitivity: 12,
       theme: XTERM_THEME[useTheme.getState().resolved],
     })
     const fit = new FitAddon()
