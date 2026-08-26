@@ -7,6 +7,10 @@ import { ptyResize, ptyWrite } from '../ipc'
 import { attachPty } from '../ptyBuffer'
 import { useLayout } from '../store/layout'
 import { useTheme } from '../store/theme'
+import { wheelDeltaToLines } from '../wheel'
+
+// alt-screen（Claude Code 等 TUI）下滚轮换算的放大倍数，便于调参。
+const ALT_WHEEL_MULTIPLIER = 3
 
 // 滚动条滑块颜色必须走主题设置：xterm 的 SmoothScrollableElement 把颜色写成内联样式，CSS 规则会被覆盖。
 const XTERM_THEME: Record<'dark' | 'light', ITheme> = {
@@ -28,6 +32,9 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
   const elRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  const activeRef = useRef(active)
+
+  useEffect(() => { activeRef.current = active }, [active])
 
   useEffect(() => {
     const el = elRef.current!
@@ -44,6 +51,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+    el.classList.toggle('alt-screen', term.buffer.active.type === 'alternate')
     try {
       const webgl = new WebglAddon()
       webgl.onContextLoss(() => { webgl.dispose() }) // 上下文丢失时退回 DOM 渲染
@@ -55,6 +63,46 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     termRef.current = term
     fitRef.current = fit
     term.onData((d) => { void ptyWrite(ptyId, d) })
+
+    // alt-screen（Claude Code 等 TUI）：无回滚，xterm 会渲染一条无意义的满高滚动条——切到该 buffer 时隐藏它；
+    // 同时清空滚轮累积余量，避免残留分数跨模式泄漏。
+    let wheelRemainder = 0
+    const bufferChangeDisposable = term.buffer.onBufferChange(() => {
+      el.classList.toggle('alt-screen', term.buffer.active.type === 'alternate')
+      wheelRemainder = 0
+    })
+
+    // alt-screen 下 xterm 把滚轮转成方向键序列发给应用，scrollSensitivity 不生效，默认体验很慢很粘；
+    // 这里接管滚轮事件自己换算成方向键，实现加速。应用自己接管鼠标上报时原样放行。
+    term.attachCustomWheelEventHandler((ev) => {
+      if (term.buffer.active.type !== 'alternate') return true
+      if (term.modes.mouseTrackingMode !== 'none') return true
+      const rows = term.rows || 1
+      const cellH = (el.clientHeight || rows * 17) / rows
+      const { lines, remainder } = wheelDeltaToLines(ev.deltaY, ev.deltaMode, rows, cellH, ALT_WHEEL_MULTIPLIER, wheelRemainder)
+      wheelRemainder = remainder
+      if (lines === 0) return false
+      const prefix = term.modes.applicationCursorKeysMode ? '\x1bO' : '\x1b['
+      const key = lines > 0 ? 'B' : 'A'
+      const n = Math.min(Math.abs(lines), 40) // 单次事件封顶，避免刷屏
+      void ptyWrite(ptyId, (prefix + key).repeat(n))
+      return false
+    })
+
+    // ⌘⇧D：打印一行诊断信息（仅本地渲染，不发送给 shell），用于确认 buffer/鼠标模式等运行时真实状态。
+    const onDiagKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey && e.shiftKey && e.key.toLowerCase() === 'd')) return
+      if (!activeRef.current) return
+      e.preventDefault()
+      const rows = term.rows || 1
+      const cellH = (el.clientHeight || rows * 17) / rows
+      term.write(
+        `\r\n\x1b[90m[aTerm 诊断] buffer=${term.buffer.active.type} mouse=${term.modes.mouseTrackingMode} ` +
+        `appCursor=${term.modes.applicationCursorKeysMode} rows=${term.rows} cols=${term.cols} ` +
+        `cellH=${cellH.toFixed(1)} fontSize=${term.options.fontSize}\x1b[0m\r\n`,
+      )
+    }
+    window.addEventListener('keydown', onDiagKeyDown)
 
     const unsubTheme = useTheme.subscribe((state, prevState) => {
       if (state.resolved !== prevState.resolved) {
@@ -97,6 +145,8 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     return () => {
       if (resizeFrame) cancelAnimationFrame(resizeFrame)
       if (fontSizeFrame) cancelAnimationFrame(fontSizeFrame)
+      window.removeEventListener('keydown', onDiagKeyDown)
+      bufferChangeDisposable.dispose()
       ro.disconnect(); detach(); unsubTheme(); unsubFontSize(); term.dispose()
     }
   }, [ptyId])
