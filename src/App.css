@@ -11,6 +11,11 @@
   --color-term-bg: #15161e;
   --color-tab-close-hover-bg: #3b3d57;
   --color-tab-close-hover-text: #fff;
+  --color-slider: rgba(192,202,245,0.20);
+  --color-slider-hover: rgba(192,202,245,0.34);
+  --color-slider-active: rgba(192,202,245,0.48);
+  --color-slider-shadow: rgba(0,0,0,0.35);
+  --vscode-scrollbar-shadow: var(--color-slider-shadow);
 }
 
 :root[data-theme='light'] {
@@ -26,6 +31,11 @@
   --color-term-bg: #ffffff;
   --color-tab-close-hover-bg: #d5d5dc;
   --color-tab-close-hover-text: #2a2a35;
+  --color-slider: rgba(42,42,53,0.22);
+  --color-slider-hover: rgba(42,42,53,0.36);
+  --color-slider-active: rgba(42,42,53,0.5);
+  --color-slider-shadow: rgba(0,0,0,0.12);
+  --vscode-scrollbar-shadow: var(--color-slider-shadow);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -54,17 +64,18 @@ body {
 .terminal-host { width: 100%; height: 100%; }
 
 .sidebar-list::-webkit-scrollbar,
-.home-wrap::-webkit-scrollbar,
-.term-wrap .xterm-viewport::-webkit-scrollbar { width: 8px; }
+.home-wrap::-webkit-scrollbar { width: 8px; }
 .sidebar-list::-webkit-scrollbar-track,
-.home-wrap::-webkit-scrollbar-track,
-.term-wrap .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+.home-wrap::-webkit-scrollbar-track { background: transparent; }
 .sidebar-list::-webkit-scrollbar-thumb,
-.home-wrap::-webkit-scrollbar-thumb,
-.term-wrap .xterm-viewport::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+.home-wrap::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 .sidebar-list::-webkit-scrollbar-thumb:hover,
-.home-wrap::-webkit-scrollbar-thumb:hover,
-.term-wrap .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+.home-wrap::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+
+/* xterm 6 用 VS Code ScrollableElement 渲染滚动条（非原生），需自行上色 */
+.xterm .xterm-scrollable-element > .scrollbar > .slider { background: var(--color-slider); border-radius: 5px; }
+.xterm .xterm-scrollable-element > .scrollbar > .slider:hover { background: var(--color-slider-hover); }
+.xterm .xterm-scrollable-element > .scrollbar > .slider.active { background: var(--color-slider-active); }
 .section-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .08em; margin: 14px 0 8px; }
 .side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-item:hover { background: var(--color-elevated); }
