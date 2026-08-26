@@ -47,6 +47,8 @@ body {
 .tab.active { background: var(--color-bg); color: var(--color-text); }
 .tab-close { padding: 0 2px; border-radius: 4px; }
 .tab-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
+.tab-new { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.tab-new:hover { border-color: var(--color-accent); color: var(--color-text); }
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .home-wrap { position: absolute; inset: 0; overflow-y: auto; }
 .term-wrap { position: absolute; inset: 0; background: var(--color-term-bg); padding: 4px 6px 6px 6px; overscroll-behavior: contain; }

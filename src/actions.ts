@@ -16,3 +16,6 @@ export const runCommand = (cmd: string) => {
   const c = cmd.trim()
   return useTabs.getState().openTerminal(c ? { title: c.slice(0, 24), inject: c } : { title: 'zsh' })
 }
+
+// 新建一个空白登录 shell 标签（＋ 按钮、⌘T 共用的入口）
+export const newTerminal = () => runCommand('')

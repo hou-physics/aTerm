@@ -1,6 +1,7 @@
 import './ptyBuffer'
 import './App.css'
 import { useEffect } from 'react'
+import { newTerminal } from './actions'
 import { HomePage } from './components/HomePage'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
@@ -35,6 +36,12 @@ export default function App() {
       } else if (e.key === '0') {
         e.preventDefault()
         useLayout.getState().resetFontSize()
+      } else if (key === 't') {
+        e.preventDefault()
+        void newTerminal()
+      } else if (key === 'w') {
+        e.preventDefault()
+        void useTabs.getState().closeTab(useTabs.getState().activeId)
       }
     }
     window.addEventListener('keydown', onKeyDown)

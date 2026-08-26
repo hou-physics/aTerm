@@ -36,9 +36,13 @@ describe('useTabs', () => {
     expect(ipc.ptyKill).toHaveBeenCalledWith('pty-9')
     expect(useTabs.getState().activeId).toBe('home')
   })
-  it('home 不可关闭', async () => {
-    await useTabs.getState().closeTab('home', async () => true)
+  it('home 不可关闭（⌘W 作用于 home 时应为空操作，无需确认弹窗）', async () => {
+    const confirmFn = vi.fn(async () => true)
+    await useTabs.getState().closeTab('home', confirmFn)
     expect(useTabs.getState().tabs).toHaveLength(1)
+    expect(useTabs.getState().activeId).toBe('home')
+    expect(confirmFn).not.toHaveBeenCalled()
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
   })
   it('focusThread：已存在的 threadKey 激活原标签且不重新 spawn，未知 key 返回 false', async () => {
     // threadKey 采用「项目:会话」复合键格式（见 resumeThread），store 层本身按不透明字符串处理

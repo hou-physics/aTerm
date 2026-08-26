@@ -1,3 +1,4 @@
+import { newTerminal } from '../actions'
 import { useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
 
@@ -23,6 +24,14 @@ export function TabBar() {
           )}
         </div>
       ))}
+      <button
+        type="button"
+        className="tab-new"
+        onClick={() => void newTerminal()}
+        title="新建终端标签 (⌘T)"
+      >
+        ＋
+      </button>
     </div>
   )
 }
