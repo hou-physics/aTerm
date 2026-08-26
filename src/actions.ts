@@ -1,9 +1,12 @@
 import type { ThreadInfo } from './ipc'
 import { useTabs } from './store/tabs'
 
-export const resumeThread = (cwd: string, t: ThreadInfo) => {
-  if (useTabs.getState().focusThread(t.rootKey)) return
-  return useTabs.getState().openTerminal({ title: t.title, cwd, inject: `claude --resume ${t.resumeSessionId}`, threadKey: t.rootKey })
+export const resumeThread = (dirName: string, cwd: string, t: ThreadInfo) => {
+  // rootKey 仅在单个项目目录内保证唯一（见 Rust 侧 sessions/scan.rs 按目录分组），
+  // 跨项目需以「项目:会话」复合键去重，避免误切到同名会话所在的其他项目终端。
+  const threadKey = `${dirName}:${t.rootKey}`
+  if (useTabs.getState().focusThread(threadKey)) return
+  return useTabs.getState().openTerminal({ title: t.title, cwd, inject: `claude --resume ${t.resumeSessionId}`, threadKey })
 }
 
 export const newConversation = (cwd: string) =>
