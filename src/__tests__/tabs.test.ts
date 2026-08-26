@@ -38,4 +38,19 @@ describe('useTabs', () => {
     await useTabs.getState().closeTab('home', async () => true)
     expect(useTabs.getState().tabs).toHaveLength(1)
   })
+  it('focusThread：已存在的 threadKey 激活原标签且不重新 spawn，未知 key 返回 false', async () => {
+    await useTabs.getState().openTerminal({ title: '修复登录', cwd: '/tmp/p', inject: 'claude --resume abc', threadKey: 'thread-abc' })
+    const tabId = useTabs.getState().tabs[1].id
+    useTabs.getState().setActive('home')
+    vi.clearAllMocks()
+
+    const found = useTabs.getState().focusThread('thread-abc')
+    expect(found).toBe(true)
+    expect(useTabs.getState().activeId).toBe(tabId)
+    expect(useTabs.getState().tabs).toHaveLength(2)
+    expect(ipc.ptySpawn).not.toHaveBeenCalled()
+
+    const missing = useTabs.getState().focusThread('thread-unknown')
+    expect(missing).toBe(false)
+  })
 })
