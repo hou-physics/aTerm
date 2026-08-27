@@ -1,13 +1,14 @@
 import './ptyBuffer'
 import './closeRequest'
 import './App.css'
-import { useEffect } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { newTerminal } from './actions'
 import { ConversationPanel } from './components/ConversationPanel'
 import { HomePage } from './components/HomePage'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
-import { TerminalView } from './components/TerminalView'
+import { TabPanes } from './components/TabPanes'
+import { fitsPanes, MAX_PANES, neighborPaneId } from './paneLayout'
 import { useLayout } from './store/layout'
 import { useSessions } from './store/sessions'
 import { useTabs } from './store/tabs'
@@ -16,6 +17,20 @@ export default function App() {
   const { tabs, activeId } = useTabs()
   const refresh = useSessions((s) => s.refresh)
   const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed)
+  const contentRef = useRef<HTMLDivElement>(null)
+  // ⌘D 拒绝新建窗格（已达 3 个 / 窄窗口装不下）时的轻提示：不用对话框，几秒后自行
+  // 消失（设计文档 §5-A"无对话，内联自消失提示即可"）。只是 App 内部的瞬时 UI
+  // 状态，不进 store。
+  const [hint, setHint] = useState<string | null>(null)
+  const hintTimerRef = useRef<number | undefined>(undefined)
+  const showHint = useCallback((msg: string) => {
+    setHint(msg)
+    if (hintTimerRef.current) window.clearTimeout(hintTimerRef.current)
+    hintTimerRef.current = window.setTimeout(() => setHint(null), 2200)
+  }, [])
+  useEffect(() => () => {
+    if (hintTimerRef.current) window.clearTimeout(hintTimerRef.current)
+  }, [])
   useEffect(() => {
     refresh().catch(console.error)
     const onFocus = () => { refresh().catch(console.error) }
@@ -61,7 +76,49 @@ export default function App() {
         useLayout.getState().togglePanel()
       } else if (key === 'w') {
         e.preventDefault()
-        void useTabs.getState().closeTab(useTabs.getState().activeId)
+        // ⌘W 关闭当前标签的聚焦窗格；closePane 内部在标签只剩一个窗格时会自己
+        // 委托给 closeTab（等同关闭整个标签，沿用既有确认），这里不用分支判断
+        // "是不是最后一个窗格"（设计文档 §6）。
+        const { tabs, activeId } = useTabs.getState()
+        const tab = tabs.find((t) => t.id === activeId)
+        if (tab?.kind === 'term' && tab.activePaneId) {
+          void useTabs.getState().closePane(activeId, tab.activePaneId)
+        }
+      } else if (key === 'd') {
+        e.preventDefault()
+        // ⌘D：在当前标签聚焦窗格右侧新建一个窗格（设计文档 §5-A）。三层前置检查，
+        // 任一不满足就拒绝并给出轻提示，绝不去挤压已有窗格：
+        //   1) 硬上限 3 个窗格；
+        //   2) 当前内容区宽度能否让 N+1 个窗格各自达到 320px 最小宽度；
+        //   3) 不行的话，收起对话面板腾出的宽度够不够（够就先收起面板再建）
+        //      （设计文档 §8"优先收起对话面板，仍不足则拒绝新建"）。
+        const { tabs, activeId } = useTabs.getState()
+        const tab = tabs.find((t) => t.id === activeId)
+        if (!tab || tab.kind !== 'term' || !tab.activePaneId) return
+        const nextCount = tab.panes.length + 1
+        if (nextCount > MAX_PANES) {
+          showHint('最多支持 3 个窗格')
+          return
+        }
+        const contentWidth = contentRef.current?.clientWidth ?? 0
+        const layout = useLayout.getState()
+        if (fitsPanes(nextCount, contentWidth)) {
+          useTabs.getState().addPane(tab.id, tab.activePaneId)
+        } else if (!layout.panelCollapsed && fitsPanes(nextCount, contentWidth + layout.panelWidth)) {
+          layout.togglePanel()
+          useTabs.getState().addPane(tab.id, tab.activePaneId)
+        } else {
+          showHint('窗口太窄，放不下新窗格')
+        }
+      } else if (e.altKey && (key === 'arrowleft' || key === 'arrowright')) {
+        e.preventDefault()
+        // ⌘⌥←/→：在当前标签的窗格间移动焦点，不跨标签、边界不循环（设计文档 §6）。
+        // 到达边界时 neighborPaneId 返回 undefined，原样保持当前焦点不变。
+        const { tabs, activeId } = useTabs.getState()
+        const tab = tabs.find((t) => t.id === activeId)
+        if (!tab || tab.kind !== 'term') return
+        const nextId = neighborPaneId(tab.panes.map((p) => p.id), tab.activePaneId, key === 'arrowright' ? 1 : -1)
+        if (nextId) useTabs.getState().focusPane(tab.id, nextId)
       }
     }
     // 捕获阶段注册：终端（xterm）在冒泡阶段可能会先吃掉 Ctrl+Tab 这类组合键，
@@ -70,23 +127,20 @@ export default function App() {
     // preventDefault/stopPropagation，其余按键不受影响，仍会照常落到终端。
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [])
+  }, [showHint])
   return (
     <div className="app">
       {!sidebarCollapsed && <aside className="sidebar"><Sidebar /></aside>}
       <div className="main">
         <TabBar />
-        <div className="content">
+        <div className="content" ref={contentRef}>
           <div className="home-wrap" style={{ display: activeId === 'home' ? 'block' : 'none' }}>
             <HomePage />
           </div>
-          {tabs.filter((t) => t.kind === 'term').flatMap((t) =>
-            t.panes.map((p) => (
-              <div key={p.id} className="term-wrap" style={{ display: activeId === t.id ? 'block' : 'none' }}>
-                <TerminalView ptyId={p.ptyId} active={activeId === t.id} />
-              </div>
-            )),
-          )}
+          {tabs.filter((t) => t.kind === 'term').map((t) => (
+            <TabPanes key={t.id} tab={t} isActiveTab={activeId === t.id} />
+          ))}
+          {hint && <div className="pane-hint">{hint}</div>}
         </div>
       </div>
       <ConversationPanel />
