@@ -16,8 +16,8 @@ export function buildExitConfirmMessage(liveCount: number): string {
 async function countLiveTerminalTabs(): Promise<number> {
   const ptyIds = useTabs
     .getState()
-    .tabs.filter((t): t is typeof t & { ptyId: string } => t.kind === 'term' && Boolean(t.ptyId))
-    .map((t) => t.ptyId)
+    .tabs.filter((t) => t.kind === 'term')
+    .flatMap((t) => t.panes.map((p) => p.ptyId))
   const alive = await Promise.all(ptyIds.map((id) => ptyIsAlive(id).catch(() => false)))
   return alive.filter(Boolean).length
 }

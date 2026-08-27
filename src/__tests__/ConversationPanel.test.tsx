@@ -25,7 +25,7 @@ const CONV = {
 }
 
 beforeEach(() => {
-  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页' }], activeId: 'home' })
+  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
   // store/layout.ts 的 panelCollapsed 默认值现在是 true（首次启动默认收起，见该文件的
   // PANEL_COLLAPSED_DEFAULT）；本文件绝大多数用例都假定面板处于展开态才有意义，这里统一
   // 兜底展开，需要验证折叠行为的用例（如下方"折叠时不加载"一组）会自行覆盖这个状态。
@@ -44,8 +44,8 @@ describe('ConversationPanel', () => {
     vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
     useTabs.setState({
       tabs: [
-        { id: 'home', kind: 'home', title: '主页' },
-        { id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' },
+        { id: 'home', kind: 'home', title: '主页', panes: [] },
+        { id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' },
       ],
       activeId: 'tab-1',
     })
@@ -62,7 +62,7 @@ describe('ConversationPanel', () => {
   it('点击刷新按钮重新请求正文', async () => {
     vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     render(<ConversationPanel />)
@@ -74,7 +74,7 @@ describe('ConversationPanel', () => {
   it('加载失败时显示错误文案（拒绝的 promise 被妥善处理，不抛出未捕获异常）', async () => {
     vi.mocked(ipc.readConversation).mockRejectedValue(new Error('找不到会话链'))
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     render(<ConversationPanel />)
@@ -91,8 +91,8 @@ describe('ConversationPanel', () => {
     )
     useTabs.setState({
       tabs: [
-        { id: 'tab-a', kind: 'term', title: 'A', dirName: 'proj-a', rootKey: 'root-a' },
-        { id: 'tab-b', kind: 'term', title: 'B', dirName: 'proj-b', rootKey: 'root-b' },
+        { id: 'tab-a', kind: 'term', title: 'A', panes: [{ id: 'pane-tab-a', ptyId: 'pty-tab-a', title: 'A', dirName: 'proj-a', rootKey: 'root-a' }], activePaneId: 'pane-tab-a' },
+        { id: 'tab-b', kind: 'term', title: 'B', panes: [{ id: 'pane-tab-b', ptyId: 'pty-tab-b', title: 'B', dirName: 'proj-b', rootKey: 'root-b' }], activePaneId: 'pane-tab-b' },
       ],
       activeId: 'tab-a',
     })
@@ -144,7 +144,7 @@ describe('ConversationPanel — 时间线日期分组可折叠', () => {
   it('只展开最新一天的分组，其余日期默认折叠并显示条目数', async () => {
     vi.mocked(ipc.readConversation).mockResolvedValue(TWO_DAY_CONV)
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     render(<ConversationPanel />)
@@ -161,7 +161,7 @@ describe('ConversationPanel — 时间线日期分组可折叠', () => {
   it('点击折叠的分组标题展开条目，再点击收起', async () => {
     vi.mocked(ipc.readConversation).mockResolvedValue(TWO_DAY_CONV)
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     render(<ConversationPanel />)
@@ -187,8 +187,8 @@ describe('ConversationPanel — 时间线日期分组可折叠', () => {
     )
     useTabs.setState({
       tabs: [
-        { id: 'tab-a', kind: 'term', title: 'A', dirName: 'proj-a', rootKey: 'root-a' },
-        { id: 'tab-b', kind: 'term', title: 'B', dirName: 'proj-b', rootKey: 'root-b' },
+        { id: 'tab-a', kind: 'term', title: 'A', panes: [{ id: 'pane-tab-a', ptyId: 'pty-tab-a', title: 'A', dirName: 'proj-a', rootKey: 'root-a' }], activePaneId: 'pane-tab-a' },
+        { id: 'tab-b', kind: 'term', title: 'B', panes: [{ id: 'pane-tab-b', ptyId: 'pty-tab-b', title: 'B', dirName: 'proj-b', rootKey: 'root-b' }], activePaneId: 'pane-tab-b' },
       ],
       activeId: 'tab-a',
     })
@@ -263,7 +263,7 @@ describe('ConversationPanel — 时间线区域整体高度可拖拽 + 双击折
     useLayout.setState({ timelineHeight: 220, timelineCollapsed: false })
     vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
   })
@@ -370,7 +370,7 @@ describe('ConversationPanel — 渲染时钳制时间线高度（不仅是拖拽
     useLayout.setState({ timelineHeight: 1000, timelineCollapsed: false })
     vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
@@ -395,7 +395,7 @@ describe('ConversationPanel — 渲染时钳制时间线高度（不仅是拖拽
     useLayout.setState({ timelineHeight: 220, timelineCollapsed: false })
     vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
@@ -431,7 +431,7 @@ describe('ConversationPanel — 折叠态完全消失，唯一开关在 TabBar',
   it('面板不再自带折叠按钮，展开态头部只有刷新按钮', async () => {
     vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     render(<ConversationPanel />)
@@ -475,9 +475,9 @@ describe('ConversationPanel — 折叠时不加载，展开时按需补载', () 
     useLayout.setState({ panelCollapsed: true })
     useTabs.setState({
       tabs: [
-        { id: 'home', kind: 'home', title: '主页' },
-        { id: 'tab-a', kind: 'term', title: 'A', dirName: 'proj-a', rootKey: 'root-a' },
-        { id: 'tab-b', kind: 'term', title: 'B', dirName: 'proj-b', rootKey: 'root-b' },
+        { id: 'home', kind: 'home', title: '主页', panes: [] },
+        { id: 'tab-a', kind: 'term', title: 'A', panes: [{ id: 'pane-tab-a', ptyId: 'pty-tab-a', title: 'A', dirName: 'proj-a', rootKey: 'root-a' }], activePaneId: 'pane-tab-a' },
+        { id: 'tab-b', kind: 'term', title: 'B', panes: [{ id: 'pane-tab-b', ptyId: 'pty-tab-b', title: 'B', dirName: 'proj-b', rootKey: 'root-b' }], activePaneId: 'pane-tab-b' },
       ],
       activeId: 'home',
     })
@@ -497,7 +497,7 @@ describe('ConversationPanel — 折叠时不加载，展开时按需补载', () 
     vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
     useLayout.setState({ panelCollapsed: true })
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     render(<ConversationPanel />)
@@ -522,7 +522,7 @@ describe('ConversationPanel — 折叠时不加载，展开时按需补载', () 
     vi.mocked(ipc.readConversation).mockReturnValue(pending)
     useLayout.setState({ panelCollapsed: false })
     useTabs.setState({
-      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', panes: [{ id: 'pane-tab-1', ptyId: 'pty-tab-1', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }], activePaneId: 'pane-tab-1' }],
       activeId: 'tab-1',
     })
     render(<ConversationPanel />)

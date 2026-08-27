@@ -80,11 +80,13 @@ export default function App() {
           <div className="home-wrap" style={{ display: activeId === 'home' ? 'block' : 'none' }}>
             <HomePage />
           </div>
-          {tabs.filter((t) => t.kind === 'term').map((t) => (
-            <div key={t.id} className="term-wrap" style={{ display: activeId === t.id ? 'block' : 'none' }}>
-              <TerminalView ptyId={t.ptyId!} active={activeId === t.id} />
-            </div>
-          ))}
+          {tabs.filter((t) => t.kind === 'term').flatMap((t) =>
+            t.panes.map((p) => (
+              <div key={p.id} className="term-wrap" style={{ display: activeId === t.id ? 'block' : 'none' }}>
+                <TerminalView ptyId={p.ptyId} active={activeId === t.id} />
+              </div>
+            )),
+          )}
         </div>
       </div>
       <ConversationPanel />

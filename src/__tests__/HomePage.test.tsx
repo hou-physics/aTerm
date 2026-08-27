@@ -23,7 +23,7 @@ const PROJECTS = [{
 
 beforeEach(() => {
   useSessions.setState({ projects: PROJECTS as never, loading: false })
-  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页' }], activeId: 'home' })
+  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
   vi.clearAllMocks()
 })
 

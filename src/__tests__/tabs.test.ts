@@ -13,7 +13,7 @@ import { useTabs } from '../store/tabs'
 import type { ThreadInfo } from '../ipc'
 
 beforeEach(() => {
-  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页' }], activeId: 'home' })
+  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
   vi.clearAllMocks()
 })
 
@@ -22,7 +22,9 @@ describe('useTabs', () => {
     await useTabs.getState().openTerminal({ title: '修复登录', cwd: '/tmp/p', inject: 'claude --resume abc' })
     const { tabs, activeId } = useTabs.getState()
     expect(tabs).toHaveLength(2)
-    expect(tabs[1]).toMatchObject({ kind: 'term', title: '修复登录', ptyId: 'pty-9' })
+    // ptyId 现在挂在该标签唯一的 pane 上，不再直接挂在 Tab 上（见 store/tabs.ts 的 Pane 类型）。
+    expect(tabs[1]).toMatchObject({ kind: 'term', title: '修复登录' })
+    expect(tabs[1].panes[0]).toMatchObject({ ptyId: 'pty-9' })
     expect(activeId).toBe(tabs[1].id)
     expect(ipc.ptySpawn).toHaveBeenCalledWith({ cwd: '/tmp/p', inject: 'claude --resume abc', cols: 80, rows: 24 })
   })
@@ -69,8 +71,9 @@ describe('useTabs', () => {
 
     const { tabs } = useTabs.getState()
     expect(tabs).toHaveLength(3)
-    expect(tabs[1].threadKey).toBe('proj-a:r1')
-    expect(tabs[2].threadKey).toBe('proj-b:r1')
+    // threadKey 现在挂在 pane 上（见上面 tabs[1]/tabs[2] 的 panes[0]），不再直接挂在 Tab 上。
+    expect(tabs[1].panes[0].threadKey).toBe('proj-a:r1')
+    expect(tabs[2].panes[0].threadKey).toBe('proj-b:r1')
     expect(ipc.ptySpawn).toHaveBeenCalledTimes(2)
 
     // 再次 resumeThread 同一项目同一 rootKey 应命中原标签而非新开
@@ -79,5 +82,46 @@ describe('useTabs', () => {
     expect(useTabs.getState().tabs).toHaveLength(3)
     expect(useTabs.getState().activeId).toBe(tabs[1].id)
     expect(ipc.ptySpawn).not.toHaveBeenCalled()
+  })
+})
+
+// 分屏第一步（等价重构）新增的 pane 层测试：Tab 现在持有 panes 数组，但本步骤恒为 1 个，
+// 见 docs/superpowers/specs/2026-08-27-split-view-design.md §2、§10。
+describe('useTabs — pane 层（单窗格等价重构）', () => {
+  it('openTerminal 生成的标签恰好持有一个 pane，并设置 activePaneId', async () => {
+    await useTabs.getState().openTerminal({ title: '修复登录', cwd: '/tmp/p' })
+    const tab = useTabs.getState().tabs[1]
+    expect(tab.panes).toHaveLength(1)
+    expect(tab.panes[0]).toMatchObject({ ptyId: 'pty-9', title: '修复登录' })
+    expect(tab.activePaneId).toBe(tab.panes[0].id)
+  })
+
+  it('focusThread 命中非激活标签中的 pane 时，同时切换 activeId 与该标签的 activePaneId', async () => {
+    await useTabs.getState().openTerminal({ title: 'A', cwd: '/tmp/a', threadKey: 'proj:a' })
+    await useTabs.getState().openTerminal({ title: 'B', cwd: '/tmp/b', threadKey: 'proj:b' })
+    const tabA = useTabs.getState().tabs[1]
+    useTabs.getState().setActive('home') // 切到与 A、B 都无关的标签，确保 A 此刻不是激活标签
+    vi.clearAllMocks()
+
+    const found = useTabs.getState().focusThread('proj:a')
+    expect(found).toBe(true)
+    const { activeId, tabs } = useTabs.getState()
+    expect(activeId).toBe(tabA.id)
+    const refreshedTabA = tabs.find((t) => t.id === tabA.id)!
+    expect(refreshedTabA.activePaneId).toBe(refreshedTabA.panes[0].id)
+    expect(ipc.ptySpawn).not.toHaveBeenCalled() // 命中已有 pane，不重新 spawn
+  })
+
+  it('closeTab 终止该标签下 pane 的 PTY', async () => {
+    await useTabs.getState().openTerminal({ title: 't' })
+    const tab = useTabs.getState().tabs[1]
+    const paneId = tab.panes[0].id
+    const ptyId = tab.panes[0].ptyId
+    expect(paneId).toBeTruthy()
+
+    await useTabs.getState().closeTab(tab.id, async () => true)
+
+    expect(ipc.ptyKill).toHaveBeenCalledWith(ptyId)
+    expect(useTabs.getState().tabs.find((t) => t.id === tab.id)).toBeUndefined()
   })
 })

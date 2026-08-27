@@ -27,8 +27,16 @@ function timelineHeightCap(px: number, containerHeight: number): number {
 }
 
 export function ConversationPanel() {
-  const dirName = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.dirName)
-  const rootKey = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.rootKey)
+  // 派生自「激活标签的激活窗格」，而非直接读标签或拆分 threadKey——窗格才是
+  // dirName/rootKey 的持有者（见 store/tabs.ts 的 Pane 类型）。
+  const dirName = useTabs((s) => {
+    const tab = s.tabs.find((t) => t.id === s.activeId)
+    return tab?.panes.find((p) => p.id === tab.activePaneId)?.dirName
+  })
+  const rootKey = useTabs((s) => {
+    const tab = s.tabs.find((t) => t.id === s.activeId)
+    return tab?.panes.find((p) => p.id === tab.activePaneId)?.rootKey
+  })
   // 提前到这里读取（而不是留在渲染末尾）：下面的 effect 需要把它订阅进依赖数组。
   const panelCollapsed = useLayout((s) => s.panelCollapsed)
   const [conv, setConv] = useState<Conversation | null>(null)

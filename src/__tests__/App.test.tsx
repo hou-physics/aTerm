@@ -21,9 +21,9 @@ vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 import App from '../App'
 import { useTabs } from '../store/tabs'
 
-const HOME = { id: 'home', kind: 'home' as const, title: '主页' }
-const TAB_A = { id: 'tab-a', kind: 'term' as const, title: 'A', ptyId: 'p1' }
-const TAB_B = { id: 'tab-b', kind: 'term' as const, title: 'B', ptyId: 'p2' }
+const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
+const TAB_A = { id: 'tab-a', kind: 'term' as const, title: 'A', panes: [{ id: 'pane-a', ptyId: 'p1', title: 'A' }], activePaneId: 'pane-a' }
+const TAB_B = { id: 'tab-b', kind: 'term' as const, title: 'B', panes: [{ id: 'pane-b', ptyId: 'p2', title: 'B' }], activePaneId: 'pane-b' }
 
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })

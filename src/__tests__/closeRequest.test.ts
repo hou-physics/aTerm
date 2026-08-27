@@ -23,7 +23,7 @@ import { buildExitConfirmMessage, closeRequestReady, handleCloseRequested } from
 import { useTabs } from '../store/tabs'
 
 beforeEach(() => {
-  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页' }], activeId: 'home' })
+  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
   vi.clearAllMocks()
 })
 
@@ -52,10 +52,10 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     await closeRequestReady
     useTabs.setState({
       tabs: [
-        { id: 'home', kind: 'home', title: '主页' },
-        { id: 'tab-a', kind: 'term', title: 'A', ptyId: 'pty-a' },
-        { id: 'tab-b', kind: 'term', title: 'B', ptyId: 'pty-b' },
-        { id: 'tab-c', kind: 'term', title: 'C', ptyId: 'pty-c' },
+        { id: 'home', kind: 'home', title: '主页', panes: [] },
+        { id: 'tab-a', kind: 'term', title: 'A', panes: [{ id: 'pane-tab-a', ptyId: 'pty-a', title: 'A' }], activePaneId: 'pane-tab-a' },
+        { id: 'tab-b', kind: 'term', title: 'B', panes: [{ id: 'pane-tab-b', ptyId: 'pty-b', title: 'B' }], activePaneId: 'pane-tab-b' },
+        { id: 'tab-c', kind: 'term', title: 'C', panes: [{ id: 'pane-tab-c', ptyId: 'pty-c', title: 'C' }], activePaneId: 'pane-tab-c' },
       ],
       activeId: 'tab-a',
     })
@@ -74,7 +74,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
   it('没有任何存活会话时使用简单文案', async () => {
     await closeRequestReady
     useTabs.setState({
-      tabs: [{ id: 'tab-a', kind: 'term', title: 'A', ptyId: 'pty-a' }],
+      tabs: [{ id: 'tab-a', kind: 'term', title: 'A', panes: [{ id: 'pane-tab-a', ptyId: 'pty-a', title: 'A' }], activePaneId: 'pane-tab-a' }],
       activeId: 'tab-a',
     })
     vi.mocked(ipc.ptyIsAlive).mockResolvedValue(false)
@@ -88,7 +88,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
   it('用户取消确认时不调用 confirm_exit', async () => {
     await closeRequestReady
     useTabs.setState({
-      tabs: [{ id: 'tab-a', kind: 'term', title: 'A', ptyId: 'pty-a' }],
+      tabs: [{ id: 'tab-a', kind: 'term', title: 'A', panes: [{ id: 'pane-tab-a', ptyId: 'pty-a', title: 'A' }], activePaneId: 'pane-tab-a' }],
       activeId: 'tab-a',
     })
     vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
@@ -103,7 +103,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
   it('确认对话框仍在等待用户操作时，重复的关闭请求被丢弃（不堆叠出第二个对话框）', async () => {
     await closeRequestReady
     useTabs.setState({
-      tabs: [{ id: 'tab-a', kind: 'term', title: 'A', ptyId: 'pty-a' }],
+      tabs: [{ id: 'tab-a', kind: 'term', title: 'A', panes: [{ id: 'pane-tab-a', ptyId: 'pty-a', title: 'A' }], activePaneId: 'pane-tab-a' }],
       activeId: 'tab-a',
     })
     vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
@@ -137,8 +137,8 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     await closeRequestReady
     useTabs.setState({
       tabs: [
-        { id: 'tab-a', kind: 'term', title: 'A', ptyId: 'pty-a' },
-        { id: 'tab-b', kind: 'term', title: 'B', ptyId: 'pty-b' },
+        { id: 'tab-a', kind: 'term', title: 'A', panes: [{ id: 'pane-tab-a', ptyId: 'pty-a', title: 'A' }], activePaneId: 'pane-tab-a' },
+        { id: 'tab-b', kind: 'term', title: 'B', panes: [{ id: 'pane-tab-b', ptyId: 'pty-b', title: 'B' }], activePaneId: 'pane-tab-b' },
       ],
       activeId: 'tab-a',
     })
