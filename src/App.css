@@ -131,13 +131,15 @@ body {
 .conv-strip-expand { flex: none; width: 22px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .conv-strip-expand:hover { border-color: var(--color-accent); color: var(--color-text); }
 .conv-timeline { flex: none; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--color-border); padding: 6px 10px; }
-.conv-date-label { display: flex; align-items: center; gap: 5px; width: 100%; border: none; background: none; padding: 0; margin: 10px 0 4px; font-family: inherit; font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .04em; text-align: left; cursor: default; }
-.conv-date-label:hover { color: var(--color-text-dim); }
+/* 日期标题不带前置符号（用户明确不要任何图形提示）。可点性改由 cursor + hover 背景/字色
+   传达；负 margin 把 hover 命中区往左右各扩 4px（超出文字本身的排版宽度），让它有块可点的
+   观感，同时不影响文字相对下方时间线条目的水平位置（padding-left 依旧从 0 起算）。 */
+.conv-date-label { display: flex; align-items: center; width: calc(100% + 8px); border: none; background: none; padding: 3px 4px; margin: 10px -4px 4px -4px; border-radius: 6px; font-family: inherit; font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .04em; text-align: left; cursor: pointer; transition: background-color .12s ease, color .12s ease; }
+.conv-date-label:hover { background: var(--color-elevated); color: var(--color-text); }
 .conv-date-label:first-child { margin-top: 4px; }
-.conv-date-disclosure { flex: none; width: 8px; font-size: 9px; }
 .conv-date-count { flex: none; margin-left: auto; color: var(--color-text-faint); }
-/* 缩进层级代替圆点标记条目从属于哪个日期分组：13px = 分组标题的展开三角(8px)
-   + 标题内部 gap(5px)，让条目与标题文字左对齐，视觉上是标题下的一层缩进。 */
+/* 缩进层级代替圆点标记条目从属于哪个日期分组：日期标题不再带前置三角，条目仍固定缩进
+   一级，与标题的 hover 内边距无关，只是视觉上把条目"挂"在标题下面一层。 */
 .conv-timeline-item { display: flex; align-items: baseline; gap: 6px; padding: 3px 4px 3px 13px; border-radius: 6px; font-size: 12.5px; cursor: default; overflow: hidden; }
 .conv-timeline-item:hover { background: var(--color-elevated); }
 .conv-timeline-item .time { color: var(--color-text-faint); flex: none; }

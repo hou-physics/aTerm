@@ -166,7 +166,6 @@ export function ConversationPanel() {
                       aria-expanded={expanded}
                       onClick={() => toggleDateGroup(g.key)}
                     >
-                      <span className="conv-date-disclosure">{expanded ? '▾' : '▸'}</span>
                       {g.label}
                       {!expanded && <span className="conv-date-count">({g.turns.length})</span>}
                     </button>
