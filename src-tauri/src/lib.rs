@@ -135,7 +135,20 @@ pub fn run() {
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
-            replace_quit_menu_item(app)?;
+            {
+                // 启动可用性优先于 ⌘Q 确认：这里替换的是 Tauri 默认菜单的内部结构（见
+                // replace_quit_menu_item 上方的详细注释），一旦未来某次 tauri/muda 升级
+                // 改变了默认菜单的项数/顺序导致这里返回 Err，原先的 `?` 会让它经由
+                // `.setup()` 直接冒泡，被 `.build().expect(...)` 当场 panic 掉——应用
+                // 直接无法启动，这比它想防护的问题（⌘Q 未经确认就退出）严重得多。
+                // 因此改为失败即降级：打印警告后继续启动，此时 ⌘Q 会退回系统默认行为
+                // （bypass 掉关闭确认弹窗，但至少应用能正常打开）。
+                if let Err(e) = replace_quit_menu_item(app) {
+                    eprintln!(
+                        "警告：替换 Quit 菜单项失败，⌘Q 将退回系统默认行为（不会弹出关闭确认）：{e}"
+                    );
+                }
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
