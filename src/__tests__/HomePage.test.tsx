@@ -8,6 +8,9 @@ vi.mock('../ipc', () => ({
   listProjects: vi.fn(async () => []),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
+// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。
+vi.mock('../store/status', () => ({ statusEventsReady: Promise.resolve(), useThreadStatus: () => undefined, useProjectStatus: () => 'unknown' as const }))
 import * as ipc from '../ipc'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'

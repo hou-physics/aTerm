@@ -10,6 +10,9 @@ vi.mock('../ipc', () => ({
   readConversation: vi.fn(),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
+// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。
+vi.mock('../store/status', () => ({ statusEventsReady: Promise.resolve(), useThreadStatus: () => undefined, useProjectStatus: () => 'unknown' as const }))
 // App.tsx 顶层 side-effect 导入，替身掉的理由与 App.test.tsx 完全一致（见该文件注释）。
 vi.mock('../closeRequest', () => ({}))
 // 与 App.test.tsx 不同：这里刻意不把 TerminalView 替身成 () => null，而是渲染一个可

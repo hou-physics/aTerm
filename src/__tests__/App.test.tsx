@@ -9,6 +9,9 @@ vi.mock('../ipc', () => ({
   readConversation: vi.fn(),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
+// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。
+vi.mock('../store/status', () => ({ statusEventsReady: Promise.resolve(), useThreadStatus: () => undefined, useProjectStatus: () => 'unknown' as const }))
 // App.tsx 顶层 side-effect 导入 closeRequest.ts 是为了在真实环境里尽早注册"应用关闭前确认"
 // 监听器；替身掉避免它在测试环境里去调用真实的 @tauri-apps/api/event（没有 Tauri 运行时
 // 会抛错），与本文件要验证的 Ctrl+Tab 循环切换无关。closeRequest.ts 自身的行为见
