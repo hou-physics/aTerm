@@ -9,15 +9,18 @@ describe('useDragGhost：屏蔽文本选择的 body class + 跟随光标的指�
   beforeEach(() => {
     useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
     document.body.classList.remove('dragging-no-select')
+    document.body.classList.remove('dragging-grab')
   })
   afterEach(() => {
     document.body.classList.remove('dragging-no-select')
+    document.body.classList.remove('dragging-grab')
   })
 
-  it('start：body 加上屏蔽选择的 class，visible/label/初始坐标写入 state', () => {
+  it('start：body 加上屏蔽选择 + 抓取光标两个 class，visible/label/初始坐标写入 state', () => {
     useDragGhost.getState().start('会话 A', 10, 20)
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.body.classList.contains('dragging-grab')).toBe(true)
     const s = useDragGhost.getState()
     expect(s.visible).toBe(true)
     expect(s.label).toBe('会话 A')
@@ -25,19 +28,29 @@ describe('useDragGhost：屏蔽文本选择的 body class + 跟随光标的指�
     expect(s.y).toBe(20)
   })
 
-  it('end：移除 body class，visible 变回 false', () => {
+  it('end：移除两个 body class，visible 变回 false', () => {
     useDragGhost.getState().start('会话 A', 10, 20)
 
     useDragGhost.getState().end()
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
     expect(useDragGhost.getState().visible).toBe(false)
   })
 
   it('end 在从未 start 过的情况下是安全的空操作（调用方无条件调用它）', () => {
     expect(() => useDragGhost.getState().end()).not.toThrow()
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
     expect(useDragGhost.getState().visible).toBe(false)
+  })
+
+  it('blockSelect：只加屏蔽选择的 class，不加抓取光标的 class（按下但还没确认是拖拽时，光标不该变）', () => {
+    useDragGhost.getState().blockSelect()
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDragGhost.getState().visible).toBe(false) // 尚未确认是拖拽，指示也不出现
   })
 
   it('move：坐标最终经 requestAnimationFrame 合并写入 state（不立即同步写入）', async () => {

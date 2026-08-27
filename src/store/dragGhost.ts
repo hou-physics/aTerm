@@ -14,6 +14,11 @@ import { create } from 'zustand'
 // 见各自文件）。end() 对"根本没开始过"的情况也是安全的空操作（class 本就不存在，
 // visible 本就是 false），因此调用方总是无条件调用它，不需要先判断"是否真的在拖"。
 const DRAG_NO_SELECT_CLASS = 'dragging-no-select'
+// 拖拽期间光标应该读作"在抓取东西"，而不是路过终端文字/输入框时冒出来的文本选择
+// I-beam（用户明确反馈的第三个痛点）。这个 class 只在真正确认是拖拽后才加（与
+// start()/end() 同一时机，不是 blockSelect() 那个"按下就加"的时机——单纯按下还不
+// 构成"正在拖拽"，此时光标不该变，见 App.css 里 body.dragging-grab 的规则）。
+const DRAG_GRABBING_CLASS = 'dragging-grab'
 
 type DragGhostState = {
   visible: boolean
@@ -65,6 +70,7 @@ export const useDragGhost = create<DragGhostState>((set) => ({
   },
   start: (label, x, y) => {
     document.body.classList.add(DRAG_NO_SELECT_CLASS)
+    document.body.classList.add(DRAG_GRABBING_CLASS)
     set({ visible: true, label, x, y })
   },
   move: (x, y) => {
@@ -78,6 +84,7 @@ export const useDragGhost = create<DragGhostState>((set) => ({
     }
     pendingXY = null
     document.body.classList.remove(DRAG_NO_SELECT_CLASS)
+    document.body.classList.remove(DRAG_GRABBING_CLASS)
     set({ visible: false })
   },
 }))

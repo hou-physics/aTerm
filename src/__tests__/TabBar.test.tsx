@@ -29,11 +29,13 @@ beforeEach(() => {
   useDnd.setState({ target: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
   document.body.classList.remove('dragging-no-select')
+  document.body.classList.remove('dragging-grab')
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
   document.body.classList.remove('dragging-no-select') // 防止某条断言失败时把 class 遗留给下一条用例
+  document.body.classList.remove('dragging-grab')
 })
 
 async function renderApp() {
@@ -324,7 +326,7 @@ describe('TabBar — 拖拽期间屏蔽文本选择并显示跟随光标的拖�
     if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
   })
 
-  it('跨过 4px 阈值确认是拖拽后：body 加上屏蔽选择的 class，指示显示被拖标签的标题', async () => {
+  it('跨过 4px 阈值确认是拖拽后：body 加上屏蔽选择 + 抓取光标的 class，指示显示被拖标签的标题', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
     await renderApp()
     mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
@@ -332,10 +334,15 @@ describe('TabBar — 拖拽期间屏蔽文本选择并显示跟随光标的拖�
 
     await act(async () => {
       fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-grab')).toBe(false) // 仅按下、还没跨过阈值：光标不该变
+
+    await act(async () => {
       fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 超过 4px 阈值
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.body.classList.contains('dragging-grab')).toBe(true)
     expect(document.querySelector('.drag-ghost')?.textContent).toBe('B')
 
     await act(async () => {
@@ -343,10 +350,11 @@ describe('TabBar — 拖拽期间屏蔽文本选择并显示跟随光标的拖�
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false) // 落地后移除
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
     expect(document.querySelector('.drag-ghost')).toBeNull()
   })
 
-  it('pointercancel 同样移除 body class 与指示（不只是正常松手这一条路径）', async () => {
+  it('pointercancel 同样移除 body class（含抓取光标）与指示（不只是正常松手这一条路径）', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
     await renderApp()
     mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
@@ -357,12 +365,14 @@ describe('TabBar — 拖拽期间屏蔽文本选择并显示跟随光标的拖�
       fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
     })
     expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.body.classList.contains('dragging-grab')).toBe(true)
 
     await act(async () => {
       fireEvent.pointerCancel(b, { clientX: 300, clientY: 50, pointerId: 1 })
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
     expect(document.querySelector('.drag-ghost')).toBeNull()
   })
 

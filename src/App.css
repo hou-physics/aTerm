@@ -20,6 +20,14 @@ body {
    user-select 是可继承属性，写在 body 上即对全树生效，不需要额外的 `* { }` 规则。 */
 body.dragging-no-select { user-select: none; -webkit-user-select: none; }
 
+/* 拖拽期间光标读作"抓取"，不是文本选择的 I-beam（用户反馈"拖拽窗格标题栏时光标变成
+   文本选择光标"）：由 store/dragGhost.ts 的 start()/end() 与上面的 no-select class
+   同一时机增删。`* ` 通配 + !important 是必须的——光标经过的元素可能自己就带着更具体
+   的 cursor 声明（终端文字是 text、分隔条是 col-resize、按钮是 default 等），拖拽这
+   件事发生在页面最上层，理应无条件盖过它们，光标不该在拖拽途中忽而抓取忽而变回别的
+   形状。 */
+body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
+
 /* 跟随光标的拖拽指示（DragGhost.tsx）：position:fixed，用 transform 定位（由组件按
    store 里的 x/y 现算写入，避免触发布局），既有强调色系配色，不新增调色板条目。 */
 .drag-ghost {
@@ -52,9 +60,12 @@ body.dragging-no-select { user-select: none; -webkit-user-select: none; }
 .tabbar-drop-indicator { position: absolute; top: 4px; bottom: 2px; width: 2px; background: var(--color-accent); border-radius: 1px; z-index: 5; pointer-events: none; }
 .sidebar-toggle { flex: none; align-self: flex-start; position: sticky; left: 0; z-index: 1; width: 24px; height: 26px; margin-right: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .sidebar-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
-.tab { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 7px 7px 0 0; background: var(--color-elevated); color: var(--color-text-dim); cursor: default; white-space: nowrap; font-size: 13px; user-select: none; }
+/* cursor: grab——标签本身是拖拽手柄（TabBar.tsx 场景 A：把已打开的标签拖进窗格区/
+   拖拽排序），hover 时应该读作"可以抓起来"；.tab-close 单独有自己的 cursor:default，
+   不受这里影响（显式声明优先于从父级继承的值，见该规则）。 */
+.tab { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 7px 7px 0 0; background: var(--color-elevated); color: var(--color-text-dim); cursor: grab; white-space: nowrap; font-size: 13px; user-select: none; }
 .tab.active { background: var(--color-bg); color: var(--color-text); }
-.tab-close { padding: 0 2px; border-radius: 4px; }
+.tab-close { padding: 0 2px; border-radius: 4px; cursor: default; }
 .tab-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
 .tab-new { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .tab-new:hover { border-color: var(--color-accent); color: var(--color-text); }
@@ -97,7 +108,9 @@ body.dragging-no-select { user-select: none; -webkit-user-select: none; }
 .pane-divider:hover, .pane-divider:active { background-color: var(--color-accent); }
 
 /* 窗格标题栏：约 24px，仅多窗格标签渲染（见 TabPanes.tsx 的 showTitlebar）。 */
-.pane-titlebar { flex: none; height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px 0 8px; font-size: 12px; color: var(--color-text-dim); background: var(--color-elevated); border-bottom: 1px solid var(--color-border); }
+/* cursor: grab——同 .tab，窗格标题栏是拖拽手柄（TabPanes.tsx 拖出成独立标签）；
+   .pane-titlebar-close 单独有自己的 cursor:default，不受这里影响。 */
+.pane-titlebar { flex: none; height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px 0 8px; font-size: 12px; color: var(--color-text-dim); background: var(--color-elevated); border-bottom: 1px solid var(--color-border); cursor: grab; }
 .pane-titlebar-focused { color: var(--color-text); border-bottom-color: var(--color-accent); }
 .pane-titlebar-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-titlebar-close { flex: none; padding: 0 4px; border-radius: 4px; cursor: default; }
@@ -177,7 +190,9 @@ body.dragging-no-select { user-select: none; -webkit-user-select: none; }
    class 由 TerminalView.tsx 在 term.buffer.onBufferChange 中切换到 .terminal-host 上。 */
 .terminal-host.alt-screen .xterm .xterm-scrollable-element > .scrollbar { display: none; }
 .section-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .08em; margin: 14px 0 8px; }
-.side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: none; }
+/* cursor: grab——同 .tab，会话条目是拖拽手柄（Sidebar.tsx 场景 B：从「最近会话」
+   拖入窗格区）。 */
+.side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: grab; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: none; }
 .side-item:hover { background: var(--color-elevated); }
 .side-item .sub { color: var(--color-text-faint); font-size: 11px; }
 .home { padding: 28px 32px; max-width: 980px; margin: 0 auto; }
