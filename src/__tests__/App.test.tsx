@@ -9,6 +9,11 @@ vi.mock('../ipc', () => ({
   readConversation: vi.fn(),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// App.tsx 顶层 side-effect 导入 closeRequest.ts 是为了在真实环境里尽早注册"应用关闭前确认"
+// 监听器；替身掉避免它在测试环境里去调用真实的 @tauri-apps/api/event（没有 Tauri 运行时
+// 会抛错），与本文件要验证的 Ctrl+Tab 循环切换无关。closeRequest.ts 自身的行为见
+// closeRequest.test.ts。
+vi.mock('../closeRequest', () => ({}))
 // TerminalView 内部会实例化真实的 xterm.js Terminal（渲染器、ResizeObserver 等），
 // 与本文件要验证的"标签间循环切换"无关，替身掉避免测试和真实终端机制耦合。
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))

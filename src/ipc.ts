@@ -13,3 +13,4 @@ export const ptyWrite = (id: string, data: string) => invoke<void>('pty_write', 
 export const ptyResize = (id: string, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows })
 export const ptyKill = (id: string) => invoke<void>('pty_kill', { id })
 export const ptyIsAlive = (id: string) => invoke<boolean>('pty_is_alive', { id })
+export const confirmExit = () => invoke<void>('confirm_exit')
