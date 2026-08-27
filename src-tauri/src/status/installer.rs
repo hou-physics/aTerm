@@ -1,8 +1,6 @@
 //! hooks 安装器（spec §6）：把 aTerm 的 `Notification`/`Stop` 两个 hook 写入/移出用户的
 //! `~/.claude/settings.json`。**这是本项目唯一会写 `~/.claude/` 内容的地方**——写入前
-//! 备份、只做外科手术式的增删、任何解析失败或结构异常都放弃写入并原样保留原文件
-//! （安装/卸载的写入逻辑在后续提交里补上；这个提交先落地 hook 命令本身的生成规则、
-//! 事件文件的字段契约，以及只读的 `hooks_status()` 查询）。
+//! 备份、只做外科手术式的增删、任何解析失败或结构异常都放弃写入并原样保留原文件。
 //!
 //! ## schema 核对来源（STEP 0，动手写代码前完成，勿凭记忆编造）
 //!
@@ -39,7 +37,7 @@
 //! 要求的"极小、免依赖 shell 单行"一致；已知的降级场景见 `build_hook_command` 上的文档）。
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 /// 嵌在生成的 shell 命令最前面的一条无副作用语句（POSIX shell 的 `:` 内建命令会原样
@@ -49,6 +47,11 @@ use std::path::{Path, PathBuf};
 /// 会随 aTerm 版本演进而变化，必须有一个独立于命令正文的稳定锚点。
 const NOTIFICATION_MARKER: &str = "aterm-hook:notification:v1";
 const STOP_MARKER: &str = "aterm-hook:stop:v1";
+
+/// 每个 hook 的执行超时（秒）。真正的"绝不挂起 Claude Code"保证来自 Claude Code 自己
+/// 对 hook 子进程强制执行的这个超时（官方文档字段），不是寄希望于我们的 shell 单行脚本
+/// 永远不会卡住——命令本身也已经尽量选用不会阻塞的操作（见 build_hook_command 文档）。
+const HOOK_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookKind {
@@ -138,6 +141,14 @@ fn build_hook_command(event: &str, marker: &str, hook_events_path: &Path) -> Str
     cmd
 }
 
+fn expected_hook_object(event: &str, marker: &str, hook_events_path: &Path) -> Value {
+    json!({
+        "type": "command",
+        "command": build_hook_command(event, marker, hook_events_path),
+        "timeout": HOOK_TIMEOUT_SECS,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // 状态查询：hooks_status()
 // ---------------------------------------------------------------------------
@@ -200,11 +211,270 @@ pub fn hooks_status_at(settings_path: &Path, hook_events_path: &Path) -> HooksSt
 }
 
 // ---------------------------------------------------------------------------
-// 真实路径解析 + Tauri 命令（薄封装：可测试的逻辑都在上面的 `hooks_status_at` 里）
+// settings.json 读取/写入的公共部分
+// ---------------------------------------------------------------------------
+
+/// 读取并解析 `settings.json`：文件缺失、内容不是合法 JSON、顶层不是 JSON 对象，
+/// 三种情况都返回带清晰中文说明的 `Err`，调用方据此直接放弃、不做任何写入——
+/// spec §6/§10 的"解析失败或结构异常时放弃写入并提示，绝不覆盖用户配置"在这里是
+/// 唯一的把关点，`install_hooks_at`/`uninstall_hooks_at` 都先过这一步再谈后续。
+fn load_settings(settings_path: &Path) -> Result<Value, String> {
+    let content = std::fs::read_to_string(settings_path).map_err(|_| {
+        format!(
+            "找不到 {}，请先启动一次 Claude Code 让它生成这个文件，或手动创建后重试；未做任何修改。",
+            settings_path.display()
+        )
+    })?;
+    let value: Value = serde_json::from_str(&content).map_err(|e| {
+        format!(
+            "{} 不是合法的 JSON（{e}），为避免损坏你的配置已放弃写入；文件未被改动。",
+            settings_path.display()
+        )
+    })?;
+    if !value.is_object() {
+        return Err(format!(
+            "{} 的顶层结构不是 JSON 对象，为避免损坏你的配置已放弃写入；文件未被改动。",
+            settings_path.display()
+        ));
+    }
+    Ok(value)
+}
+
+fn write_settings(path: &Path, value: &Value) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value).map_err(|e| format!("序列化配置失败：{e}"))?;
+    // 写临时文件再 rename：与 `status::hooks::rotate_if_needed` 同一个"绝不让并发读者
+    // 看到写了一半的文件"的理由，这里的读者是 Claude Code 自己（它随时可能在会话之间
+    // 重新读取 settings.json）。
+    let tmp = path.with_extension("json.aterm-write.tmp");
+    std::fs::write(&tmp, format!("{text}\n")).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败：{e}", path.display()))?;
+    Ok(())
+}
+
+/// 写入前备份（spec §6 硬性要求）：把当前的 `settings.json` 原样拷贝到 aTerm 自己的
+/// 数据目录，文件名带纳秒级时间戳（保证同一进程内连续两次调用也不会撞名，比毫秒级
+/// 时间戳更保险；aTerm 数据目录本就在 `~/.claude/` 之外，写这里不违反"`~/.claude/`
+/// 只能通过 install/uninstall 写 settings.json 本身"的约束）。
+fn backup_settings(settings_path: &Path, backup_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(backup_dir).map_err(|e| format!("创建备份目录 {} 失败：{e}", backup_dir.display()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let backup_path = backup_dir.join(format!("settings.json.{nanos}.bak"));
+    std::fs::copy(settings_path, &backup_path)
+        .map_err(|e| format!("备份 {} 失败，已放弃写入：{e}", settings_path.display()))?;
+    Ok(backup_path)
+}
+
+// ---------------------------------------------------------------------------
+// 安装
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallOutcome {
+    pub backup_path: String,
+}
+
+/// 在一个 `hooks.<event>` 数组里就地更新/插入 marker 对应的那一条 hook：
+/// - 找到已有的（带 marker 的）命令：原地替换成最新的期望内容（"更新而不重复追加"）
+/// - 顺带清理任何多余的重复项（历史遗留 bug 或手工编辑造成的多份同 marker 条目），
+///   保证幂等——不管调用前是 0 条还是意外有多条，调用后都精确收敛到 1 条
+/// - 都没有：在数组末尾追加一个新的匹配组
+///
+/// 结构异常（`hooks.<event>` 存在但不是数组）直接返回 `Err`，不做任何修改——由调用方
+/// （`install_hooks_at`）保证这个 `Err` 会让整个安装流程在触碰磁盘之前就中止。
+fn upsert_hook(hooks_obj: &mut Map<String, Value>, kind: HookKind, hook_events_path: &Path) -> Result<(), String> {
+    let event = kind.event_name();
+    let marker = kind.marker();
+    let expected = expected_hook_object(event, marker, hook_events_path);
+
+    let entry = hooks_obj.entry(event.to_string()).or_insert_with(|| Value::Array(Vec::new()));
+    let arr = match entry {
+        Value::Array(a) => a,
+        _ => {
+            return Err(format!(
+                "settings.json 的 hooks.{event} 字段不是预期的数组结构，为避免损坏你的配置已放弃写入；文件未被改动。"
+            ))
+        }
+    };
+
+    let mut already_updated = false;
+    let mut i = 0;
+    while i < arr.len() {
+        let mut drop_group = false;
+        if let Some(group_obj) = arr[i].as_object_mut() {
+            if let Some(items) = group_obj.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let mut j = 0;
+                while j < items.len() {
+                    let is_ours =
+                        items[j].get("command").and_then(|c| c.as_str()).map(|c| c.contains(marker)).unwrap_or(false);
+                    if is_ours {
+                        if !already_updated {
+                            items[j] = expected.clone();
+                            already_updated = true;
+                            j += 1;
+                        } else {
+                            // 多余的重复项：直接移除，不保留。
+                            items.remove(j);
+                        }
+                    } else {
+                        j += 1;
+                    }
+                }
+                if items.is_empty() {
+                    drop_group = true;
+                }
+            }
+        }
+        if drop_group {
+            arr.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    if !already_updated {
+        arr.push(json!({ "hooks": [expected] }));
+    }
+    Ok(())
+}
+
+/// 安装/更新 aTerm 的 `Notification`/`Stop` 两个 hook（spec §6）。
+///
+/// 路径全部由调用方注入（不在函数内部访问 `dirs::home_dir()`），是唯一让这个函数能被
+/// 单元测试安全覆盖的原因——测试传入 `tempfile::tempdir()` 里的路径，永远不会碰真实的
+/// `~/.claude`；只有 `install_hooks()`（`#[tauri::command]`）这一层薄封装会用真实路径调用它。
+pub fn install_hooks_at(settings_path: &Path, backup_dir: &Path, hook_events_path: &Path) -> Result<InstallOutcome, String> {
+    let mut value = load_settings(settings_path)?;
+    {
+        // `load_settings` 已经确认顶层是对象，这里的 `unwrap` 不会失败。
+        let root = value.as_object_mut().expect("load_settings 已确认顶层是对象");
+        let hooks_val = root.entry("hooks").or_insert_with(|| Value::Object(Map::new()));
+        let hooks_obj = match hooks_val {
+            Value::Object(m) => m,
+            _ => {
+                return Err(
+                    "settings.json 的 hooks 字段不是预期的对象结构，为避免损坏你的配置已放弃写入；文件未被改动。"
+                        .to_string(),
+                )
+            }
+        };
+        for kind in ALL_HOOKS {
+            upsert_hook(hooks_obj, kind, hook_events_path)?;
+        }
+    }
+
+    // 所有校验与内存中的修改都已成功才走到这里——磁盘上的文件到此刻为止还完全没被
+    // 碰过；任何一步失败都已经在上面 `?` 处直接返回，文件保持原样。
+    let backup_path = backup_settings(settings_path, backup_dir)?;
+    write_settings(settings_path, &value)?;
+    Ok(InstallOutcome { backup_path: backup_path.to_string_lossy().to_string() })
+}
+
+// ---------------------------------------------------------------------------
+// 卸载
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallOutcome {
+    pub backup_path: String,
+    /// 是否真的移除了点什么（两个 hook 都没装过时也会走一遍备份+回写流程，但这个字段
+    /// 会是 `false`，供前端判断"其实本来就没装"）。
+    pub removed: bool,
+}
+
+/// 从一个 `hooks.<event>` 数组里移除带 marker 的那一条 hook，并剪掉因此变空的容器：
+/// 命令被移除后其所在匹配组的 `hooks` 数组若变空，整个匹配组一并移除；调用方
+/// （`uninstall_hooks_at`）还会在两个事件都处理完后检查 `hooks` 对象本身是否也已经
+/// 变空，变空则连 `hooks` 这个 key 一起删掉——不留下任何"我们创建过但现在完全空了"
+/// 的容器。结构异常（`hooks.<event>` 存在但不是数组）同样直接 `Err`，不做任何修改。
+fn remove_hook(hooks_obj: &mut Map<String, Value>, kind: HookKind) -> Result<bool, String> {
+    let event = kind.event_name();
+    let marker = kind.marker();
+    let Some(entry) = hooks_obj.get_mut(event) else { return Ok(false) };
+    let arr = match entry {
+        Value::Array(a) => a,
+        _ => {
+            return Err(format!(
+                "settings.json 的 hooks.{event} 字段不是预期的数组结构，为避免损坏你的配置已放弃写入；文件未被改动。"
+            ))
+        }
+    };
+
+    let mut removed = false;
+    let mut i = 0;
+    while i < arr.len() {
+        let mut drop_group = false;
+        if let Some(group_obj) = arr[i].as_object_mut() {
+            if let Some(items) = group_obj.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let before = items.len();
+                items.retain(|item| {
+                    let is_ours =
+                        item.get("command").and_then(|c| c.as_str()).map(|c| c.contains(marker)).unwrap_or(false);
+                    !is_ours
+                });
+                if items.len() != before {
+                    removed = true;
+                }
+                if items.is_empty() {
+                    drop_group = true;
+                }
+            }
+        }
+        if drop_group {
+            arr.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    if arr.is_empty() {
+        hooks_obj.remove(event);
+    }
+    Ok(removed)
+}
+
+pub fn uninstall_hooks_at(settings_path: &Path, backup_dir: &Path) -> Result<UninstallOutcome, String> {
+    let mut value = load_settings(settings_path)?;
+    let mut removed_any = false;
+    {
+        let root = value.as_object_mut().expect("load_settings 已确认顶层是对象");
+        if let Some(hooks_val) = root.get_mut("hooks") {
+            let hooks_obj = match hooks_val {
+                Value::Object(m) => m,
+                _ => {
+                    return Err(
+                        "settings.json 的 hooks 字段不是预期的对象结构，为避免损坏你的配置已放弃写入；文件未被改动。"
+                            .to_string(),
+                    )
+                }
+            };
+            for kind in ALL_HOOKS {
+                if remove_hook(hooks_obj, kind)? {
+                    removed_any = true;
+                }
+            }
+            if hooks_obj.is_empty() {
+                root.remove("hooks");
+            }
+        }
+    }
+
+    let backup_path = backup_settings(settings_path, backup_dir)?;
+    write_settings(settings_path, &value)?;
+    Ok(UninstallOutcome { backup_path: backup_path.to_string_lossy().to_string(), removed: removed_any })
+}
+
+// ---------------------------------------------------------------------------
+// 真实路径解析 + Tauri 命令（薄封装：所有可测试的逻辑都在上面的 `_at` 函数里）
 // ---------------------------------------------------------------------------
 
 struct RealPaths {
     settings_path: PathBuf,
+    backup_dir: PathBuf,
     hook_events_path: PathBuf,
 }
 
@@ -218,8 +488,9 @@ fn real_paths() -> Result<RealPaths, String> {
     let settings_path = home.join(".claude").join("settings.json");
     let app_data =
         dirs::data_dir().map(|d| d.join("aTerm")).ok_or_else(|| "找不到 aTerm 的应用数据目录。".to_string())?;
+    let backup_dir = app_data.join("settings-backups");
     let hook_events_path = app_data.join("hook-events.jsonl");
-    Ok(RealPaths { settings_path, hook_events_path })
+    Ok(RealPaths { settings_path, backup_dir, hook_events_path })
 }
 
 /// 查询 aTerm 的两个 hook 是否已安装、是否与当前版本生成的命令一致。只读，从不写入；
@@ -233,10 +504,324 @@ pub fn hooks_status() -> HooksStatus {
     }
 }
 
+/// 安装/更新 aTerm 的两个 hook。**只应在用户显式点击"安装"之后被前端调用**——本函数
+/// （以及它调用的 `install_hooks_at`）不会被应用启动流程或任何其它命令隐式触发。
+#[tauri::command]
+pub fn install_hooks() -> Result<InstallOutcome, String> {
+    let p = real_paths()?;
+    install_hooks_at(&p.settings_path, &p.backup_dir, &p.hook_events_path)
+}
+
+/// 卸载 aTerm 安装的两个 hook，只应在用户显式点击"卸载"之后被前端调用。
+#[tauri::command]
+pub fn uninstall_hooks() -> Result<UninstallOutcome, String> {
+    let p = real_paths()?;
+    uninstall_hooks_at(&p.settings_path, &p.backup_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        settings_path: PathBuf,
+        backup_dir: PathBuf,
+        hook_events_path: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_path = tmp.path().join("settings.json");
+        let backup_dir = tmp.path().join("aTerm").join("settings-backups");
+        let hook_events_path = tmp.path().join("aTerm").join("hook-events.jsonl");
+        Fixture { _tmp: tmp, settings_path, backup_dir, hook_events_path }
+    }
+
+    fn write_settings_fixture(f: &Fixture, content: &str) {
+        std::fs::write(&f.settings_path, content).unwrap();
+    }
+
+    fn read_settings(f: &Fixture) -> Value {
+        let text = std::fs::read_to_string(&f.settings_path).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    // -----------------------------------------------------------------
+    // 全新安装
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fresh_install_adds_both_hooks_when_no_hooks_key_exists() {
+        let f = fixture();
+        write_settings_fixture(&f, r#"{"model":"claude-fable-5","theme":"light"}"#);
+
+        let outcome = install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap();
+        assert!(Path::new(&outcome.backup_path).exists());
+
+        let v = read_settings(&f);
+        assert_eq!(v["model"], "claude-fable-5", "无关的既有 key 必须原样保留");
+        assert_eq!(v["theme"], "light");
+
+        for event in ["Notification", "Stop"] {
+            let arr = v["hooks"][event].as_array().expect("应生成数组");
+            assert_eq!(arr.len(), 1, "应恰好一个匹配组");
+            let items = arr[0]["hooks"].as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["type"], "command");
+            let cmd = items[0]["command"].as_str().unwrap();
+            assert!(cmd.contains(&f.hook_events_path.to_string_lossy().to_string()));
+            assert!(!arr[0].as_object().unwrap().contains_key("matcher"), "Notification/Stop 不应带 matcher 字段");
+        }
+
+        let status = hooks_status_at(&f.settings_path, &f.hook_events_path);
+        assert_eq!(status.notification, HookInstallState { installed: true, up_to_date: true });
+        assert_eq!(status.stop, HookInstallState { installed: true, up_to_date: true });
+    }
+
+    // -----------------------------------------------------------------
+    // 已有其它工具的 hooks：必须原样保留
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn install_preserves_unrelated_existing_hooks() {
+        let f = fixture();
+        write_settings_fixture(
+            &f,
+            r#"{
+                "hooks": {
+                    "PreToolUse": [
+                        { "matcher": "Bash", "hooks": [ { "type": "command", "command": "some-other-tool --check" } ] }
+                    ],
+                    "Stop": [
+                        { "hooks": [ { "type": "command", "command": "echo other-stop-hook" } ] }
+                    ]
+                }
+            }"#,
+        );
+
+        install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap();
+        let v = read_settings(&f);
+
+        // 无关的 PreToolUse 原样保留。
+        let pre = &v["hooks"]["PreToolUse"];
+        assert_eq!(pre[0]["matcher"], "Bash");
+        assert_eq!(pre[0]["hooks"][0]["command"], "some-other-tool --check");
+
+        // 别人的 Stop hook 也在，且是独立的一条（不同的匹配组）。
+        let stop_arr = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop_arr.len(), 2, "别人的 Stop 匹配组 + aTerm 自己新增的匹配组");
+        let has_other = stop_arr.iter().any(|g| {
+            g["hooks"].as_array().unwrap().iter().any(|h| h["command"] == "echo other-stop-hook")
+        });
+        assert!(has_other, "别人的 Stop hook 必须还在");
+        let has_ours =
+            stop_arr.iter().any(|g| g["hooks"].as_array().unwrap().iter().any(|h| {
+                h["command"].as_str().map(|c| c.contains(STOP_MARKER)).unwrap_or(false)
+            }));
+        assert!(has_ours, "aTerm 自己的 Stop hook 必须被加上");
+
+        // Notification 之前不存在，应该被新建。
+        assert!(v["hooks"]["Notification"].as_array().unwrap().len() == 1);
+    }
+
+    // -----------------------------------------------------------------
+    // 幂等：装两次不重复
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn installing_twice_is_idempotent_no_duplicates() {
+        let f = fixture();
+        write_settings_fixture(&f, r#"{"foo":"bar"}"#);
+
+        install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap();
+        install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap();
+
+        let v = read_settings(&f);
+        for event in ["Notification", "Stop"] {
+            let arr = v["hooks"][event].as_array().unwrap();
+            assert_eq!(arr.len(), 1, "两次安装后仍应只有一个匹配组");
+            assert_eq!(arr[0]["hooks"].as_array().unwrap().len(), 1, "两次安装后仍应只有一条 hook 命令");
+        }
+    }
+
+    #[test]
+    fn install_updates_stale_command_in_place_without_duplicating() {
+        let f = fixture();
+        // 手工构造一个"旧版本" aTerm 曾经装过的 hook（命令正文不同，但带着同一个 marker）。
+        let stale_cmd = format!(": '{NOTIFICATION_MARKER}'; echo old-version-command");
+        write_settings_fixture(
+            &f,
+            &format!(
+                r#"{{"hooks":{{"Notification":[{{"hooks":[{{"type":"command","command":"{stale_cmd}"}}]}}]}}}}"#
+            ),
+        );
+
+        let status_before = hooks_status_at(&f.settings_path, &f.hook_events_path);
+        assert_eq!(status_before.notification, HookInstallState { installed: true, up_to_date: false });
+
+        install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap();
+
+        let v = read_settings(&f);
+        let arr = v["hooks"]["Notification"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "更新旧命令不应产生第二个匹配组");
+        assert_eq!(arr[0]["hooks"].as_array().unwrap().len(), 1);
+        let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(!cmd.contains("old-version-command"), "旧命令正文应被替换");
+
+        let status_after = hooks_status_at(&f.settings_path, &f.hook_events_path);
+        assert_eq!(status_after.notification, HookInstallState { installed: true, up_to_date: true });
+    }
+
+    // -----------------------------------------------------------------
+    // 卸载
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn uninstall_removes_ours_and_leaves_others_intact() {
+        let f = fixture();
+        write_settings_fixture(
+            &f,
+            r#"{
+                "hooks": {
+                    "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "keep-me" } ] } ],
+                    "Stop": [ { "hooks": [ { "type": "command", "command": "echo other-stop-hook" } ] } ]
+                }
+            }"#,
+        );
+        install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap();
+
+        let outcome = uninstall_hooks_at(&f.settings_path, &f.backup_dir).unwrap();
+        assert!(outcome.removed);
+
+        let v = read_settings(&f);
+        // 无关配置原样保留。
+        assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "keep-me");
+        let stop_arr = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop_arr.len(), 1, "aTerm 的匹配组应被移除，只剩别人的那一组");
+        assert_eq!(stop_arr[0]["hooks"][0]["command"], "echo other-stop-hook");
+
+        // Notification 是 aTerm 独占新建的，卸载后整个 key 应该被剪掉。
+        assert!(v["hooks"].get("Notification").is_none(), "空容器应被剪掉");
+
+        let status = hooks_status_at(&f.settings_path, &f.hook_events_path);
+        assert_eq!(status.notification, HookInstallState::default());
+        assert_eq!(status.stop, HookInstallState::default());
+    }
+
+    #[test]
+    fn uninstall_prunes_hooks_key_entirely_when_nothing_else_remains() {
+        let f = fixture();
+        write_settings_fixture(&f, r#"{"other":"value"}"#);
+        install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap();
+        uninstall_hooks_at(&f.settings_path, &f.backup_dir).unwrap();
+
+        let v = read_settings(&f);
+        assert_eq!(v["other"], "value");
+        assert!(v.as_object().unwrap().get("hooks").is_none(), "hooks 这个 key 本身也应该被剪掉");
+    }
+
+    #[test]
+    fn uninstall_when_nothing_installed_is_a_harmless_noop() {
+        let f = fixture();
+        write_settings_fixture(&f, r#"{"other":"value"}"#);
+        let outcome = uninstall_hooks_at(&f.settings_path, &f.backup_dir).unwrap();
+        assert!(!outcome.removed);
+        let v = read_settings(&f);
+        assert_eq!(v["other"], "value");
+    }
+
+    // -----------------------------------------------------------------
+    // 失败安全：解析失败 / 结构异常一律中止，且文件字节级不变
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unparseable_settings_json_aborts_and_leaves_file_byte_identical() {
+        let f = fixture();
+        let original = "{ this is not valid json ";
+        write_settings_fixture(&f, original);
+
+        let err = install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap_err();
+        assert!(!err.is_empty());
+        let after = std::fs::read_to_string(&f.settings_path).unwrap();
+        assert_eq!(after, original, "解析失败时文件必须字节级保持原样");
+        assert!(!f.backup_dir.exists(), "从未成功到需要备份的那一步，不应该创建备份目录");
+    }
+
+    #[test]
+    fn top_level_non_object_aborts_and_leaves_file_byte_identical() {
+        let f = fixture();
+        let original = r#"["not", "an", "object"]"#;
+        write_settings_fixture(&f, original);
+
+        let err = install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap_err();
+        assert!(!err.is_empty());
+        let after = std::fs::read_to_string(&f.settings_path).unwrap();
+        assert_eq!(after, original);
+    }
+
+    #[test]
+    fn hooks_field_wrong_shape_aborts_and_leaves_file_byte_identical() {
+        let f = fixture();
+        let original = r#"{"hooks":"not-an-object"}"#;
+        write_settings_fixture(&f, original);
+
+        let err = install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap_err();
+        assert!(!err.is_empty());
+        let after = std::fs::read_to_string(&f.settings_path).unwrap();
+        assert_eq!(after, original);
+    }
+
+    #[test]
+    fn hooks_event_field_wrong_shape_aborts_and_leaves_file_byte_identical() {
+        let f = fixture();
+        let original = r#"{"hooks":{"Notification":"not-an-array"}}"#;
+        write_settings_fixture(&f, original);
+
+        let err = install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap_err();
+        assert!(!err.is_empty());
+        let after = std::fs::read_to_string(&f.settings_path).unwrap();
+        assert_eq!(after, original);
+
+        // 卸载同样要中止，同样不改文件。
+        let err2 = uninstall_hooks_at(&f.settings_path, &f.backup_dir).unwrap_err();
+        assert!(!err2.is_empty());
+        let after2 = std::fs::read_to_string(&f.settings_path).unwrap();
+        assert_eq!(after2, original);
+    }
+
+    #[test]
+    fn missing_settings_file_returns_clear_error_and_creates_nothing() {
+        let f = fixture();
+        // 故意不写 settings_path 本身。
+
+        let err = install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(!f.settings_path.exists(), "不应该凭空创建 settings.json");
+        assert!(!f.backup_dir.exists(), "不应该创建备份目录");
+
+        let status = hooks_status_at(&f.settings_path, &f.hook_events_path);
+        assert_eq!(status, HooksStatus::default(), "settings.json 缺失时状态查询应视为未安装，而不是报错");
+    }
+
+    // -----------------------------------------------------------------
+    // 备份确实先于修改发生
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn backup_is_written_before_modification_and_contains_original_content() {
+        let f = fixture();
+        let original = r#"{"model":"claude-fable-5"}"#;
+        write_settings_fixture(&f, original);
+
+        let outcome = install_hooks_at(&f.settings_path, &f.backup_dir, &f.hook_events_path).unwrap();
+        let backup_content = std::fs::read_to_string(&outcome.backup_path).unwrap();
+        assert_eq!(backup_content, original, "备份必须是修改前的原始内容");
+
+        let live_content = std::fs::read_to_string(&f.settings_path).unwrap();
+        assert_ne!(live_content, original, "备份之后才应该发生真正的修改");
+    }
 
     // -----------------------------------------------------------------
     // 生成的 hook 命令字符串，必须能被 status/hooks.rs 的读取器原样解析
