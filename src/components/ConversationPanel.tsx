@@ -31,6 +31,11 @@ export function ConversationPanel() {
   // 只有仍是当前最新代的响应才允许写入 state。这样切标签前触发的旧请求、或切走后
   // 才点的刷新，晚到时都会被静默丢弃，不会覆盖当前激活标签已经显示的内容。
   const requestIdRef = useRef(0)
+  // 记录"上一次这个 effect 跑的时候面板是否折叠"，只用来判定折叠 effect 里的
+  // catch-up 加载是不是真的踩在一次"折叠 -> 展开"的翻转上（而不是 dirName/
+  // rootKey/conv 这些同在依赖数组里的值变化引发的重跑）。初值就是挂载时的
+  // panelCollapsed，所以"面板本来就是展开的"这一挂载帧不会被误判成一次翻转。
+  const prevCollapsedRef = useRef(panelCollapsed)
 
   // 与 setConv 在同一次状态更新里调用（React 会自动批处理），确保"分组数据到位"与
   // "展开状态播种"在同一帧提交，不会出现分组已渲染、但仍显示折叠态的过渡帧。
@@ -69,16 +74,44 @@ export function ConversationPanel() {
     setConv(null)
     setError(null)
     seedExpandedDates(null)
-    if (dirName && rootKey) load()
+    // 面板折叠时不发起请求：折叠态整个组件不渲染任何东西，此刻加载纯属后台空耗——
+    // 大会话文件的读取/解析可达数十毫秒，没人看得见却依旧要付这个代价。这里读
+    // getState() 而非把 panelCollapsed 加进依赖数组：只想在"切标签"这一刻看一眼
+    // 当前是否折叠，不想仅仅因为折叠状态翻转就重新跑一遍这个 effect（那样会无谓地
+    // 清空 conv/error，与下面那个 effect 的"展开时按需补载"职责重叠）。折叠 ->
+    // 展开的加载由下面的 effect 负责。
+    if (dirName && rootKey && !useLayout.getState().panelCollapsed) load()
   }, [dirName, rootKey, load, seedExpandedDates])
 
   useEffect(() => {
-    if (!panelCollapsed) return
-    // 折叠有可能恰好发生在拖拽宽度的中途：手柄随折叠一起从 DOM 卸载，浏览器会隐式
-    // 释放指针捕获但不会补发 pointerup，onResizePointerUp 里的 commitPanelWidth 就
-    // 不会执行。这里兜底：折叠瞬间把内存中（已经是最新值的）宽度落盘，避免那次拖拽白拖。
-    useLayout.getState().commitPanelWidth()
-  }, [panelCollapsed])
+    const wasCollapsed = prevCollapsedRef.current
+    prevCollapsedRef.current = panelCollapsed
+    if (panelCollapsed) {
+      // 折叠瞬间：让任何仍在飞行中的旧请求过期——即便 dirName/rootKey 没变化，也不
+      // 允许"折叠前发起、折叠后才落地"的响应被写进 state（这一刻用户根本看不见
+      // 面板，那次响应视为作废）。requestIdRef 是 load() 里过期响应防护复用的同一个
+      // 计数器（见 requestIdRef 声明处的注释）——这里只是新增一个会推进它的时机，
+      // 守卫本身（.then/.catch/.finally 里的比对）不做任何改动。
+      requestIdRef.current++
+      // 请求代提前失效后，其 finally 也不会再把 loading 收尾——顺带同步复位，
+      // 避免下次展开时卡在一个再也翻不回 false 的"加载中"。
+      setLoading(false)
+      // 折叠还可能恰好发生在拖拽宽度的中途：手柄随折叠一起从 DOM 卸载，浏览器会
+      // 隐式释放指针捕获但不会补发 pointerup，onResizePointerUp 里的
+      // commitPanelWidth 就不会执行。这里兜底：把内存中（已经是最新值的）宽度落盘，
+      // 避免那次拖拽白拖。
+      useLayout.getState().commitPanelWidth()
+      return
+    }
+    // 只在这次重跑确实是"折叠 -> 展开"的翻转时才补一次 catch-up 加载（wasCollapsed
+    // 为真）——dirName/rootKey/conv/load 都在依赖数组里是为了让翻转发生时闭包拿到
+    // 的是最新值（例如折叠期间切换过标签），而不是为了让它们的变化本身也触发加载：
+    // 面板本来就展开着时，标签切换已经由上面那个 effect 处理，这里必须避免重复
+    // 发起同一个请求；同理，收起又立刻展开（dirName/rootKey/conv 都没变）也不该
+    // 因为 conv 后来才到位而被误当成"还没加载"再打一次。且只有当前还没有对应数据
+    // （!conv）时才需要这一下——数据已经在，不重新拉取。
+    if (wasCollapsed && dirName && rootKey && !conv) load()
+  }, [panelCollapsed, dirName, rootKey, conv, load])
 
   const toggleDateGroup = useCallback((key: string) => {
     setExpandedDates((prev) => {

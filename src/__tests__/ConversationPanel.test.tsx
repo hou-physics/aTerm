@@ -308,3 +308,77 @@ describe('ConversationPanel — 折叠态完全消失，唯一开关在 TabBar',
     expect(document.querySelector('.conv-panel-dock')).toBeNull()
   })
 })
+
+describe('ConversationPanel — 折叠时不加载，展开时按需补载', () => {
+  it('挂载即折叠：切换到有会话的标签、甚至多次切换，全程不发起任何请求', async () => {
+    vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
+    useLayout.setState({ panelCollapsed: true })
+    useTabs.setState({
+      tabs: [
+        { id: 'home', kind: 'home', title: '主页' },
+        { id: 'tab-a', kind: 'term', title: 'A', dirName: 'proj-a', rootKey: 'root-a' },
+        { id: 'tab-b', kind: 'term', title: 'B', dirName: 'proj-b', rootKey: 'root-b' },
+      ],
+      activeId: 'home',
+    })
+    const { container } = render(<ConversationPanel />)
+    expect(container.firstChild).toBeNull() // 折叠态不渲染任何东西
+
+    act(() => { useTabs.setState({ activeId: 'tab-a' }) })
+    act(() => { useTabs.setState({ activeId: 'tab-b' }) })
+    // 没有 waitFor 可等——断言的正是"什么都不会发生"；给微任务队列一次机会
+    // 排空，确认不是因为异步还没跑到才看起来没调用。
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(ipc.readConversation).not.toHaveBeenCalled()
+  })
+
+  it('先在折叠状态下切到某个会话标签，再展开：只补发一次针对当前激活标签的请求', async () => {
+    vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
+    useLayout.setState({ panelCollapsed: true })
+    useTabs.setState({
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      activeId: 'tab-1',
+    })
+    render(<ConversationPanel />)
+    await Promise.resolve()
+    expect(ipc.readConversation).not.toHaveBeenCalled() // 折叠期间纵有激活会话也不加载
+
+    act(() => { useLayout.getState().togglePanel() }) // 展开
+    await waitFor(() => expect(ipc.readConversation).toHaveBeenCalledTimes(1))
+    expect(ipc.readConversation).toHaveBeenCalledWith('proj-a', 'root-1')
+    expect(await screen.findByText('第一句话')).toBeTruthy() // 展开后确实渲染出了内容
+
+    // 再收起又展开：内容已经在手上，不应该重新拉取
+    act(() => { useLayout.getState().togglePanel() }) // 收起
+    act(() => { useLayout.getState().togglePanel() }) // 展开
+    await Promise.resolve()
+    expect(ipc.readConversation).toHaveBeenCalledTimes(1)
+  })
+
+  it('折叠瞬间让飞行中的旧响应过期：收起前发出的请求，收起后才落地也不会写入 state', async () => {
+    let resolve!: (c: typeof CONV) => void
+    const pending = new Promise<typeof CONV>((res) => { resolve = res })
+    vi.mocked(ipc.readConversation).mockReturnValue(pending)
+    useLayout.setState({ panelCollapsed: false })
+    useTabs.setState({
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      activeId: 'tab-1',
+    })
+    render(<ConversationPanel />)
+    await waitFor(() => expect(ipc.readConversation).toHaveBeenCalledTimes(1))
+
+    act(() => { useLayout.getState().togglePanel() }) // 请求仍在飞行中时收起面板
+    expect(useLayout.getState().panelCollapsed).toBe(true)
+
+    await act(async () => {
+      resolve(CONV)
+      await pending
+    })
+
+    // 响应虽然落地了，但收起时那次生成计数已经作废它——展开后必须重新触发一次全新请求，
+    // 而不是直接沿用这个"晚到"的响应。
+    act(() => { useLayout.getState().togglePanel() }) // 展开
+    await waitFor(() => expect(ipc.readConversation).toHaveBeenCalledTimes(2))
+  })
+})
