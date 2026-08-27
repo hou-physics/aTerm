@@ -26,6 +26,10 @@ const CONV = {
 
 beforeEach(() => {
   useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页' }], activeId: 'home' })
+  // store/layout.ts 的 panelCollapsed 默认值现在是 true（首次启动默认收起，见该文件的
+  // PANEL_COLLAPSED_DEFAULT）；本文件绝大多数用例都假定面板处于展开态才有意义，这里统一
+  // 兜底展开，需要验证折叠行为的用例（如下方"折叠时不加载"一组）会自行覆盖这个状态。
+  useLayout.setState({ panelCollapsed: false })
   vi.clearAllMocks()
 })
 

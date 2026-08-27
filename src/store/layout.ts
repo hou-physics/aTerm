@@ -16,6 +16,10 @@ type LayoutState = {
 
 const SIDEBAR_KEY = 'aterm-sidebar-collapsed'
 const PANEL_KEY = 'aterm-panel-collapsed'
+// 首次启动（本地尚无持久化偏好）时面板默认收起，不抢占注意力；一旦用户手动收起/展开过，
+// 这条默认值就再也不会生效——见 readPersistedPanelCollapsed 里 `v !== null` 的显式区分，
+// 已保存的偏好（哪怕存的就是"展开"）永远优先于这个默认值。
+const PANEL_COLLAPSED_DEFAULT = true
 const FONT_SIZE_KEY = 'aterm-font-size'
 const DEFAULT_FONT_SIZE = 13
 const MIN_FONT_SIZE = 8
@@ -38,9 +42,15 @@ function persistSidebarCollapsed(v: boolean) {
 
 function readPersistedPanelCollapsed(): boolean {
   try {
-    return localStorage.getItem(PANEL_KEY) === '1'
+    // 用 `v !== null` 显式区分"从未存过"与"存过且值为假"（对应 '0'，展开）：
+    // 只有前者才允许套用下面的 PANEL_COLLAPSED_DEFAULT，与 readPersistedFontSize /
+    // readPersistedPanelWidth 的既有读取模式保持一致，不能像本函数改动前那样直接
+    // `=== '1'`——那样会把"没存过"和"存过 false"混为一谈，新默认值就会错误地覆盖
+    // 用户已经保存的"展开"偏好。
+    const v = localStorage.getItem(PANEL_KEY)
+    if (v !== null) return v === '1'
   } catch { /* localStorage 不可用（如隐私模式），忽略 */ }
-  return false
+  return PANEL_COLLAPSED_DEFAULT
 }
 
 function persistPanelCollapsed(v: boolean) {

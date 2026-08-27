@@ -32,8 +32,14 @@ afterEach(() => {
 })
 
 describe('layout store — panelCollapsed', () => {
-  it('默认展开（panelCollapsed = false）', async () => {
+  it('首次启动、本地无任何持久化偏好时默认收起（panelCollapsed = true）', async () => {
     mockLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().panelCollapsed).toBe(true)
+  })
+
+  it('已持久化的偏好优先于默认值：存过的 false（展开）不会被首次启动的默认收起覆盖', async () => {
+    mockLocalStorage({ 'aterm-panel-collapsed': '0' })
     const { useLayout } = await import('../store/layout')
     expect(useLayout.getState().panelCollapsed).toBe(false)
   })
@@ -41,12 +47,13 @@ describe('layout store — panelCollapsed', () => {
   it('togglePanel 切换状态并持久化到 localStorage', async () => {
     const ls = mockLocalStorage()
     const { useLayout } = await import('../store/layout')
-    useLayout.getState().togglePanel()
-    expect(useLayout.getState().panelCollapsed).toBe(true)
-    expect(ls.setItem).toHaveBeenCalledWith('aterm-panel-collapsed', '1')
+    // 无持久化偏好，初始即为新默认值 true（收起）
     useLayout.getState().togglePanel()
     expect(useLayout.getState().panelCollapsed).toBe(false)
     expect(ls.setItem).toHaveBeenCalledWith('aterm-panel-collapsed', '0')
+    useLayout.getState().togglePanel()
+    expect(useLayout.getState().panelCollapsed).toBe(true)
+    expect(ls.setItem).toHaveBeenCalledWith('aterm-panel-collapsed', '1')
   })
 
   it('读取已持久化的折叠状态作为初始值', async () => {
@@ -55,17 +62,17 @@ describe('layout store — panelCollapsed', () => {
     expect(useLayout.getState().panelCollapsed).toBe(true)
   })
 
-  it('localStorage 读取抛异常时降级为默认值（面板可见）', async () => {
+  it('localStorage 读取抛异常时降级为默认值（面板收起）', async () => {
     mockThrowingLocalStorage()
     const { useLayout } = await import('../store/layout')
-    expect(useLayout.getState().panelCollapsed).toBe(false)
+    expect(useLayout.getState().panelCollapsed).toBe(true)
   })
 
   it('localStorage 写入抛异常时不影响内存中的状态切换', async () => {
     const ls = mockThrowingLocalStorage()
     const { useLayout } = await import('../store/layout')
     expect(() => useLayout.getState().togglePanel()).not.toThrow()
-    expect(useLayout.getState().panelCollapsed).toBe(true)
+    expect(useLayout.getState().panelCollapsed).toBe(false)
     expect(ls.setItem).toHaveBeenCalled()
   })
 })
