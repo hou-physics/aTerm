@@ -1,0 +1,204 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+
+vi.mock('../ipc', () => ({
+  ptySpawn: vi.fn(async () => 'pty-picked'),
+  ptyIsAlive: vi.fn(async () => false),
+  ptyKill: vi.fn(async () => {}),
+  listProjects: vi.fn(async () => []),
+  readConversation: vi.fn(),
+}))
+vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+vi.mock('../closeRequest', () => ({}))
+vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
+
+import App from '../App'
+import { useDnd } from '../store/dnd'
+import { useHint } from '../store/hint'
+import { useTabs } from '../store/tabs'
+
+const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
+
+beforeEach(() => {
+  useTabs.setState({ tabs: [HOME], activeId: 'home' })
+  useHint.setState({ message: null })
+  useDnd.setState({ target: null, tabBarIndex: null })
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+async function renderApp() {
+  const utils = render(<App />)
+  await act(async () => { await Promise.resolve() })
+  return utils
+}
+
+// 通用矩形伪造：与 TabBar.test.tsx/Sidebar.test.tsx 的 mockPaneRects 不同，这里要区分
+// 四类元素——标签栏本身（.tabbar）、标签栏里每个标签（.tab[data-tab-id]）、某标签的
+// 窗格行（.term-wrap[data-tab-id]）、窗格自身（[data-pane-id]）。.tab 和 .term-wrap
+// 可能带有同一个 data-tab-id 值，却指代完全不同的两块区域，必须先按元素本身分类，
+// 不能只按属性值查表。
+function mockRects(rects: Record<string, { left: number; top?: number; width: number; height?: number }>) {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    let key: string | undefined
+    if (this.classList.contains('tabbar')) key = 'tabbar'
+    else if (this.classList.contains('tab') && this.hasAttribute('data-tab-id')) key = `tabstrip:${this.getAttribute('data-tab-id')}`
+    else if (this.classList.contains('term-wrap')) key = `row:${this.getAttribute('data-tab-id')}`
+    else if (this.hasAttribute('data-pane-id')) key = this.getAttribute('data-pane-id') ?? undefined
+    const r = key ? rects[key] : undefined
+    const top = r?.top ?? 0
+    const height = r?.height ?? 100
+    const left = r?.left ?? 0
+    const width = r?.width ?? 0
+    return {
+      top, left, width, height, right: left + width, bottom: top + height, x: left, y: top,
+      toJSON() { return {} },
+    } as DOMRect
+  })
+}
+
+async function drag(el: HTMLElement, from: { x: number; y: number }, to: { x: number; y: number }) {
+  await act(async () => {
+    fireEvent.pointerDown(el, { clientX: from.x, clientY: from.y, pointerId: 1 })
+    fireEvent.pointerMove(el, { clientX: to.x, clientY: to.y, pointerId: 1 })
+    fireEvent.pointerUp(el, { clientX: to.x, clientY: to.y, pointerId: 1 })
+  })
+}
+
+function titlebarFor(title: string): HTMLElement {
+  return screen.getByText(title).closest('.pane-titlebar') as HTMLElement
+}
+
+describe('TabPanes — 拖出窗格标题栏成为独立标签（设计文档 §5-C，"拖出去"方向）', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+
+  it('松手时光标仍在源标签自己的窗格行范围内：视为没有真的拖出去，不产生任何变化', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockRects({ 'row:tab-a': { left: 0, top: 40, width: 600, height: 300 }, tabbar: { left: 0, top: 0, width: 800, height: 30 } })
+
+    await drag(titlebarFor('P2'), { x: 300, y: 60 }, { x: 200, y: 100 }) // 仍落在 row 矩形内
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2) // 没有被拆出
+    expect(useTabs.getState().tabs).toHaveLength(2) // 没有新标签产生（home + tab-a）
+  })
+
+  it('松手时光标在窗格行之外、也不在标签栏上：拆出成独立标签，追加到标签栏末尾', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockRects({ 'row:tab-a': { left: 0, top: 40, width: 600, height: 300 }, tabbar: { left: 0, top: 0, width: 800, height: 30 } })
+
+    await drag(titlebarFor('P2'), { x: 300, y: 60 }, { x: 9000, y: 9000 }) // 远在两者之外
+
+    const { tabs, activeId } = useTabs.getState()
+    expect(tabs.map((t) => t.id)).toEqual(['home', 'tab-a', tabs[2].id]) // 追加在末尾
+    const newTab = tabs[2]
+    expect(newTab.panes.map((p) => p.id)).toEqual(['p2'])
+    expect(newTab.panes[0].ptyId).toBe('pty-2') // ptyId 原样不变，未重新 spawn
+    expect(activeId).toBe(newTab.id) // 新标签成为激活标签
+    expect(tabs.find((t) => t.id === 'tab-a')!.panes.map((p) => p.id)).toEqual(['p1'])
+  })
+
+  it('松手时光标落在标签栏上：拆出的新标签插在光标对应的位置，而不是末尾', async () => {
+    const TAB_OTHER = { id: 'tab-other', kind: 'term' as const, title: 'Other', panes: [{ id: 'po', ptyId: 'pty-o', title: 'Other' }], activePaneId: 'po' }
+    useTabs.setState({ tabs: [HOME, TAB, TAB_OTHER], activeId: 'tab-a' })
+    await renderApp()
+    mockRects({
+      'row:tab-a': { left: 0, top: 40, width: 600, height: 300 },
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tabstrip:home': { left: 0, top: 0, width: 50, height: 26 },
+      'tabstrip:tab-a': { left: 50, top: 0, width: 100, height: 26 },
+      'tabstrip:tab-other': { left: 150, top: 0, width: 100, height: 26 },
+    })
+
+    // x=150 恰好在 tab-a 中点(100)之后、tab-other 中点(200)之前——应插在 tab-a 与
+    // tab-other 之间（下标 2），而不是追加到最末尾（下标 3）。
+    await drag(titlebarFor('P2'), { x: 300, y: 60 }, { x: 150, y: 10 })
+
+    const { tabs } = useTabs.getState()
+    expect(tabs.map((t) => t.id)).toEqual(['home', 'tab-a', tabs[2].id, 'tab-other'])
+  })
+})
+
+describe('TabPanes — 右键窗格标题栏打开上下文菜单（设计文档 §5-C）', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+
+  it('右键打开菜单，列出「移出为独立标签」与「关闭窗格」两项', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(titlebarFor('P2'), { clientX: 100, clientY: 100 }) })
+
+    expect(screen.getByText('移出为独立标签')).toBeTruthy()
+    expect(screen.getByText('关闭窗格')).toBeTruthy()
+  })
+
+  it('点击「移出为独立标签」：拆出成独立标签（无落点，追加到末尾），菜单随即关闭', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(titlebarFor('P2'), { clientX: 100, clientY: 100 }) })
+    await act(async () => { fireEvent.click(screen.getByText('移出为独立标签')) })
+
+    expect(screen.queryByText('移出为独立标签')).toBeNull() // 菜单已关闭
+    const { tabs } = useTabs.getState()
+    expect(tabs).toHaveLength(3)
+    expect(tabs[2].panes.map((p) => p.id)).toEqual(['p2'])
+  })
+
+  it('点击「关闭窗格」：走既有的 closePane 路径（无存活 PTY 时直接移除，不弹确认）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(titlebarFor('P2'), { clientX: 100, clientY: 100 }) })
+    await act(async () => { fireEvent.click(screen.getByText('关闭窗格')) })
+
+    await vi.waitFor(() => {
+      expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes.map((p) => p.id)).toEqual(['p1'])
+    })
+  })
+
+  it('点击菜单外部：关闭菜单，不触发任何动作', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(titlebarFor('P2'), { clientX: 100, clientY: 100 }) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) }) // 外部点击监听器延迟一个 tick 才挂载
+    await act(async () => { fireEvent.pointerDown(document.body) })
+
+    expect(screen.queryByText('移出为独立标签')).toBeNull()
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2) // 没有任何变化
+  })
+
+  it('按 Escape：关闭菜单', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(titlebarFor('P2'), { clientX: 100, clientY: 100 }) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { fireEvent.keyDown(window, { key: 'Escape' }) })
+
+    expect(screen.queryByText('移出为独立标签')).toBeNull()
+  })
+
+  it('窗口失焦（blur）：关闭菜单', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(titlebarFor('P2'), { clientX: 100, clientY: 100 }) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { window.dispatchEvent(new Event('blur')) })
+
+    expect(screen.queryByText('移出为独立标签')).toBeNull()
+  })
+})

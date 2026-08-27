@@ -69,6 +69,7 @@ type TabsState = {
   addPane(tabId: string, afterPaneId: string): boolean
   insertPaneAt(tabId: string, index: number): string | null
   movePanesToTab(sourceTabId: string, targetTabId: string, target: DropTarget): boolean
+  detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
   startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
@@ -208,6 +209,52 @@ export const useTabs = create<TabsState>((set, get) => ({
       return { tabs: nextTabs, activeId }
     })
     return true
+  },
+  // 把窗格从其所在标签拆出，独立成一个新标签（设计文档 §5-C"拖出去/右键菜单"，与
+  // movePanesToTab 的"拖进来"互补，是用户明确要求的反向操作）。窗格对象原样保留、
+  // 绝不重新创建——与 movePanesToTab 同一个最关键的不变量：TerminalLayer.tsx 按
+  // pane.id 做 key，id 不变就不会卸载重挂对应的 <TerminalView>，xterm 实例与其内部
+  // 回滚缓冲因此不受影响。
+  // 源标签只剩这一个窗格时是空操作（"窗格已经是独立标签，没有什么可拆的"，也是
+  // 设计文档明确要求的 no-op）：不产生任何状态变更，返回 null；调用方（拖拽处理器/
+  // 右键菜单）据此判断。源标签移除该窗格后就地保留（不像 movePanesToTab 里源标签会
+  // 整体消失——那里是"移空"，这里源标签至少还剩一个），按 closePane 同一套规则重新
+  // 等分、重算标题、若被移出的窗格恰是焦点窗格则焦点落到同一位置（原下标，超出则退到
+  // 新的最后一个）。
+  // insertAt 缺省时新标签追加到 tabs 数组末尾（"拖到窗格区之外的任意位置"，设计文档
+  // §5-C）；提供时插在该下标（"拖到标签栏上的具体位置"，由调用方用
+  // paneDrop.ts 的 resolveTabBarInsertIndex 算出并 clamp 到至少 1——不能插在主页
+  // 标签前面，这里再兜底 clamp 一次，防止调用方没做这一步）。新标签成为激活标签，
+  // 该窗格是其唯一、也是焦点窗格。
+  detachPaneToNewTab: (tabId, paneId, insertAt) => {
+    const sourceTab = get().tabs.find((t) => t.id === tabId)
+    if (!sourceTab || sourceTab.kind !== 'term') return null
+    if (sourceTab.panes.length <= 1) return null
+    const idx = sourceTab.panes.findIndex((p) => p.id === paneId)
+    if (idx === -1) return null
+    const pane = sourceTab.panes[idx]
+    const newTabId = `tab-${nextTab++}`
+    const newTab: Tab = { id: newTabId, kind: 'term', title: pane.title, panes: [pane], activePaneId: pane.id }
+    set((s) => {
+      const remainingPanes = sourceTab.panes.filter((p) => p.id !== paneId)
+      const activePaneId =
+        sourceTab.activePaneId === paneId ? remainingPanes[Math.min(idx, remainingPanes.length - 1)]?.id : sourceTab.activePaneId
+      const tabsWithoutPane = s.tabs.map((t) =>
+        t.id === tabId
+          ? {
+              ...t,
+              panes: remainingPanes,
+              activePaneId,
+              paneWidths: equalPaneWidths(remainingPanes.length),
+              title: deriveTabTitle(remainingPanes, t.title),
+            }
+          : t,
+      )
+      const clampedIndex = insertAt === undefined ? tabsWithoutPane.length : Math.max(1, Math.min(insertAt, tabsWithoutPane.length))
+      const nextTabs = [...tabsWithoutPane.slice(0, clampedIndex), newTab, ...tabsWithoutPane.slice(clampedIndex)]
+      return { tabs: nextTabs, activeId: newTabId }
+    })
+    return newTabId
   },
   // 窗格选择器（设计文档 §5-A）选定后调用：给此前没有 ptyId 的窗格补上真正的终端。
   startPaneTerminal: async (tabId, paneId, { title, cwd, inject, threadKey, dirName, rootKey }) => {

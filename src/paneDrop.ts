@@ -42,3 +42,25 @@ export function dropInsertionIndex(paneIds: string[], target: DropTarget): numbe
   if (idx === -1) return paneIds.length
   return target.side === 'left' ? idx : idx + 1
 }
+
+// 光标是否落在某个矩形内（左闭右开、上闭下开，与 resolveDropTarget 同一套边界约定）。
+// 供"窗格拖出"（设计文档 §5-C）判断光标是否还停留在源标签自己的窗格行里（TabPanes.tsx
+// 的 `.term-wrap`）、或落在了标签栏（TabBar.tsx 的 `.tabbar`）范围内——两处都只是判断
+// "在不在某个矩形里"，不需要再各写一份。
+export function pointInRect(x: number, y: number, rect: Rect): boolean {
+  return x >= rect.left && x < rect.left + rect.width && y >= rect.top && y < rect.top + rect.height
+}
+
+// 把光标 x 坐标 + 一组标签矩形（TabBar.tsx 渲染顺序，与 useTabs 的 tabs 数组顺序一致，
+// 含主页标签）换算成该插入 tabs 数组的下标——命中第一个"光标在其中点左侧"的标签就
+// 插在它前面；一个都没命中（光标在最后一个标签中点右侧，或没有任何标签）则插到末尾。
+// 供"把窗格拖出成独立标签、松手时落在标签栏上"（设计文档 §5-C）决定新标签插入的位置。
+// 主页标签恒为下标 0，这里不做"不能插在主页前面"这类业务假设（保持纯粹的几何换算），
+// 调用方（TabPanes.tsx）自行 clamp 到至少 1。
+export function resolveTabBarInsertIndex(tabRects: { rect: Rect }[], cursorX: number): number {
+  for (let i = 0; i < tabRects.length; i++) {
+    const mid = tabRects[i].rect.left + tabRects[i].rect.width / 2
+    if (cursorX < mid) return i
+  }
+  return tabRects.length
+}

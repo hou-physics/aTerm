@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dropIndicatorRect, dropInsertionIndex, resolveDropTarget, type PaneSlotRect } from './paneDrop'
+import { dropIndicatorRect, dropInsertionIndex, pointInRect, resolveDropTarget, resolveTabBarInsertIndex, type PaneSlotRect } from './paneDrop'
 
 // 三个并排窗格，各 300px 宽、100px 高，贴着 y=[0,100)（与真实横向分屏布局一致）。
 const THREE: PaneSlotRect[] = [
@@ -64,5 +64,45 @@ describe('dropInsertionIndex：落点换算成 panes 数组下标', () => {
   })
   it('目标窗格不在数组中时退化为追加到末尾', () => {
     expect(dropInsertionIndex(ids, { paneId: 'not-there', side: 'left' })).toBe(3)
+  })
+})
+
+// 窗格拖出成独立标签（设计文档 §5-C）用到的两个纯函数：pointInRect（判断光标是否还在
+// 源标签自己的窗格行 / 标签栏范围内）、resolveTabBarInsertIndex（落在标签栏上时换算
+// 插入下标）。
+describe('pointInRect：光标是否落在某个矩形内（左闭右开、上闭下开）', () => {
+  const rect = { top: 10, left: 20, width: 100, height: 50 }
+  it('矩形内部命中', () => {
+    expect(pointInRect(50, 30, rect)).toBe(true)
+  })
+  it('左/上边界命中，右/下边界不命中', () => {
+    expect(pointInRect(20, 30, rect)).toBe(true)
+    expect(pointInRect(50, 10, rect)).toBe(true)
+    expect(pointInRect(120, 30, rect)).toBe(false) // left+width
+    expect(pointInRect(50, 60, rect)).toBe(false) // top+height
+  })
+  it('矩形外部不命中', () => {
+    expect(pointInRect(0, 0, rect)).toBe(false)
+  })
+})
+
+describe('resolveTabBarInsertIndex：光标 x 坐标换算成该插入 tabs 数组的下标', () => {
+  const TABS = [
+    { rect: { top: 0, left: 0, width: 100, height: 26 } }, // 中点 50
+    { rect: { top: 0, left: 100, width: 100, height: 26 } }, // 中点 150
+    { rect: { top: 0, left: 200, width: 100, height: 26 } }, // 中点 250
+  ]
+  it('光标在第一个标签中点左侧：插在最前面（下标 0）', () => {
+    expect(resolveTabBarInsertIndex(TABS, 10)).toBe(0)
+  })
+  it('光标在两个标签中点之间：插在后一个标签之前', () => {
+    expect(resolveTabBarInsertIndex(TABS, 120)).toBe(1)
+    expect(resolveTabBarInsertIndex(TABS, 220)).toBe(2)
+  })
+  it('光标在最后一个标签中点右侧：追加到末尾', () => {
+    expect(resolveTabBarInsertIndex(TABS, 280)).toBe(3)
+  })
+  it('没有任何标签矩形：恒为 0（等同追加，数组本就是空的）', () => {
+    expect(resolveTabBarInsertIndex([], 100)).toBe(0)
   })
 })

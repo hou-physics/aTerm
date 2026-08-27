@@ -362,6 +362,113 @@ describe('useTabs — movePanesToTab：跨标签移动窗格（拖拽落点）',
   })
 })
 
+// 把窗格拖出成独立标签（设计文档 §5-C"拖出去/右键菜单"）：movePanesToTab 的反方向。
+// 核心不变量同样是 pane 对象的 id/ptyId 原样保留——TerminalLayer.test.tsx 用真实渲染
+// 的 <App> 单独验证 DOM 节点身份；这里只测 store 状态本身。
+describe('useTabs — detachPaneToNewTab：把窗格拆出成独立标签（拖出去 / 右键菜单）', () => {
+  it('多窗格标签拆出其中一个：新标签持有该窗格（id/ptyId 原样不变），源标签保留其余窗格并重新等分', () => {
+    const p1 = makePane({ title: '窗格甲' })
+    const p2 = makePane({ title: '窗格乙' })
+    const sourceTab = makeTermTab({ panes: [p1, p2], activePaneId: p2.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab], activeId: sourceTab.id })
+    const originalId = p2.id
+    const originalPtyId = p2.ptyId
+
+    const newTabId = useTabs.getState().detachPaneToNewTab(sourceTab.id, p2.id)
+
+    expect(newTabId).toBeTruthy()
+    const { tabs, activeId } = useTabs.getState()
+    expect(activeId).toBe(newTabId) // 新标签成为激活标签
+
+    const newTab = tabs.find((t) => t.id === newTabId)!
+    expect(newTab.panes).toHaveLength(1)
+    expect(newTab.panes[0].id).toBe(originalId) // id 原样不变
+    expect(newTab.panes[0].ptyId).toBe(originalPtyId) // ptyId 原样不变，未重新 spawn
+    expect(newTab.panes[0].title).toBe('窗格乙') // 整个 pane 对象原样保留
+    expect(newTab.activePaneId).toBe(originalId) // 该窗格是新标签的焦点
+
+    const source = tabs.find((t) => t.id === sourceTab.id)!
+    expect(source.panes.map((p) => p.id)).toEqual([p1.id]) // 源标签只剩其余窗格
+    expect(source.paneWidths).toEqual([1]) // 重新等分
+    expect(source.title).toBe('窗格甲') // 回到单窗格，标题跟随剩下的窗格
+    expect(source.activePaneId).toBe(p1.id) // 被拆出的正是原焦点窗格，焦点落到剩下的窗格
+  })
+
+  it('三窗格标签拆出中间一个：其余两个窗格顺序不变，重新等分为两半', () => {
+    const p1 = makePane()
+    const p2 = makePane()
+    const p3 = makePane()
+    const sourceTab = makeTermTab({ panes: [p1, p2, p3], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab], activeId: sourceTab.id })
+
+    useTabs.getState().detachPaneToNewTab(sourceTab.id, p2.id)
+
+    const source = useTabs.getState().tabs.find((t) => t.id === sourceTab.id)!
+    expect(source.panes.map((p) => p.id)).toEqual([p1.id, p3.id])
+    expect(source.paneWidths).toEqual([0.5, 0.5])
+    expect(source.activePaneId).toBe(p1.id) // 拆出的不是焦点窗格，焦点原样不变
+  })
+
+  it('缺省 insertAt：新标签追加到 tabs 数组末尾', () => {
+    const p1 = makePane()
+    const p2 = makePane()
+    const sourceTab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id })
+    const otherTab = makeTermTab()
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, otherTab], activeId: sourceTab.id })
+
+    const newTabId = useTabs.getState().detachPaneToNewTab(sourceTab.id, p2.id)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([HOME_TAB.id, sourceTab.id, otherTab.id, newTabId])
+  })
+
+  it('提供 insertAt：新标签插在该下标（拖到标签栏具体位置）', () => {
+    const p1 = makePane()
+    const p2 = makePane()
+    const sourceTab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id })
+    const otherTab = makeTermTab()
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, otherTab], activeId: sourceTab.id })
+
+    const newTabId = useTabs.getState().detachPaneToNewTab(sourceTab.id, p2.id, 1)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([HOME_TAB.id, newTabId, sourceTab.id, otherTab.id])
+  })
+
+  it('insertAt 被 clamp 到至少 1：不能插在主页标签前面', () => {
+    const p1 = makePane()
+    const p2 = makePane()
+    const sourceTab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab], activeId: sourceTab.id })
+
+    const newTabId = useTabs.getState().detachPaneToNewTab(sourceTab.id, p2.id, 0)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([HOME_TAB.id, newTabId, sourceTab.id])
+  })
+
+  it('源标签只剩这一个窗格：no-op，返回 null，不做任何状态变更（不能拆出一个标签唯一的窗格）', () => {
+    const p1 = makePane()
+    const sourceTab = makeTermTab({ panes: [p1], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab], activeId: sourceTab.id })
+    const before = useTabs.getState().tabs
+
+    const result = useTabs.getState().detachPaneToNewTab(sourceTab.id, p1.id)
+
+    expect(result).toBeNull()
+    expect(useTabs.getState().tabs).toBe(before) // 连数组引用都没变
+  })
+
+  it('标签不存在、是 home 标签、或窗格不属于该标签：拒绝，返回 null', () => {
+    const p1 = makePane()
+    const p2 = makePane()
+    const sourceTab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab], activeId: sourceTab.id })
+
+    expect(useTabs.getState().detachPaneToNewTab('does-not-exist', p1.id)).toBeNull()
+    expect(useTabs.getState().detachPaneToNewTab('home', p1.id)).toBeNull()
+    expect(useTabs.getState().detachPaneToNewTab(sourceTab.id, 'not-a-real-pane')).toBeNull()
+    expect(useTabs.getState().tabs.find((t) => t.id === sourceTab.id)!.panes).toHaveLength(2) // 未受影响
+  })
+})
+
 describe('useTabs — closePane：关窗格 vs 关标签', () => {
   it('多窗格标签：关闭一个窗格不弹确认（该窗格从未 spawn 过 PTY），只从数组移除并重新等分', async () => {
     const p1 = makePane({ ptyId: undefined }) // 待选窗格，从未 spawn

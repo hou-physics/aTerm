@@ -29,3 +29,31 @@ export function getPaneSlotRects(tab: Tab | undefined): PaneSlotRect[] {
 export function getContentWidth(): number {
   return document.querySelector<HTMLElement>('.content')?.clientWidth ?? 0
 }
+
+// 窗格拖出成独立标签（设计文档 §5-C）用到的另外三个 DOM 查询：源标签自己的窗格行
+// （光标还在其中即视为"没有真的拖出去"，见 TabPanes.tsx）、标签栏整体范围（光标落在
+// 其中即按位置插入新标签，见 TabBar.tsx）、标签栏里每个标签的矩形（换算插入下标）。
+// 同上，不是纯函数，不单独测试；纯粹的坐标判定逻辑在 paneDrop.ts 的 pointInRect /
+// resolveTabBarInsertIndex 里单独测过。
+export function getPaneRowRect(tabId: string): PaneSlotRect['rect'] | null {
+  const el = document.querySelector<HTMLElement>(`.term-wrap[data-tab-id="${tabId}"]`)
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  return { top: r.top, left: r.left, width: r.width, height: r.height }
+}
+
+export function getTabBarRect(): PaneSlotRect['rect'] | null {
+  const el = document.querySelector<HTMLElement>('.tabbar')
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  return { top: r.top, left: r.left, width: r.width, height: r.height }
+}
+
+export function getTabRects(): { tabId: string; rect: PaneSlotRect['rect'] }[] {
+  const out: { tabId: string; rect: PaneSlotRect['rect'] }[] = []
+  document.querySelectorAll<HTMLElement>('.tab[data-tab-id]').forEach((el) => {
+    const r = el.getBoundingClientRect()
+    out.push({ tabId: el.getAttribute('data-tab-id')!, rect: { top: r.top, left: r.left, width: r.width, height: r.height } })
+  })
+  return out
+}

@@ -155,6 +155,47 @@ describe('TerminalLayer — 跨标签移动窗格后，终端 DOM 节点与其 i
   })
 })
 
+// 窗格拖出成独立标签（设计文档 §5-C，与上面 §5-B 场景 A 互为反方向）：同一个核心
+// 不变量——移动/拆出后 pane.id/ptyId 原样不变、终端 DOM 节点是同一个实例（未卸载
+// 重挂）。这里直接调用 store 方法（不模拟真实指针拖拽，那部分交互在 panes.test.tsx
+// 覆盖），验证移动前后的 DOM 节点身份与挂载次数——任务明确要求的
+// "test asserting the pane id and ptyId are unchanged and the terminal wrapper is
+// the same DOM element instance before and after moving out"。
+describe('TerminalLayer — 窗格拖出成独立标签后，终端 DOM 节点与其 id/ptyId 都原样保留', () => {
+  it('移动前后同一个 DOM 节点引用，mount effect 不重新跑一次，pane id/ptyId 不变', async () => {
+    const TWO = {
+      id: 'tab-two', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'q1', ptyId: 'pty-q1', title: 'Q1' }, { id: 'q2', ptyId: 'pty-q2', title: 'Q2' }],
+      activePaneId: 'q1',
+    }
+    useTabs.setState({ tabs: [HOME, TWO], activeId: 'tab-two' })
+    await renderApp()
+
+    const beforeWrapper = screen.getByTestId('term-pty-q2').closest('.terminal-wrapper') as HTMLElement
+    expect(mountCounts.get('pty-q2')).toBe(1)
+
+    let newTabId: string | null = null
+    await act(async () => {
+      newTabId = useTabs.getState().detachPaneToNewTab('tab-two', 'q2')
+      expect(newTabId).toBeTruthy()
+    })
+
+    const afterWrapper = screen.getByTestId('term-pty-q2').closest('.terminal-wrapper') as HTMLElement
+    expect(afterWrapper).toBe(beforeWrapper) // 同一个 DOM 节点引用——没有被卸载重挂
+    expect(mountCounts.get('pty-q2')).toBe(1) // mount effect 仍然只跑过一次
+
+    const { tabs, activeId } = useTabs.getState()
+    expect(activeId).toBe(newTabId) // 新标签成为激活标签
+    const newTab = tabs.find((t) => t.id === newTabId)!
+    expect(newTab.panes[0].id).toBe('q2') // pane id 原样不变
+    expect(newTab.panes[0].ptyId).toBe('pty-q2') // ptyId 原样不变（同一个 PTY，未重新 spawn）
+    expect(tabs.find((t) => t.id === 'tab-two')!.panes.map((p) => p.id)).toEqual(['q1']) // 源标签只剩其余窗格
+
+    // 新标签现在是激活标签，其终端包裹层应可见（display 不是 none）
+    expect(afterWrapper.style.display).not.toBe('none')
+  })
+})
+
 describe('TerminalLayer — 点击终端聚焦所在窗格（设计文档 §6，终端现在渲染在扁平层里）', () => {
   it('点击某个非聚焦窗格的终端会把该窗格设为 activePaneId', async () => {
     const TWO = {

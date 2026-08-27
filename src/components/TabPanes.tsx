@@ -1,16 +1,123 @@
-import { useCallback, useRef, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import {
+  useCallback,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  type RefObject,
+} from 'react'
+import { pointInRect, resolveTabBarInsertIndex } from '../paneDrop'
+import { getPaneRowRect, getTabBarRect, getTabRects } from '../paneDropDom'
 import { clampDividerDrag, equalPaneWidths } from '../paneLayout'
+import { useDnd } from '../store/dnd'
 import { type Pane, type Tab, useTabs } from '../store/tabs'
+import { PaneContextMenu } from './PaneContextMenu'
 import { PanePicker } from './PanePicker'
+
+// 与 TabBar.tsx/Sidebar.tsx 同一个阈值/idiom：拖动超过这个像素距离才判定为拖拽而不是
+// 一次普通点击。
+const DRAG_THRESHOLD_PX = 4
+
+type TitlebarDragState = { startX: number; startY: number; dragging: boolean }
 
 // 窗格标题栏（设计文档 §4）：仅在标签持有多于一个窗格时渲染（单窗格与现状保持一致，
 // 不占高度）。左侧标题过长用 CSS 省略号截断；右侧 × 关闭该窗格。聚焦窗格用强调色
 // 标出（既有 CSS 变量，不新增调色板条目）。
-function PaneTitleBar({ title, focused, onClose }: { title: string; focused: boolean; onClose: () => void }) {
+//
+// 同时是"把窗格拖出成独立标签"的拖拽手柄（设计文档 §5-C，用户明确要求的"拖进来"的
+// 反向操作）：与 TabBar.tsx/Sidebar.tsx 同一套 pointerdown/move/up + setPointerCapture
+// idiom，不写第二套。松手时若光标仍停留在源标签自己的窗格行（`.term-wrap`）范围内，
+// 视为"没有真的拖出去"，不做任何事；若停留在标签栏（`.tabbar`）上，按落点算出的位置
+// 插入新标签；否则（拖到窗格区之外的任意其它地方）追加到标签栏末尾。
+//
+// 右键（onContextMenu）打开一个自包含的小菜单（PaneContextMenu.tsx）：「移出为独立
+// 标签」调用与拖出去完全相同的 store 方法（只是没有落点，追加到末尾）；「关闭窗格」
+// 直接复用 onClose（与 × 按钮同一条路径，含既有确认逻辑）。
+function PaneTitleBar({
+  tab,
+  pane,
+  title,
+  focused,
+  onClose,
+}: {
+  tab: Tab
+  pane: Pane
+  title: string
+  focused: boolean
+  onClose: () => void
+}) {
+  const dragRef = useRef<TitlebarDragState | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+
+  const detach = useCallback(
+    (insertAt?: number) => {
+      useTabs.getState().detachPaneToNewTab(tab.id, pane.id, insertAt)
+    },
+    [tab.id, pane.id],
+  )
+
+  const onPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('.pane-titlebar-close')) return
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    dragRef.current = { startX: e.clientX, startY: e.clientY, dragging: false }
+  }, [])
+
+  const onPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    if (!drag.dragging) {
+      if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
+      drag.dragging = true
+    }
+    const tabBarRect = getTabBarRect()
+    if (tabBarRect && pointInRect(e.clientX, e.clientY, tabBarRect)) {
+      useDnd.getState().setTabBarIndex(resolveTabBarInsertIndex(getTabRects(), e.clientX))
+    } else {
+      useDnd.getState().setTabBarIndex(null)
+    }
+  }, [])
+
+  const onPointerUp = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = dragRef.current
+      dragRef.current = null
+      e.currentTarget.releasePointerCapture?.(e.pointerId)
+      const tabBarIndex = useDnd.getState().tabBarIndex
+      useDnd.getState().setTabBarIndex(null)
+      if (!drag || !drag.dragging) return
+      const rowRect = getPaneRowRect(tab.id)
+      if (rowRect && pointInRect(e.clientX, e.clientY, rowRect)) return // 仍在源标签自己的窗格行里：没有真的拖出去
+      detach(tabBarIndex ?? undefined)
+    },
+    [tab.id, detach],
+  )
+
+  const onContextMenu = useCallback((e: ReactMouseEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setContextMenu({ x: e.clientX, y: e.clientY })
+  }, [])
+
   return (
-    <div className={`pane-titlebar${focused ? ' pane-titlebar-focused' : ''}`}>
+    <div
+      className={`pane-titlebar${focused ? ' pane-titlebar-focused' : ''}`}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onContextMenu={onContextMenu}
+    >
       <span className="pane-titlebar-title" title={title}>{title}</span>
       <span className="pane-titlebar-close" onClick={onClose}>×</span>
+      {contextMenu && (
+        <PaneContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onDetach={() => detach()}
+          onClose={onClose}
+          onDismiss={() => setContextMenu(null)}
+        />
+      )}
     </div>
   )
 }
@@ -105,7 +212,7 @@ function PaneItem({
       // 全部窗格，不只是已经启动终端的那些。见 paneDrop.ts / TabBar.tsx / Sidebar.tsx。
       data-pane-id={pane.id}
     >
-      {showTitlebar && <PaneTitleBar title={pane.title} focused={focused} onClose={onClose} />}
+      {showTitlebar && <PaneTitleBar tab={tab} pane={pane} title={pane.title} focused={focused} onClose={onClose} />}
       {/* 只是几何占位：真正的 <TerminalView> 现在渲染在 TerminalLayer.tsx（App.tsx 里
           与本组件同级挂载的扁平终端层），不再嵌在这棵随标签切换/窗格增删而反复变化的
           子树里——这正是本次重构要解决的问题（终端不该因为布局变化而卸载重挂）。
@@ -150,7 +257,7 @@ export function TabPanes({ tab, isActiveTab }: { tab: Tab; isActiveTab: boolean 
   })
 
   return (
-    <div ref={rowRef} className="term-wrap" style={{ display: isActiveTab ? 'flex' : 'none' }}>
+    <div ref={rowRef} className="term-wrap" data-tab-id={tab.id} style={{ display: isActiveTab ? 'flex' : 'none' }}>
       {children}
     </div>
   )

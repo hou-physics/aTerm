@@ -1,7 +1,7 @@
-import { useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { newTerminal } from '../actions'
 import { resolveDropTarget } from '../paneDrop'
-import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
+import { getContentWidth, getPaneSlotRects, getTabRects } from '../paneDropDom'
 import { decidePaneFit, MAX_PANES } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useHint } from '../store/hint'
@@ -14,6 +14,37 @@ import { useTabs } from '../store/tabs'
 const DRAG_THRESHOLD_PX = 4
 
 type DragState = { tabId: string; startX: number; startY: number; dragging: boolean }
+
+// 把窗格拖出成独立标签、松手时落在标签栏上（设计文档 §5-C，TabPanes.tsx 的
+// PaneTitleBar 是拖拽源）应插入的位置指示：一条竖线，与 DropIndicator.tsx 的
+// 半透明色块同一套"拖拽源实时写 store/dnd.ts、指示条只读"模式，只是这里落点所在的
+// 容器是 `.tabbar` 而不是 `.content`，形状也不同（插入位置用线，覆盖窗格用块），
+// 因此没有直接复用 DropIndicator 组件本身，而是复用它背后的store/pointer-event 机制。
+function TabBarDropIndicator() {
+  const tabBarIndex = useDnd((s) => s.tabBarIndex)
+  const [left, setLeft] = useState<number | null>(null)
+
+  useLayoutEffect(() => {
+    if (tabBarIndex === null) {
+      setLeft(null)
+      return
+    }
+    const bar = document.querySelector<HTMLElement>('.tabbar')
+    if (!bar) {
+      setLeft(null)
+      return
+    }
+    const barRect = bar.getBoundingClientRect()
+    const rects = getTabRects()
+    const target = rects[tabBarIndex]
+    const last = rects[rects.length - 1]
+    const x = target ? target.rect.left : last ? last.rect.left + last.rect.width : 0
+    setLeft(x - barRect.left)
+  }, [tabBarIndex])
+
+  if (left === null) return null
+  return <div className="tabbar-drop-indicator" style={{ left }} />
+}
 
 // 把已打开的标签拖进窗格区（设计文档 §5-B 场景 A，用户明确要求）：与 TabPanes.tsx 的
 // PaneDivider / ConversationPanel.tsx 的宽度手柄同一套 pointerdown/move/up +
@@ -114,6 +145,7 @@ export function TabBar() {
       {tabs.map((t) => (
         <div
           key={t.id}
+          data-tab-id={t.id}
           className={`tab ${t.id === activeId ? 'active' : ''}`}
           onPointerDown={(e) => onTabPointerDown(e, t.id)}
           onPointerMove={onTabPointerMove}
@@ -143,6 +175,10 @@ export function TabBar() {
       >
         {panelCollapsed ? '‹' : '›'}
       </button>
+      {/* 窗格拖出成独立标签（设计文档 §5-C）落在标签栏上时的插入位置指示，见上方
+          TabBarDropIndicator 注释。渲染顺序放最后，画在其它标签栏元素之上，
+          不依赖 z-index（与 .pane-drop-indicator 在 App.tsx 里的取舍一致）。 */}
+      <TabBarDropIndicator />
     </div>
   )
 }
