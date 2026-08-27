@@ -115,8 +115,10 @@ body {
   color: var(--color-text);
 }
 
-.conv-panel-dock { width: 400px; flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.conv-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.conv-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.conv-panel-resize-handle { position: absolute; top: 0; bottom: 0; left: -4px; width: 1px; padding: 0 4px; box-sizing: content-box; background: transparent; background-clip: content-box; cursor: col-resize; z-index: 2; }
+.conv-panel-resize-handle:hover, .conv-panel-resize-handle:active { background-color: var(--color-accent); }
 .conv-header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
 .conv-title { font-size: 13px; font-weight: 600; }
 .conv-refresh { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }

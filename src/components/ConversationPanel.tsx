@@ -1,10 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { firstLineSummary, formatTimeHM, groupUserTurnsByDate } from '../conversation'
 import { readConversation, type Conversation } from '../ipc'
+import { PANEL_WIDTH_DEFAULT, useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
 
 function scrollToTurn(uuid: string) {
   document.getElementById(`turn-${uuid}`)?.scrollIntoView({ block: 'start' })
+}
+
+// 面板宽度拖到超过窗口宽度的一部分观感很怪（把终端挤没了），额外封顶到窗口宽度的 60%。
+// 只在拖拽/双击复位这些"主动改宽度"的时刻现算，不装 window resize 监听器——
+// 窗口后续变化不会主动收窄已设定的宽度，下次拖拽时才会重新生效。
+function windowCap(px: number): number {
+  return Math.min(px, window.innerWidth * 0.6)
 }
 
 export function ConversationPanel() {
@@ -71,26 +79,61 @@ export function ConversationPanel() {
     })
   }, [])
 
-  if (!dirName || !rootKey) {
-    return (
-      <div className="conv-panel">
-        <div className="conv-header"><span className="conv-title">对话</span></div>
-        <div className="conv-empty">当前标签没有关联的对话</div>
-      </div>
-    )
-  }
+  // 拖拽状态本身不必是 React state（不需要触发重渲染），一个 ref 就够；
+  // pointerdown 时用 setPointerCapture 把该指针后续的 move/up 都路由回同一个
+  // 元素，因此全部用该元素自身的 React 指针事件 props 处理即可，不必挂
+  // document 级别的全局监听器（也就没有"忘记移除"的风险）。
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null)
 
+  const onResizePointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    dragRef.current = { startX: e.clientX, startWidth: useLayout.getState().panelWidth }
+  }, [])
+
+  const onResizePointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    const dx = e.clientX - drag.startX // 手柄在面板左边缘：指针右移变窄、左移变宽
+    useLayout.getState().setPanelWidth(windowCap(drag.startWidth - dx))
+  }, [])
+
+  const onResizePointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return
+    dragRef.current = null
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    useLayout.getState().commitPanelWidth()
+  }, [])
+
+  const onResizeDoubleClick = useCallback(() => {
+    useLayout.getState().setPanelWidth(windowCap(PANEL_WIDTH_DEFAULT))
+    useLayout.getState().commitPanelWidth()
+  }, [])
+
+  const hasThread = Boolean(dirName && rootKey)
   const groups = conv ? groupUserTurnsByDate(conv.turns) : []
 
   return (
     <div className="conv-panel">
+      <div
+        className="conv-panel-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        title="拖动调整面板宽度（双击复位）"
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={onResizePointerUp}
+        onPointerCancel={onResizePointerUp}
+        onDoubleClick={onResizeDoubleClick}
+      />
       <div className="conv-header">
         <span className="conv-title">对话</span>
-        <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>
+        {hasThread && <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>}
       </div>
-      {loading && <div className="conv-status">加载中…</div>}
-      {error && <div className="conv-status conv-error">加载失败：{error}</div>}
-      {!loading && !error && conv && (
+      {!hasThread && <div className="conv-empty">当前标签没有关联的对话</div>}
+      {hasThread && loading && <div className="conv-status">加载中…</div>}
+      {hasThread && error && <div className="conv-status conv-error">加载失败：{error}</div>}
+      {hasThread && !loading && !error && conv && (
         <>
           <div className="conv-timeline">
             {groups.map((g) => {

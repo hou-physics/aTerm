@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react'
 
 vi.mock('../ipc', () => ({
@@ -10,6 +10,7 @@ vi.mock('../ipc', () => ({
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 import * as ipc from '../ipc'
+import { useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
 import { ConversationPanel } from '../components/ConversationPanel'
 
@@ -196,5 +197,58 @@ describe('ConversationPanel — 时间线日期分组可折叠', () => {
     await screen.findByText('B会话较新一天')
     // B 的较旧一天必须是折叠的，不能延续 A 里"展开较旧分组"的状态
     expect(screen.queryByText('B会话较旧一天')).toBeNull()
+  })
+})
+
+describe('ConversationPanel — 面板宽度可拖拽', () => {
+  const originalInnerWidth = window.innerWidth
+
+  beforeEach(() => {
+    useLayout.setState({ panelWidth: 400 })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(window, 'innerWidth', { value: originalInnerWidth, configurable: true })
+  })
+
+  it('拖动左边缘手柄改变宽度：向左拖变宽，仅在 pointerup 时落盘持久化', () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
+    render(<ConversationPanel />)
+    const handle = screen.getByRole('separator')
+    fireEvent.pointerDown(handle, { clientX: 500, pointerId: 1 })
+    fireEvent.pointerMove(handle, { clientX: 400, pointerId: 1 }) // 左移 100px → 变宽 100px
+    expect(useLayout.getState().panelWidth).toBe(500)
+    expect(setItemSpy).not.toHaveBeenCalledWith('aterm-panel-width', expect.anything())
+    fireEvent.pointerUp(handle, { clientX: 400, pointerId: 1 })
+    expect(setItemSpy).toHaveBeenCalledWith('aterm-panel-width', '500')
+    setItemSpy.mockRestore()
+  })
+
+  it('向右拖变窄，且不超过 [280, 900] 的静态边界', () => {
+    render(<ConversationPanel />)
+    const handle = screen.getByRole('separator')
+    fireEvent.pointerDown(handle, { clientX: 400, pointerId: 1 })
+    fireEvent.pointerMove(handle, { clientX: 5000, pointerId: 1 }) // 尝试拖到远小于 280
+    expect(useLayout.getState().panelWidth).toBe(280)
+  })
+
+  it('拖拽宽度不超过窗口宽度的 60%（现算，不依赖 resize 监听器）', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 600, configurable: true }) // 60% = 360
+    render(<ConversationPanel />)
+    const handle = screen.getByRole('separator')
+    fireEvent.pointerDown(handle, { clientX: 500, pointerId: 1 })
+    fireEvent.pointerMove(handle, { clientX: 0, pointerId: 1 }) // 尝试拖到 900
+    expect(useLayout.getState().panelWidth).toBe(360)
+  })
+
+  it('双击手柄把宽度复位到 400 并落盘', () => {
+    useLayout.getState().setPanelWidth(700)
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
+    render(<ConversationPanel />)
+    const handle = screen.getByRole('separator')
+    fireEvent.doubleClick(handle)
+    expect(useLayout.getState().panelWidth).toBe(400)
+    expect(setItemSpy).toHaveBeenCalledWith('aterm-panel-width', '400')
+    setItemSpy.mockRestore()
   })
 })
