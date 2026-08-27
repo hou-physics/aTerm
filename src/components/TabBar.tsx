@@ -8,7 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { newTerminal } from '../actions'
-import { pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
+import { DRAG_THRESHOLD_PX, pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
 import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
 import { useDnd } from '../store/dnd'
@@ -17,11 +17,6 @@ import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { type Tab, useTabs } from '../store/tabs'
 import { ContextMenu } from './ContextMenu'
-
-// 拖动超过这个像素距离才算真的在拖标签，而不是一次普通点击——阈值太小会让手抖的
-// 点击被误判成拖拽，太大会让拖拽感觉迟钝；4px 是这类交互的常见取值（设计文档要求
-// "small movement threshold (e.g. 4px)"）。
-const DRAG_THRESHOLD_PX = 4
 
 type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean }
 

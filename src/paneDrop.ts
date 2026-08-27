@@ -10,6 +10,14 @@ export type PaneSlotRect = { paneId: string; rect: Rect }
 export type DropSide = 'left' | 'right'
 export type DropTarget = { paneId: string; side: DropSide }
 
+// 拖动超过这个像素距离才算真的在拖，而不是一次普通点击——阈值太小会让手抖的点击被
+// 误判成拖拽，太大会让拖拽感觉迟钝；4px 是这类交互的常见取值（设计文档要求
+// "small movement threshold (e.g. 4px)"）。三个拖拽源（TabBar.tsx 拖标签、
+// Sidebar.tsx 拖「最近会话」、TabPanes.tsx 拖窗格标题栏）曾经各自重复定义同一个
+// 常量，这里收敛成单一来源——本模块已经是它们共用的拖放几何纯函数集合，没有理由
+// 再单独为一个常量开一个新文件。
+export const DRAG_THRESHOLD_PX = 4
+
 // 光标是否落在某个窗格矩形内（左闭右开、上闭下开，避免边界像素同时命中相邻窗格）；
 // 命中后按光标在该矩形宽度方向上相对中点的位置决定落在左半还是右半。各窗格矩形理应
 // 互不重叠（见 paneGeometry.ts 的换算），命中第一个即返回；一个都没命中（光标不在

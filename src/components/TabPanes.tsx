@@ -8,7 +8,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react'
-import { pointInRect, resolveTabBarInsertIndex } from '../paneDrop'
+import { DRAG_THRESHOLD_PX, pointInRect, resolveTabBarInsertIndex } from '../paneDrop'
 import { getPaneRowRect, getTabBarRect, getTabRects } from '../paneDropDom'
 import { clampDividerDrag, equalPaneWidths, usablePaneAreaWidth } from '../paneLayout'
 import { useDnd } from '../store/dnd'
@@ -16,10 +16,6 @@ import { useDragGhost } from '../store/dragGhost'
 import { type Pane, type Tab, useTabs } from '../store/tabs'
 import { ContextMenu } from './ContextMenu'
 import { PanePicker } from './PanePicker'
-
-// 与 TabBar.tsx/Sidebar.tsx 同一个阈值/idiom：拖动超过这个像素距离才判定为拖拽而不是
-// 一次普通点击。
-const DRAG_THRESHOLD_PX = 4
 
 type TitlebarDragState = { startX: number; startY: number; dragging: boolean; ghostStarted: boolean }
 

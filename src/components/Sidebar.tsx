@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { resumeThread } from '../actions'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
-import { dropInsertionIndex, resolveDropTarget } from '../paneDrop'
+import { DRAG_THRESHOLD_PX, dropInsertionIndex, resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
 import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
 import { useDnd } from '../store/dnd'
@@ -12,10 +12,6 @@ import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
 import { basename, formatRelative } from '../time'
 import { ThemeSwitcher } from './ThemeSwitcher'
-
-// 与 TabBar.tsx 场景 A 同一个阈值/idiom：拖动超过这个像素距离才判定为拖拽而不是
-// 一次普通点击（设计文档要求 "small movement threshold (e.g. 4px)"）。
-const DRAG_THRESHOLD_PX = 4
 
 type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean }
 
