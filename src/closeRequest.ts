@@ -14,10 +14,13 @@ export function buildExitConfirmMessage(liveCount: number): string {
 // （例如那个 pty 记录已经被并发清理）都保守地当作"已不存活"处理，不让单次查询失败
 // 拖垮整个统计。
 async function countLiveTerminalTabs(): Promise<number> {
+  // 分屏后窗格可能尚未选定会话（ptyId 缺省，见 store/tabs.ts 的 Pane 类型）——
+  // 这样的窗格从未 spawn 过 PTY，天然不存活，直接过滤掉，不拿 undefined 去查询。
   const ptyIds = useTabs
     .getState()
     .tabs.filter((t) => t.kind === 'term')
     .flatMap((t) => t.panes.map((p) => p.ptyId))
+    .filter((id): id is string => Boolean(id))
   const alive = await Promise.all(ptyIds.map((id) => ptyIsAlive(id).catch(() => false)))
   return alive.filter(Boolean).length
 }
