@@ -310,3 +310,13 @@ export function getTheme(id: string): Theme | undefined {
   return THEMES_BY_ID[id]
 }
 
+/**
+ * 过渡期辅助函数：在正式的主题三档模式（默认/双主题跟随系统/手动选定，见
+ * store/theme.ts）落地之前，先用"该外观下 THEMES 中第一个匹配项"作为代表性 Theme，
+ * 让 TerminalView 与全局 UI 配色都已经走真实的 Theme 数据、而不是硬编码色值。
+ * 一旦 store/theme.ts 提供 activeTheme，调用方会改用它，这个函数会被移除。
+ */
+export function themeForAppearance(appearance: Appearance): Theme {
+  return THEMES.find((t) => t.appearance === appearance) ?? THEMES[0]
+}
+
