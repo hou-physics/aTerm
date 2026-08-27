@@ -10,8 +10,10 @@ import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { useSessions } from '../store/sessions'
+import { useThreadStatus } from '../store/status'
 import { useTabs } from '../store/tabs'
 import { basename, formatRelative } from '../time'
+import { StatusDot } from './StatusDot'
 import { ThemeSwitcher } from './ThemeSwitcher'
 
 type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
@@ -177,23 +179,53 @@ export function Sidebar() {
       <div className="sidebar-list">
         <div className="section-label">最近会话</div>
         {recent.map(({ p, t }) => (
-          <div
+          <SidebarItem
             key={`${p.dirName}:${t.rootKey}`}
-            className="side-item"
-            title={t.title}
-            onPointerDown={(e) => onItemPointerDown(e, p, t)}
+            p={p}
+            t={t}
+            onPointerDown={onItemPointerDown}
             onPointerMove={onItemPointerMove}
             onPointerUp={onItemPointerUp}
-            onPointerCancel={onItemPointerUp}
             onLostPointerCapture={onItemLostPointerCapture}
-            onClick={() => onItemClick(p, t)}
-          >
-            {t.title}
-            <div className="sub">{basename(p.cwd)} · {formatRelative(t.lastActivityMs)}</div>
-          </div>
+            onClick={onItemClick}
+          />
         ))}
       </div>
       <ThemeSwitcher />
     </>
+  )
+}
+
+// 拆成独立组件只是为了让 useThreadStatus 能合法地按每条「最近会话」分别调用一次
+// （Rules of Hooks：不能在 Sidebar 自己的 .map() 循环体内调用 hook，见 HomePage.tsx
+// 里 ProjectCard/ThreadRow 同样的拆分理由）。拖拽/指针相关的所有状态与清理逻辑仍然
+// 全部留在 Sidebar 里，这里只透传回调，不复制任何一处判断。
+function SidebarItem({ p, t, onPointerDown, onPointerMove, onPointerUp, onLostPointerCapture, onClick }: {
+  p: ProjectInfo
+  t: ThreadInfo
+  onPointerDown: (e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => void
+  onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => void
+  onPointerUp: (e: ReactPointerEvent<HTMLDivElement>) => void
+  onLostPointerCapture: () => void
+  onClick: (p: ProjectInfo, t: ThreadInfo) => void
+}) {
+  const status = useThreadStatus(p.dirName, t.rootKey)
+  return (
+    <div
+      className="side-item"
+      title={t.title}
+      onPointerDown={(e) => onPointerDown(e, p, t)}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onLostPointerCapture={onLostPointerCapture}
+      onClick={() => onClick(p, t)}
+    >
+      <span className="side-item-row">
+        <StatusDot status={status} />
+        <span className="side-item-title">{t.title}</span>
+      </span>
+      <div className="sub">{basename(p.cwd)} · {formatRelative(t.lastActivityMs)}</div>
+    </div>
   )
 }
