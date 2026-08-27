@@ -2,8 +2,12 @@ import { invoke } from '@tauri-apps/api/core'
 
 export interface ThreadInfo { rootKey: string; resumeSessionId: string; title: string; cwd: string; lastActivityMs: number; fileCount: number }
 export interface ProjectInfo { dirName: string; cwd: string; lastActivityMs: number; threads: ThreadInfo[] }
+export interface Turn { role: string; text: string; tsMs: number; uuid: string }
+export interface Conversation { turns: Turn[]; files: string[]; totalBytes: number }
 
 export const listProjects = () => invoke<ProjectInfo[]>('list_projects')
+export const readConversation = (dirName: string, rootKey: string) =>
+  invoke<Conversation>('read_conversation', { dirName, rootKey })
 export const ptySpawn = (o: { cwd?: string; inject?: string; cols: number; rows: number }) => invoke<string>('pty_spawn', o)
 export const ptyWrite = (id: string, data: string) => invoke<void>('pty_write', { id, data })
 export const ptyResize = (id: string, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows })

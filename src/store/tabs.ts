@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { ptyIsAlive, ptyKill, ptySpawn } from '../ipc'
 import { ptyEventsReady } from '../ptyBuffer'
 
-export type Tab = { id: string; kind: 'home' | 'term'; title: string; ptyId?: string; threadKey?: string }
+export type Tab = { id: string; kind: 'home' | 'term'; title: string; ptyId?: string; threadKey?: string; dirName?: string; rootKey?: string }
 let nextTab = 1
 
 type ConfirmFn = (msg: string) => Promise<boolean>
@@ -15,7 +15,7 @@ type TabsState = {
   tabs: Tab[]
   activeId: string
   setActive(id: string): void
-  openTerminal(o: { title: string; cwd?: string; inject?: string; threadKey?: string }): Promise<void>
+  openTerminal(o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
   focusThread(threadKey: string): boolean
   closeTab(id: string, confirmFn?: ConfirmFn): Promise<void>
 }
@@ -24,11 +24,11 @@ export const useTabs = create<TabsState>((set, get) => ({
   tabs: [{ id: 'home', kind: 'home', title: '主页' }],
   activeId: 'home',
   setActive: (id) => set({ activeId: id }),
-  openTerminal: async ({ title, cwd, inject, threadKey }) => {
+  openTerminal: async ({ title, cwd, inject, threadKey, dirName, rootKey }) => {
     await ptyEventsReady
     const ptyId = await ptySpawn({ cwd, inject, cols: 80, rows: 24 })
     const id = `tab-${nextTab++}`
-    set((s) => ({ tabs: [...s.tabs, { id, kind: 'term', title, ptyId, threadKey }], activeId: id }))
+    set((s) => ({ tabs: [...s.tabs, { id, kind: 'term', title, ptyId, threadKey, dirName, rootKey }], activeId: id }))
   },
   focusThread: (threadKey) => {
     const tab = get().tabs.find((t) => t.threadKey === threadKey)

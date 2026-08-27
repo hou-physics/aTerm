@@ -1,6 +1,6 @@
-use super::parser::{parse_meta, read_head_lines, read_tail_lines};
+use super::parser::{parse_meta, read_head_lines, read_tail_lines, ParsedMeta};
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -27,7 +27,38 @@ fn is_uuid_stem(stem: &str) -> bool {
         && stem.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-struct FileMeta { session_id: String, meta: super::parser::ParsedMeta, mtime_ms: i64 }
+/// 一个会话链内的单个 jsonl 文件及其头尾元信息。
+pub struct ChainFile {
+    pub session_id: String,
+    pub path: PathBuf,
+    pub meta: ParsedMeta,
+    pub mtime_ms: i64,
+}
+
+/// 扫描单个项目目录（如 `~/.claude/projects/<dir_name>`）下的会话文件，
+/// 按链键（root_key，即首条用户消息 uuid；缺失时退回自身 session_id）分组。
+/// 供 `scan_projects`（会话列表）与 `conversation::read_conversation`（正文读取）
+/// 共用，分组规则只在此处实现一次。
+pub fn group_chain_files(dir: &Path) -> std::collections::HashMap<String, Vec<ChainFile>> {
+    let mut groups: std::collections::HashMap<String, Vec<ChainFile>> = Default::default();
+    let Ok(inner) = std::fs::read_dir(dir) else { return groups };
+    for f in inner.flatten() {
+        let p = f.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+        if !is_uuid_stem(stem) { continue; }
+        let head = read_head_lines(&p, 40, 256 * 1024).unwrap_or_default();
+        let tail = read_tail_lines(&p, 64 * 1024).unwrap_or_default();
+        let mtime_ms = f.metadata().ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64).unwrap_or(0);
+        let meta = parse_meta(&head, &tail);
+        let key = meta.first_user_uuid.clone().unwrap_or_else(|| stem.to_string());
+        groups.entry(key).or_default().push(ChainFile { session_id: stem.to_string(), path: p, meta, mtime_ms });
+    }
+    groups
+}
 
 pub fn scan_projects(projects_dir: &Path) -> Vec<ProjectInfo> {
     let Ok(entries) = std::fs::read_dir(projects_dir) else { return vec![] };
@@ -35,28 +66,9 @@ pub fn scan_projects(projects_dir: &Path) -> Vec<ProjectInfo> {
     for entry in entries.flatten() {
         let dir = entry.path();
         if !dir.is_dir() { continue; }
-        let mut files: Vec<FileMeta> = vec![];
-        let Ok(inner) = std::fs::read_dir(&dir) else { continue };
-        for f in inner.flatten() {
-            let p = f.path();
-            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
-            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
-            if !is_uuid_stem(stem) { continue; }
-            let head = read_head_lines(&p, 40, 256 * 1024).unwrap_or_default();
-            let tail = read_tail_lines(&p, 64 * 1024).unwrap_or_default();
-            let mtime_ms = f.metadata().ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64).unwrap_or(0);
-            files.push(FileMeta { session_id: stem.to_string(), meta: parse_meta(&head, &tail), mtime_ms });
-        }
-        if files.is_empty() { continue; }
+        let groups = group_chain_files(&dir);
+        if groups.is_empty() { continue; }
 
-        let mut groups: std::collections::HashMap<String, Vec<&FileMeta>> = Default::default();
-        for fm in &files {
-            let key = fm.meta.first_user_uuid.clone().unwrap_or_else(|| fm.session_id.clone());
-            groups.entry(key).or_default().push(fm);
-        }
         let mut threads: Vec<ThreadInfo> = groups.into_iter().map(|(key, mut fs)| {
             fs.sort_by_key(|fm| fm.meta.last_ts_ms.unwrap_or(fm.mtime_ms));
             let newest = fs.last().unwrap();
