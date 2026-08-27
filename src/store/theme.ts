@@ -1,15 +1,29 @@
 import { create } from 'zustand'
-import { getTheme, type Theme } from '../themes/data'
+import { getTheme, THEMES, type Theme } from '../themes/data'
 import { applyUiVars } from '../themes/derive'
 
 export type ThemeMode = 'default' | 'dual' | 'single'
 
+/**
+ * 按 id 取主题，找不到（例如 data.ts 未来改名/删除了该 id）时兜底到 THEMES 里第一个
+ * 外观匹配的主题，全都没有再兜底到 THEMES[0]——保证这个 helper 本身永远有返回值，
+ * 不会像原先的 `getTheme(ID)!` 断言那样在模块加载时直接抛异常导致启动崩溃。
+ * appearance 留空表示不关心外观（用于兜底"随便给一个主题也比崩溃强"的最后一层）。
+ */
+export function getThemeOrFallback(id: string, appearance?: 'dark' | 'light'): Theme {
+  const t = getTheme(id)
+  if (t) return t
+  const byAppearance = appearance ? THEMES.find((x) => x.appearance === appearance) : undefined
+  return byAppearance ?? THEMES[0]
+}
+
 // “默认”档：不跟随系统，任何时候都固定用这一个耐看的浅色主题；也是 single/dual 里
 // 任何持久化主题 id 校验失败时的兜底、以及从旧版 'light' 迁移时的落点。
 export const DEFAULT_LIGHT_THEME_ID = 'catppuccin-latte'
-export const DEFAULT_THEME: Theme = getTheme(DEFAULT_LIGHT_THEME_ID)!
+export const DEFAULT_THEME: Theme = getThemeOrFallback(DEFAULT_LIGHT_THEME_ID, 'light')
 // “双主题跟随系统”档默认配对的暗色成员，也是从旧版 'dark' 迁移时 single 模式的落点。
 export const DEFAULT_DARK_THEME_ID = 'tokyo-night'
+const DEFAULT_DARK_THEME: Theme = getThemeOrFallback(DEFAULT_DARK_THEME_ID, 'dark')
 
 type ThemeState = {
   mode: ThemeMode
@@ -129,7 +143,7 @@ function resolveActiveTheme(mode: ThemeMode, lightId: string, darkId: string, si
   if (mode === 'default') return DEFAULT_THEME
   if (mode === 'single') return getTheme(singleId) ?? DEFAULT_THEME
   // dual：跟随系统外观在亮/暗两个成员之间切换
-  return systemPrefersDark ? (getTheme(darkId) ?? getTheme(DEFAULT_DARK_THEME_ID)!) : (getTheme(lightId) ?? DEFAULT_THEME)
+  return systemPrefersDark ? (getTheme(darkId) ?? DEFAULT_DARK_THEME) : (getTheme(lightId) ?? DEFAULT_THEME)
 }
 
 function applyActiveTheme(theme: Theme) {

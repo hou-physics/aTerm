@@ -121,6 +121,16 @@ function pickAccentText(theme: Theme, bg: string, accent: string): string {
   return boostContrast(picked, bg, ACCENT_TEXT_MIN_CONTRAST)
 }
 
+/**
+ * 给"背景就是 accent 本色"的场景（例如主题选择器里当前模式按钮的高亮态）挑一个
+ * 前景色：黑或白，取二者中对 accent 对比度更高的一侧。不是新的对比度算法，只是
+ * 复用 contrastRatio 在两个候选间做选择——全部 28 个内置主题下都能让
+ * contrastRatio(accent, onAccent) ≥ 4.5（见 derive.test.ts）。
+ */
+function pickOnAccent(accent: string): string {
+  return contrastRatio(accent, '#000000') >= contrastRatio(accent, '#ffffff') ? '#000000' : '#ffffff'
+}
+
 export function deriveUiVars(theme: Theme): Record<string, string> {
   const isDark = theme.appearance === 'dark'
   const extreme = isDark ? '#000000' : '#ffffff'
@@ -139,6 +149,7 @@ export function deriveUiVars(theme: Theme): Record<string, string> {
 
   const accent = pickAccent(theme, panel)
   const accentText = pickAccentText(theme, bg, accent)
+  const onAccent = pickOnAccent(accent)
 
   return {
     '--color-bg': bg,
@@ -150,6 +161,7 @@ export function deriveUiVars(theme: Theme): Record<string, string> {
     '--color-text-faint': withAlpha(fg, 0.46),
     '--color-accent': accent,
     '--color-accent-text': accentText,
+    '--color-on-accent': onAccent,
     '--color-term-bg': bg,
     '--color-tab-close-hover-bg': tabCloseHoverBg,
     '--color-tab-close-hover-text': tabCloseHoverText,
@@ -167,6 +179,7 @@ export const UI_VAR_NAMES = [
   '--color-text-faint',
   '--color-accent',
   '--color-accent-text',
+  '--color-on-accent',
   '--color-term-bg',
   '--color-tab-close-hover-bg',
   '--color-tab-close-hover-text',

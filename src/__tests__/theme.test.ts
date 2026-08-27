@@ -218,6 +218,46 @@ describe('theme store', () => {
     })
   })
 
+  describe('兜底主题常量自身的兜底（getThemeOrFallback）', () => {
+    it('未知 id 且指定外观时，回退到该外观下 THEMES 里的第一个主题，而不是抛异常', async () => {
+      mockLocalStorage()
+      mockMatchMedia(true)
+      const { getThemeOrFallback } = await import('../store/theme')
+      const { THEMES } = await import('../themes/data')
+      const fallback = getThemeOrFallback('this-theme-id-does-not-exist', 'dark')
+      expect(fallback).toBeTruthy()
+      expect(fallback.appearance).toBe('dark')
+      expect(fallback).toBe(THEMES.find((t) => t.appearance === 'dark'))
+    })
+
+    it('未知 id 且未指定外观时，回退到 THEMES[0]，而不是抛异常', async () => {
+      mockLocalStorage()
+      mockMatchMedia(true)
+      const { getThemeOrFallback } = await import('../store/theme')
+      const { THEMES } = await import('../themes/data')
+      expect(getThemeOrFallback('also-bogus')).toBe(THEMES[0])
+    })
+
+    it('真实 id 仍然照常解析，不受兜底逻辑影响', async () => {
+      mockLocalStorage()
+      mockMatchMedia(true)
+      const { getThemeOrFallback } = await import('../store/theme')
+      expect(getThemeOrFallback('dracula').id).toBe('dracula')
+    })
+
+    it('模块顶层的 DEFAULT_THEME/DEFAULT_DARK_THEME_ID 解析出的主题始终真实存在（不依赖 getTheme(ID)! 断言）', async () => {
+      mockLocalStorage()
+      mockMatchMedia(true)
+      const { DEFAULT_THEME, DEFAULT_LIGHT_THEME_ID, DEFAULT_DARK_THEME_ID } = await import('../store/theme')
+      const { getTheme } = await import('../themes/data')
+      // 这两个 id 目前确实存在于 data.ts；这里只是确认模块初始化没有崩溃、且 DEFAULT_THEME
+      // 与真实数据一致——真正的“即使 data.ts 改名/删除该 id 也不崩”的保证由上面两个用例
+      // 直接对 getThemeOrFallback 传入不存在的 id 来验证（不修改 data.ts 本身）。
+      expect(DEFAULT_THEME).toEqual(getTheme(DEFAULT_LIGHT_THEME_ID))
+      expect(getTheme(DEFAULT_DARK_THEME_ID)).toBeTruthy()
+    })
+  })
+
   describe('jsdom-safe 与单次监听器注册', () => {
     it('matchMedia 缺失时不抛异常，且默认视为深色', async () => {
       mockLocalStorage()

@@ -1,32 +1,9 @@
-:root[data-theme='dark'] {
-  --color-bg: #1a1b26;
-  --color-panel: #16161e;
-  --color-elevated: #1f2030;
-  --color-border: #2a2b3a;
-  --color-text: #c0caf5;
-  --color-text-dim: #787c99;
-  --color-text-faint: #565a7a;
-  --color-accent: #3d59a1;
-  --color-accent-text: #7aa2f7;
-  --color-term-bg: #15161e;
-  --color-tab-close-hover-bg: #3b3d57;
-  --color-tab-close-hover-text: #fff;
-}
-
-:root[data-theme='light'] {
-  --color-bg: #f5f5f7;
-  --color-panel: #ffffff;
-  --color-elevated: #ececf1;
-  --color-border: #d5d5dc;
-  --color-text: #2a2a35;
-  --color-text-dim: #6a6a74;
-  --color-text-faint: #9a9aa4;
-  --color-accent: #3d59a1;
-  --color-accent-text: #2f5cc4;
-  --color-term-bg: #ffffff;
-  --color-tab-close-hover-bg: #d5d5dc;
-  --color-tab-close-hover-text: #2a2a35;
-}
+/* 曾经这里有两个 :root[data-theme='dark'/'light'] 硬编码兜底色块（早期 Tokyo-Night
+   底色的手写值）。自主题系统改为从终端主题派生配色后，applyUiVars() 在每次加载/切换
+   主题时都会把同一批 --color-* 变量以内联样式写在 document.documentElement 上，内联
+   样式的优先级恒高于这里任何选择器，两块规则已完全不可能生效，故删除。data-theme
+   属性本身仍由 applyUiVars() 同步维护（见 derive.ts）；全仓库范围内没有其它 CSS
+   规则依赖 [data-theme] 选择器（已用 grep 核实），删除这两块不影响任何其它样式。 */
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #root { height: 100%; }
@@ -110,7 +87,7 @@ body {
 .theme-picker-list::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
 
 /* xterm 6 用 VS Code ScrollableElement 渲染滚动条（非原生）。滑块颜色由 xterm 主题以内联样式写入（见
-   TerminalView.tsx 的 XTERM_THEME），CSS 管不到；这里只负责阻止其空闲 800ms 后的淡出，让滚动条常驻可见。
+   src/themes/derive.ts 的 buildXtermTheme），CSS 管不到；这里只负责阻止其空闲 800ms 后的淡出，让滚动条常驻可见。
    选择器特异度 0,4,0 / 0,5,0，高于 xterm 自带的 0,3,0，无需 !important 即可覆盖。 */
 .xterm .xterm-scrollable-element > .scrollbar.invisible,
 .xterm .xterm-scrollable-element > .scrollbar.invisible.fade { opacity: 1; }
@@ -197,7 +174,7 @@ body {
   cursor: default;
 }
 .theme-picker-modes button:hover { border-color: var(--color-accent); color: var(--color-text); }
-.theme-picker-modes button.active { border-color: var(--color-accent); background: var(--color-accent); color: #fff; }
+.theme-picker-modes button.active { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
 .theme-picker-group-label { font-size: 10.5px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; margin: 2px 0 4px; }
 .theme-picker-list { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
 .theme-row {
@@ -218,7 +195,7 @@ body {
 .theme-row:hover { background: var(--color-elevated); color: var(--color-text); }
 .theme-row.active { background: var(--color-elevated); color: var(--color-text); box-shadow: inset 0 0 0 1px var(--color-accent); }
 .theme-row-swatches { flex: none; display: flex; gap: 2px; }
-.theme-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid rgba(128, 128, 128, 0.25); }
+.theme-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--color-border); }
 .theme-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }

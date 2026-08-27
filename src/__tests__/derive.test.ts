@@ -77,6 +77,26 @@ describe('deriveUiVars', () => {
     }
   })
 
+  // 用于 .theme-picker-modes button.active（背景=accent，文字=on-accent）等"背景就是
+  // accent 本色"场景。on-accent 恒为纯黑或纯白（pickOnAccent 二选一），4.5 是全部 28
+  // 个内置主题都能清过的最高整数/半档阈值——最差的是 night-owlish-light，约 4.84；
+  // 之前硬编码的 color:#fff 在同一批主题上只有 3 个能勉强过 3.0，25 个落在 1.7~4.3。
+  it('accent/on-accent contrast clears 4.5 on every curated theme (was: hardcoded #fff text on accent bg)', () => {
+    const MIN = 4.5
+    for (const t of THEMES) {
+      const vars = deriveUiVars(t)
+      const ratio = contrastRatio(vars['--color-accent'], vars['--color-on-accent'])
+      expect(ratio).toBeGreaterThanOrEqual(MIN)
+    }
+  })
+
+  it('on-accent is always pure black or pure white', () => {
+    for (const t of THEMES) {
+      const onAccent = deriveUiVars(t)['--color-on-accent'].toLowerCase()
+      expect(['#000000', '#ffffff']).toContain(onAccent)
+    }
+  })
+
   describe('a very dark theme (ayu-dark, bg lum ~0.004)', () => {
     const t = theme('ayu-dark')
     it('has a low relative luminance background', () => {
