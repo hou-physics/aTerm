@@ -130,7 +130,21 @@ body {
 .conv-header-actions { flex: none; display: flex; align-items: center; gap: 6px; }
 .conv-refresh { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .conv-refresh:hover { border-color: var(--color-accent); color: var(--color-text); }
-.conv-timeline { flex: none; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--color-border); padding: 6px 10px; }
+/* 时间线区（日期分组列表）与正文区共同的父容器，撑满头部之下的剩余高度；引入这层
+   包裹只是为了给拖拽分隔条提供一个可测量的"内容区高度"（见 ConversationPanel.tsx 的
+   timelineHeightCap /contentRef），本身不承担视觉样式。 */
+.conv-panel-content { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 高度由 ConversationPanel.tsx 通过内联 style 驱动（拖拽/折叠），不在这里写死；
+   折叠态下高度与内边距一并被内联 style 清零，不靠这里的 padding 兜底。 */
+.conv-timeline { flex: none; overflow-y: auto; padding: 6px 10px; }
+/* 时间线区与正文区之间的分隔条：整块落在 .conv-panel-content 的常规文档流里（真实占位的
+   flex 子项，不是绝对定位悬浮在边界上），天然不会被任何祖先的 overflow:hidden 裁掉——
+   这正是 .conv-panel-resize-handle 早年"手柄跨骑在裁剪边界上、抓取区被裁掉一半"那个
+   教训的反面教材，这里直接用不越界的写法从一开始就避免同一个坑。视觉上只在内容盒里
+   画一条 1px 细线（background-clip: content-box），上下各留 3px 内边距把命中区撑到 7px，
+   足够好抓又不显得臃肿；不加任何箭头/圆点之类的图形提示。 */
+.conv-timeline-divider { flex: none; height: 1px; padding: 3px 0; box-sizing: content-box; background: var(--color-border); background-clip: content-box; cursor: row-resize; }
+.conv-timeline-divider:hover, .conv-timeline-divider:active { background-color: var(--color-accent); }
 /* 日期标题不带前置符号（用户明确不要任何图形提示）。可点性改由 cursor + hover 背景/字色
    传达；负 margin 把 hover 命中区往左右各扩 4px（超出文字本身的排版宽度），让它有块可点的
    观感，同时不影响文字相对下方时间线条目的水平位置（padding-left 依旧从 0 起算）。 */

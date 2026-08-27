@@ -258,6 +258,87 @@ describe('ConversationPanel — 面板宽度可拖拽', () => {
   })
 })
 
+describe('ConversationPanel — 时间线区域整体高度可拖拽 + 双击折叠', () => {
+  beforeEach(() => {
+    useLayout.setState({ timelineHeight: 220, timelineCollapsed: false })
+    vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
+    useTabs.setState({
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      activeId: 'tab-1',
+    })
+  })
+
+  it('拖动分隔条改变时间线区高度：向下拖变高，仅在 pointerup 时落盘持久化', async () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
+    render(<ConversationPanel />)
+    const divider = await screen.findByTitle('拖动调整时间线高度（双击折叠）')
+    fireEvent.pointerDown(divider, { clientY: 300, pointerId: 1 })
+    fireEvent.pointerMove(divider, { clientY: 350, pointerId: 1 }) // 下移 50px → 变高 50px
+    expect(useLayout.getState().timelineHeight).toBe(270)
+    expect(setItemSpy).not.toHaveBeenCalledWith('aterm-timeline-height', expect.anything())
+    fireEvent.pointerUp(divider, { clientY: 350, pointerId: 1 })
+    expect(setItemSpy).toHaveBeenCalledWith('aterm-timeline-height', '270')
+    setItemSpy.mockRestore()
+  })
+
+  it('向上拖变矮，不低于 80px 下限', async () => {
+    render(<ConversationPanel />)
+    const divider = await screen.findByTitle('拖动调整时间线高度（双击折叠）')
+    fireEvent.pointerDown(divider, { clientY: 300, pointerId: 1 })
+    fireEvent.pointerMove(divider, { clientY: -1000, pointerId: 1 }) // 尝试拖到远小于 80
+    expect(useLayout.getState().timelineHeight).toBe(80)
+  })
+
+  it('拖拽高度不超过内容区高度的 60%（现算，不依赖 resize 监听器）', async () => {
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, value: 500 })
+    try {
+      render(<ConversationPanel />)
+      const divider = await screen.findByTitle('拖动调整时间线高度（双击折叠）')
+      fireEvent.pointerDown(divider, { clientY: 300, pointerId: 1 })
+      fireEvent.pointerMove(divider, { clientY: 3000, pointerId: 1 }) // 尝试拖到远超过 60% of 500 = 300
+      expect(useLayout.getState().timelineHeight).toBe(300)
+    } finally {
+      if (original) Object.defineProperty(HTMLElement.prototype, 'clientHeight', original)
+    }
+  })
+
+  it('双击分隔条折叠/展开时间线区，并落盘持久化', async () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
+    render(<ConversationPanel />)
+    const divider = await screen.findByTitle('拖动调整时间线高度（双击折叠）')
+    fireEvent.doubleClick(divider)
+    expect(useLayout.getState().timelineCollapsed).toBe(true)
+    expect(setItemSpy).toHaveBeenCalledWith('aterm-timeline-collapsed', '1')
+    fireEvent.doubleClick(divider)
+    expect(useLayout.getState().timelineCollapsed).toBe(false)
+    expect(setItemSpy).toHaveBeenCalledWith('aterm-timeline-collapsed', '0')
+    setItemSpy.mockRestore()
+  })
+
+  it('折叠时间线区后，分隔条仍留在文档中、可再次双击恢复（不是随内容一起消失）', async () => {
+    render(<ConversationPanel />)
+    const divider = await screen.findByTitle('拖动调整时间线高度（双击折叠）')
+    fireEvent.doubleClick(divider)
+    expect(useLayout.getState().timelineCollapsed).toBe(true)
+    expect(screen.getByTitle('拖动调整时间线高度（双击折叠）')).toBeTruthy()
+    const timelineEl = document.querySelector('.conv-timeline') as HTMLElement
+    expect(timelineEl.style.height).toBe('0px')
+    fireEvent.doubleClick(screen.getByTitle('拖动调整时间线高度（双击折叠）'))
+    expect(useLayout.getState().timelineCollapsed).toBe(false)
+  })
+
+  it('折叠状态下拖拽分隔条不产生效果（需要先双击展开）', async () => {
+    useLayout.setState({ timelineCollapsed: true })
+    render(<ConversationPanel />)
+    const divider = await screen.findByTitle('拖动调整时间线高度（双击折叠）')
+    const before = useLayout.getState().timelineHeight
+    fireEvent.pointerDown(divider, { clientY: 300, pointerId: 1 })
+    fireEvent.pointerMove(divider, { clientY: 400, pointerId: 1 })
+    expect(useLayout.getState().timelineHeight).toBe(before)
+  })
+})
+
 describe('ConversationPanel — 折叠态完全消失，唯一开关在 TabBar', () => {
   beforeEach(() => {
     useLayout.setState({ panelCollapsed: false })

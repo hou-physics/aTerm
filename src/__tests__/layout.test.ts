@@ -122,3 +122,77 @@ describe('layout store — panelWidth', () => {
     expect(useLayout.getState().panelWidth).toBe(400)
   })
 })
+
+describe('layout store — timelineHeight（时间线区域高度，两段式：拖拽期只更新内存，commit 才落盘）', () => {
+  it('默认高度为 220', async () => {
+    mockLocalStorage()
+    const { useLayout, TIMELINE_HEIGHT_DEFAULT } = await import('../store/layout')
+    expect(TIMELINE_HEIGHT_DEFAULT).toBe(220)
+    expect(useLayout.getState().timelineHeight).toBe(220)
+  })
+
+  it('setTimelineHeight 只更新内存状态，不写 localStorage；commitTimelineHeight 才持久化', async () => {
+    const ls = mockLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().setTimelineHeight(300)
+    expect(useLayout.getState().timelineHeight).toBe(300)
+    expect(ls.setItem).not.toHaveBeenCalledWith('aterm-timeline-height', expect.anything())
+    useLayout.getState().commitTimelineHeight()
+    expect(ls.setItem).toHaveBeenCalledWith('aterm-timeline-height', '300')
+  })
+
+  it('setTimelineHeight 在写入路径上钳制到不低于 80（store 层不知道 60% 动态上限，那部分由组件层现算）', async () => {
+    mockLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().setTimelineHeight(10)
+    expect(useLayout.getState().timelineHeight).toBe(80)
+  })
+
+  it('读取已持久化的高度作为初始值', async () => {
+    mockLocalStorage({ 'aterm-timeline-height': '260' })
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().timelineHeight).toBe(260)
+  })
+
+  it('持久化读取路径同样钳制越界的陈旧值（低于 80），不让其泄漏进状态', async () => {
+    mockLocalStorage({ 'aterm-timeline-height': '5' })
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().timelineHeight).toBe(80)
+  })
+
+  it('localStorage 读取抛异常时降级为默认高度 220', async () => {
+    mockThrowingLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().timelineHeight).toBe(220)
+  })
+})
+
+describe('layout store — timelineCollapsed（时间线区域整体折叠，与单个日期分组的折叠彼此独立）', () => {
+  it('默认展开（timelineCollapsed = false）', async () => {
+    mockLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().timelineCollapsed).toBe(false)
+  })
+
+  it('setTimelineCollapsed 只更新内存状态，不写 localStorage；commitTimelineCollapsed 才持久化', async () => {
+    const ls = mockLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().setTimelineCollapsed(true)
+    expect(useLayout.getState().timelineCollapsed).toBe(true)
+    expect(ls.setItem).not.toHaveBeenCalledWith('aterm-timeline-collapsed', expect.anything())
+    useLayout.getState().commitTimelineCollapsed()
+    expect(ls.setItem).toHaveBeenCalledWith('aterm-timeline-collapsed', '1')
+  })
+
+  it('读取已持久化的折叠状态作为初始值', async () => {
+    mockLocalStorage({ 'aterm-timeline-collapsed': '1' })
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().timelineCollapsed).toBe(true)
+  })
+
+  it('localStorage 读取抛异常时降级为默认值（展开）', async () => {
+    mockThrowingLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().timelineCollapsed).toBe(false)
+  })
+})

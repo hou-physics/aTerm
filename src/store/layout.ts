@@ -12,6 +12,12 @@ type LayoutState = {
   panelWidth: number
   setPanelWidth(n: number): void
   commitPanelWidth(): void
+  timelineHeight: number
+  setTimelineHeight(n: number): void
+  commitTimelineHeight(): void
+  timelineCollapsed: boolean
+  setTimelineCollapsed(v: boolean): void
+  commitTimelineCollapsed(): void
 }
 
 const SIDEBAR_KEY = 'aterm-sidebar-collapsed'
@@ -28,6 +34,15 @@ const PANEL_WIDTH_KEY = 'aterm-panel-width'
 export const PANEL_WIDTH_DEFAULT = 400
 export const PANEL_WIDTH_MIN = 280
 export const PANEL_WIDTH_MAX = 900
+const TIMELINE_HEIGHT_KEY = 'aterm-timeline-height'
+const TIMELINE_COLLAPSED_KEY = 'aterm-timeline-collapsed'
+export const TIMELINE_HEIGHT_DEFAULT = 220
+// 时间线区没有一个有意义的静态上限——它由"面板内容区高度的 60%"这个动态量决定
+// （容器随窗口/面板尺寸变化）。与 panelWidth 的 windowCap 同一思路：store 层的读取/写入
+// 只钳制这个静态下限，真正的 60% 动态上限交给拖拽发生地 ConversationPanel.tsx 现算
+// （不装 resize 监听器，只在拖拽/双击这些主动改动的时刻现算），持久化读取路径同样只
+// 校验下限，不校验那个它压根不知道的动态上限。
+export const TIMELINE_HEIGHT_MIN = 80
 
 function readPersistedSidebarCollapsed(): boolean {
   try {
@@ -95,6 +110,37 @@ function persistPanelWidth(n: number) {
   try { localStorage.setItem(PANEL_WIDTH_KEY, String(n)) } catch { /* 忽略持久化失败 */ }
 }
 
+function clampTimelineHeight(n: number): number {
+  return Math.max(TIMELINE_HEIGHT_MIN, Math.round(n))
+}
+
+function readPersistedTimelineHeight(): number {
+  try {
+    const v = localStorage.getItem(TIMELINE_HEIGHT_KEY)
+    if (v !== null) {
+      const n = Number(v)
+      if (Number.isFinite(n)) return clampTimelineHeight(n)
+    }
+  } catch { /* localStorage 不可用（如隐私模式），忽略 */ }
+  return TIMELINE_HEIGHT_DEFAULT
+}
+
+function persistTimelineHeight(n: number) {
+  try { localStorage.setItem(TIMELINE_HEIGHT_KEY, String(n)) } catch { /* 忽略持久化失败 */ }
+}
+
+function readPersistedTimelineCollapsed(): boolean {
+  try {
+    const v = localStorage.getItem(TIMELINE_COLLAPSED_KEY)
+    if (v !== null) return v === '1'
+  } catch { /* localStorage 不可用（如隐私模式），忽略 */ }
+  return false
+}
+
+function persistTimelineCollapsed(v: boolean) {
+  try { localStorage.setItem(TIMELINE_COLLAPSED_KEY, v ? '1' : '0') } catch { /* 忽略持久化失败 */ }
+}
+
 export const useLayout = create<LayoutState>((set, get) => ({
   sidebarCollapsed: readPersistedSidebarCollapsed(),
   toggleSidebar: () => {
@@ -128,5 +174,23 @@ export const useLayout = create<LayoutState>((set, get) => ({
   },
   commitPanelWidth: () => {
     persistPanelWidth(get().panelWidth)
+  },
+  timelineHeight: readPersistedTimelineHeight(),
+  // 与 setPanelWidth 同一套两段式：拖拽期间（pointermove）只更新内存，commit 才落盘，
+  // 由 ConversationPanel.tsx 的分隔条在 pointerup 时调用。
+  setTimelineHeight: (n) => {
+    set({ timelineHeight: clampTimelineHeight(n) })
+  },
+  commitTimelineHeight: () => {
+    persistTimelineHeight(get().timelineHeight)
+  },
+  timelineCollapsed: readPersistedTimelineCollapsed(),
+  // 同样是"内存先行、commit 落盘"的两段式，供双击分隔条时紧接着成对调用
+  // （镜像 onResizeDoubleClick 里 setPanelWidth 紧跟 commitPanelWidth 的写法）。
+  setTimelineCollapsed: (v) => {
+    set({ timelineCollapsed: v })
+  },
+  commitTimelineCollapsed: () => {
+    persistTimelineCollapsed(get().timelineCollapsed)
   },
 }))

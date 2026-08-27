@@ -160,6 +160,24 @@ pub struct Conversation {
 - 每条对应一个**用户发起的轮次**：`HH:MM` + 首行摘要（截断），用固定缩进表达"属于该日期
   分组"的层级关系，不用圆点符号
 - 点击 → 正文区滚动到该轮（以 `uuid` 作为 DOM 锚点）
+- **时间线区域整体可拖拽调高、可双击折叠**（P2a 后续迭代加入，见 §9 第 6 条），与上面
+  "单个日期分组折叠"是两套彼此独立的机制——那一条只影响某一天的条目是否展开，不改变时间线
+  区本身占多高；这一条改的是整块时间线区（含全部日期分组）在面板里的高度，用意是让正文区能
+  在需要时占满面板剩余高度。时间线区与正文区之间新增一条水平分隔条：
+  - **拖拽**分隔条调整时间线区高度，范围 [80px, 内容区高度的 60%]（60% 是动态量，只在
+    拖拽这一刻现算，不装 resize 监听器，同 §6 宽度手柄的 `windowCap` 是同一思路，实现在
+    `ConversationPanel.tsx` 的 `timelineHeightCap`）；高度持久化到 `localStorage`
+    （`aterm-timeline-height`），`pointermove` 期间只更新内存、`pointerup` 才落盘，与宽度
+    手柄同一套 `setX`/`commitX` 两段式（`store/layout.ts` 的 `setTimelineHeight` /
+    `commitTimelineHeight`）
+  - **双击**分隔条把时间线区整体折叠/恢复（`aterm-timeline-collapsed`，同样的两段式：
+    `setTimelineCollapsed` + `commitTimelineCollapsed`）；折叠时高度归零、正文区占满剩余
+    高度，但**分隔条本身始终保留、可再次双击恢复**——不会随折叠一起从文档中消失
+  - 分隔条本身是 `.conv-panel-content` 常规文档流里的一个真实占位块（不是绝对定位悬浮在
+    边界上），天然不会被任何祖先的 `overflow: hidden` 裁掉抓取区——这是从 §6 宽度手柄早年
+    "抓取区跨骑在裁剪边界上被裁掉一半"那次教训里直接得出的写法，不重蹈覆辙
+  - `cursor: row-resize`；hover/active 态用既有 `--color-accent` 变量变色，不加箭头/圆点等
+    图形提示（用户明确要求干净的观感）
 
 **正文**
 - 按轮次顺序渲染，用户轮与 Claude 回答在视觉上区分（不同底色/缩进，沿用既有 CSS 变量，不新增调色板条目）
@@ -220,3 +238,9 @@ pub struct Conversation {
    本地从未存过该偏好的场景——已保存的偏好（无论收起或展开）永远优先，实现细节见
    `store/layout.ts` 的 `readPersistedPanelCollapsed`（用 `v !== null` 区分"没存过"与
    "存过且为假"）。详见 §6
+6. **新增：时间线区域整体可拖拽调高 + 双击折叠**（用户反馈：长会话下时间线区占掉太多
+   纵向空间，希望能把这块高度让给正文区）——与 §9 第 2 条（面板宽度可拖拽）是同一类"用完
+   才发现要调节"的反馈，采用完全相同的两段式持久化模式（`setX` 内存、`commitX` 落盘）以及
+   同样的"动态上限现算、不装 resize 监听器"原则，只是维度从宽度换成高度、驱动的字段从
+   `panelWidth` 换成 `timelineHeight`/`timelineCollapsed`。与既有的"单个日期分组折叠"
+   （§6 时间线小节第 2 条）是两套独立机制，互不影响、互不复用状态。详见 §6

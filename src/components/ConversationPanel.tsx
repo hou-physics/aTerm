@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { firstLineSummary, formatTimeHM, groupUserTurnsByDate } from '../conversation'
 import { readConversation, type Conversation } from '../ipc'
-import { PANEL_WIDTH_DEFAULT, useLayout } from '../store/layout'
+import { PANEL_WIDTH_DEFAULT, TIMELINE_HEIGHT_MIN, useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
 
 function scrollToTurn(uuid: string) {
@@ -13,6 +13,17 @@ function scrollToTurn(uuid: string) {
 // 窗口后续变化不会主动收窄已设定的宽度，下次拖拽时才会重新生效。
 function windowCap(px: number): number {
   return Math.min(px, window.innerWidth * 0.6)
+}
+
+// 时间线区高度同一思路：下限固定 80px（TIMELINE_HEIGHT_MIN，store 层已经钳过），
+// 上限是"内容区高度的 60%"这个动态量，只在拖拽这一刻现算（containerHeight 取自
+// contentRef，不装 resize 监听器）。containerHeight 取不到（尚未布局、或测试环境
+// 没有真实排版）时视为"没有上限"，只由下限兜底，与 windowCap 对 panelWidth 的处理
+// 是同一套克制原则。
+function timelineHeightCap(px: number, containerHeight: number): number {
+  const clamped = Math.max(px, TIMELINE_HEIGHT_MIN)
+  if (containerHeight <= 0) return clamped
+  return Math.min(clamped, containerHeight * 0.6)
 }
 
 export function ConversationPanel() {
@@ -157,6 +168,51 @@ export function ConversationPanel() {
 
   const panelWidth = useLayout((s) => s.panelWidth)
 
+  // 时间线区（日期分组列表）整体的高度拖拽 + 折叠，与上面的宽度手柄是同一套
+  // pointerdown/move/up + setPointerCapture 模式，只是方向换成竖直、驱动的是
+  // timelineHeight 而非 panelWidth。这与"点击某个日期分组标题折叠该组"是两套彼此独立
+  // 的机制：后者只影响一个分组内的条目是否展示，不改变时间线区本身占的高度；这里改的
+  // 是整个时间线区（含所有分组）在面板里占多高，甚至可以整体折叠到 0，把高度让给下方
+  // 可滚动的正文区。
+  const timelineDragRef = useRef<{ startY: number; startHeight: number } | null>(null)
+  // 用于在拖拽时读取"内容区"（时间线 + 分隔条 + 正文，不含头部）的当前高度，
+  // 供 timelineHeightCap 现算 60% 上限；见该函数与 windowCap 的注释。
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  const onTimelineResizePointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    // 已折叠时分隔条仍然可见、可双击展开，但不响应拖拽——折叠期间时间线区渲染高度
+    // 恒为 0，拖拽在视觉上无事发生，容易让人以为拖拽失效；折叠态下唯一的展开入口
+    // 就是双击，这里索性不进入拖拽态，语义更清楚。
+    if (useLayout.getState().timelineCollapsed) return
+    e.preventDefault()
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    timelineDragRef.current = { startY: e.clientY, startHeight: useLayout.getState().timelineHeight }
+  }, [])
+
+  const onTimelineResizePointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = timelineDragRef.current
+    if (!drag) return
+    const dy = e.clientY - drag.startY // 分隔条在时间线区下方：指针下移变高、上移变矮
+    const containerHeight = contentRef.current?.clientHeight ?? 0
+    useLayout.getState().setTimelineHeight(timelineHeightCap(drag.startHeight + dy, containerHeight))
+  }, [])
+
+  const onTimelineResizePointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!timelineDragRef.current) return
+    timelineDragRef.current = null
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    useLayout.getState().commitTimelineHeight()
+  }, [])
+
+  const onTimelineDoubleClick = useCallback(() => {
+    const next = !useLayout.getState().timelineCollapsed
+    useLayout.getState().setTimelineCollapsed(next)
+    useLayout.getState().commitTimelineCollapsed()
+  }, [])
+
+  const timelineHeight = useLayout((s) => s.timelineHeight)
+  const timelineCollapsed = useLayout((s) => s.timelineCollapsed)
+
   // 折叠态：面板完全不渲染、不占宽度，终端拿满剩余空间。唯一的开关入口是 TabBar
   // 右端的按钮（与 ⌘J 共享同一个 store 方法）；面板自身不再带折叠按钮，也不再
   // 收成一条竖条——panelCollapsed 是 store/layout.ts 里唯一的真相来源，不引入
@@ -192,8 +248,11 @@ export function ConversationPanel() {
         {hasThread && loading && <div className="conv-status">加载中…</div>}
         {hasThread && error && <div className="conv-status conv-error">加载失败：{error}</div>}
         {hasThread && !loading && !error && conv && (
-          <>
-            <div className="conv-timeline">
+          <div className="conv-panel-content" ref={contentRef}>
+            <div
+              className="conv-timeline"
+              style={timelineCollapsed ? { height: 0, padding: 0, overflow: 'hidden' } : { height: timelineHeight }}
+            >
               {groups.map((g) => {
                 const expanded = expandedDates.has(g.key)
                 return (
@@ -218,6 +277,17 @@ export function ConversationPanel() {
               })}
               {groups.length === 0 && <div className="conv-status">暂无用户发起的轮次</div>}
             </div>
+            <div
+              className="conv-timeline-divider"
+              role="separator"
+              aria-orientation="horizontal"
+              title="拖动调整时间线高度（双击折叠）"
+              onPointerDown={onTimelineResizePointerDown}
+              onPointerMove={onTimelineResizePointerMove}
+              onPointerUp={onTimelineResizePointerUp}
+              onPointerCancel={onTimelineResizePointerUp}
+              onDoubleClick={onTimelineDoubleClick}
+            />
             <div className="conv-body">
               {conv.turns.map((t) => (
                 <div key={t.uuid} id={`turn-${t.uuid}`} className={`conv-turn conv-turn-${t.role}`}>
@@ -225,7 +295,7 @@ export function ConversationPanel() {
                 </div>
               ))}
             </div>
-          </>
+          </div>
         )}
       </div>
     </aside>
