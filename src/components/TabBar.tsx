@@ -10,7 +10,7 @@ import {
 import { newTerminal } from '../actions'
 import { pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
-import { decidePaneFit, MAX_PANES } from '../paneLayout'
+import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
@@ -207,7 +207,16 @@ export function TabBar() {
       return
     }
     const layout = useLayout.getState()
-    const decision = decidePaneFit(nextCount, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    // getContentWidth() 量出的是包含内边距/分隔条/窗格边框开销的原始宽度，与 ⌘D
+    // （App.tsx）同一份 usablePaneAreaWidth 换算成真正分给 nextCount 个窗格内容区的
+    // 可用宽度之后再喂给 decidePaneFit——否则这条拖放路径会比 ⌘D 更容易"误判装得下"
+    // （见本次修复说明）。
+    const decision = decidePaneFit(
+      nextCount,
+      usablePaneAreaWidth(getContentWidth(), nextCount),
+      layout.panelCollapsed,
+      layout.panelWidth,
+    )
     if (decision === 'refuse') {
       useHint.getState().show('窗口太窄，放不下新窗格')
       return

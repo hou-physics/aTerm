@@ -3,7 +3,7 @@ import { resumeThread } from '../actions'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { dropInsertionIndex, resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
-import { decidePaneFit, MAX_PANES } from '../paneLayout'
+import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
@@ -121,7 +121,15 @@ export function Sidebar() {
       return
     }
     const layout = useLayout.getState()
-    const decision = decidePaneFit(nextCount, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    // 与 TabBar.tsx 的合并落点同一处修复：getContentWidth() 的原始测量值先经
+    // usablePaneAreaWidth 换算成真正分给 nextCount 个窗格内容区的可用宽度，
+    // 再喂给 decidePaneFit——与 ⌘D（App.tsx）保持同一套判定，不会互相矛盾。
+    const decision = decidePaneFit(
+      nextCount,
+      usablePaneAreaWidth(getContentWidth(), nextCount),
+      layout.panelCollapsed,
+      layout.panelWidth,
+    )
     if (decision === 'refuse') {
       useHint.getState().show('窗口太窄，放不下新窗格')
       return

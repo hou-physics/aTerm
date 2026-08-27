@@ -661,3 +661,54 @@ describe('TabBar — 指针捕获丢失或组件卸载时同样清理拖拽状�
   })
 })
 
+// 拖放路径也使用修正后的可用宽度（review 发现：⌘D 的拒绝阈值已经用 usablePaneAreaWidth
+// 扣掉了容器内边距/分隔条/窗格边框开销，但 TabBar.tsx 的合并落点仍在用原始
+// clientWidth，同一份几何在两条路径上可能给出矛盾的结论）。数字与
+// App.test.tsx"⌘D 新建窗格"一节的边界用例完全对应：原始测量值 640px，2 个窗格所需
+// 的开销是 12+9+4=25px，修正后可用宽度只有 615px，装不下 2×320=640px。
+describe('TabBar — 拖放创建窗格也按修正后的可用宽度判定，与 ⌘D 不会互相矛盾', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('原始测量值 640px：⌘D 与拖放合并对同一个 nextCount=2 的窗口几何给出同一个"拒绝"结论', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 640 })
+    const { getByText } = await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 640, height: 100 } })
+
+    // 先用 ⌘D 在 tab-a 自己身上新建第二个窗格（nextCount=2），钉住这个几何下 ⌘D
+    // 本身确实拒绝。
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true }))
+    })
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1)
+    expect(getByText('窗口太窄，放不下新窗格')).toBeTruthy()
+    await act(async () => { useHint.setState({ message: null }) }) // 清掉这次提示，不干扰下面对同一条提示的断言
+
+    // 拖放合并（把 tab-b 并进 tab-a）同样是 nextCount=2，理应给出同一个结论——修正前
+    // 这里会因为用原始 clientWidth 而误判"刚好装得下"，与 ⌘D 的判断相矛盾。
+    const b = tabEl('B')
+    await drag(b, { x: 630, y: 10 }, { x: 500, y: 50 }) // 落在 pane-a 矩形 [0,640) 的右半侧
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy() // 没有被误判成装得下而合并
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1)
+    expect(getByText('窗口太窄，放不下新窗格')).toBeTruthy()
+  })
+
+  it('原始测量值 665px（640+25px 开销）：⌘D 与拖放合并对同一个几何给出同一个"装得下"结论', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 665 })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 665, height: 100 } })
+    const b = tabEl('B')
+
+    await drag(b, { x: 655, y: 10 }, { x: 500, y: 50 }) // 落在 pane-a 矩形右半侧
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeUndefined() // 合并成功
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2)
+  })
+})
