@@ -5,9 +5,20 @@ export interface ProjectInfo { dirName: string; cwd: string; lastActivityMs: num
 export interface Turn { role: string; text: string; tsMs: number; uuid: string }
 export interface Conversation { turns: Turn[]; files: string[]; totalBytes: number }
 
+export type SessionStatusValue = 'running' | 'awaitingInput' | 'done'
+export interface SessionStatusPayload {
+  dirName: string
+  rootKey: string
+  sessionId: string
+  status: SessionStatusValue
+  lastActivityMs: number
+  updatedAtMs: number
+}
+
 export const listProjects = () => invoke<ProjectInfo[]>('list_projects')
 export const readConversation = (dirName: string, rootKey: string) =>
   invoke<Conversation>('read_conversation', { dirName, rootKey })
+export const getSessionStatuses = () => invoke<SessionStatusPayload[]>('get_session_statuses')
 export const ptySpawn = (o: { cwd?: string; inject?: string; cols: number; rows: number }) => invoke<string>('pty_spawn', o)
 export const ptyWrite = (id: string, data: string) => invoke<void>('pty_write', { id, data })
 export const ptyResize = (id: string, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows })
