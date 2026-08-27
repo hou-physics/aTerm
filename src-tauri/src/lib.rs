@@ -10,6 +10,7 @@ pub fn run() {
         .manage(pty::PtyManager::default())
         .invoke_handler(tauri::generate_handler![
             sessions::scan::list_projects,
+            sessions::conversation::read_conversation,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

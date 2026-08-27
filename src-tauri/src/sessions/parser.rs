@@ -34,7 +34,9 @@ fn is_user_message(v: &Value) -> bool {
         == Some("user")
 }
 
-fn is_injected(text: &str) -> bool {
+/// 是否为注入文本（斜杠命令回显、系统提醒等）而非真实用户输入。
+/// `pub(super)`：供 `sessions::conversation` 复用同一条规则，避免第二处实现漂移。
+pub(super) fn is_injected(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with('<') || t.starts_with("Caveat:")
 }
