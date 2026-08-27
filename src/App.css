@@ -117,19 +117,19 @@ body {
 
 .conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .conv-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.conv-panel-resize-handle { position: absolute; top: 0; bottom: 0; left: -4px; width: 1px; padding: 0 4px; box-sizing: content-box; background: transparent; background-clip: content-box; cursor: col-resize; z-index: 2; }
+/* 抓取区必须整块落在 .conv-panel 的盒子内：祖先 .conv-panel-dock 有 overflow:hidden，
+   任何画在其内边距盒之外的内容既不会绘制也不会命中测试，会被静默裁掉。此前用
+   left:-4px 让抓取区跨骑在面板左边缘上，向外伸出的一半正好落在裁剪区外，实际可
+   抓宽度只剩一半（~5px）。改为不越界的非对称内边距：视觉细线仍在 x=0（面板左
+   边缘，观感不变，因为 -4px 的 left 与 4px 的左内边距互相抵消，新写法直接从 0
+   起算是同一个位置），抓取区整块向右（面板内部）铺开到 9px，不再跨边界。 */
+.conv-panel-resize-handle { position: absolute; top: 0; bottom: 0; left: 0; width: 1px; padding: 0 8px 0 0; box-sizing: content-box; background: transparent; background-clip: content-box; cursor: col-resize; z-index: 2; }
 .conv-panel-resize-handle:hover, .conv-panel-resize-handle:active { background-color: var(--color-accent); }
 .conv-header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
 .conv-title { font-size: 13px; font-weight: 600; }
 .conv-header-actions { flex: none; display: flex; align-items: center; gap: 6px; }
-.conv-refresh, .conv-collapse { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
-.conv-refresh:hover, .conv-collapse:hover { border-color: var(--color-accent); color: var(--color-text); }
-
-/* 折叠态：面板收成一条 28px 竖条，展开按钮居中在顶部，视觉上与 TabBar 里的
-   sidebar-toggle / panel-toggle 是同一套按钮语言（沿用既有 CSS 变量，不新增调色板）。 */
-.conv-panel-strip { width: 28px; flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; justify-content: center; padding-top: 6px; }
-.conv-strip-expand { flex: none; width: 22px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
-.conv-strip-expand:hover { border-color: var(--color-accent); color: var(--color-text); }
+.conv-refresh { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.conv-refresh:hover { border-color: var(--color-accent); color: var(--color-text); }
 .conv-timeline { flex: none; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--color-border); padding: 6px 10px; }
 /* 日期标题不带前置符号（用户明确不要任何图形提示）。可点性改由 cursor + hover 背景/字色
    传达；负 margin 把 hover 命中区往左右各扩 4px（超出文字本身的排版宽度），让它有块可点的

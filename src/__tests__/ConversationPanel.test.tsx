@@ -254,52 +254,57 @@ describe('ConversationPanel — 面板宽度可拖拽', () => {
   })
 })
 
-describe('ConversationPanel — 面板自带折叠按钮 + 折叠后的细条', () => {
+describe('ConversationPanel — 折叠态完全消失，唯一开关在 TabBar', () => {
   beforeEach(() => {
     useLayout.setState({ panelCollapsed: false })
   })
 
-  it('点击面板自己的折叠按钮后，面板收成 28px 竖条，露出展开按钮', () => {
-    render(<ConversationPanel />)
-    fireEvent.click(screen.getByTitle('收起面板 (⌘J)'))
+  it('折叠时面板不渲染任何内容（不是收成细条）', () => {
+    const { container } = render(<ConversationPanel />)
+    act(() => { useLayout.getState().togglePanel() })
     expect(useLayout.getState().panelCollapsed).toBe(true)
-    expect(screen.getByTitle('展开面板 (⌘J)')).toBeTruthy()
-    expect(screen.queryByTitle('收起面板 (⌘J)')).toBeNull()
+    expect(container.firstChild).toBeNull() // 完全不渲染，不占用任何空间
+    expect(screen.queryByTitle('展开面板 (⌘J)')).toBeNull() // 不存在面板自带的展开按钮/竖条
+    expect(screen.queryByTitle('收起面板 (⌘J)')).toBeNull() // 面板自身不再带折叠按钮
   })
 
-  it('点击细条上的展开按钮恢复完整面板', () => {
-    useLayout.setState({ panelCollapsed: true })
+  it('面板不再自带折叠按钮，展开态头部只有刷新按钮', async () => {
+    vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
+    useTabs.setState({
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      activeId: 'tab-1',
+    })
     render(<ConversationPanel />)
-    fireEvent.click(screen.getByTitle('展开面板 (⌘J)'))
-    expect(useLayout.getState().panelCollapsed).toBe(false)
-    expect(screen.getByTitle('收起面板 (⌘J)')).toBeTruthy()
+    expect(screen.queryByTitle('收起面板 (⌘J)')).toBeNull()
+    expect(screen.getByTitle('刷新')).toBeTruthy()
+    await waitFor(() => expect(ipc.readConversation).toHaveBeenCalledWith('proj-a', 'root-1'))
   })
 
-  it('panelCollapsed 是唯一真相来源：面板自身按钮、TabBar 按钮、⌘J 三处操作互相同步', () => {
+  it('panelCollapsed 是唯一真相来源：TabBar 上唯一的开关按钮双向工作，⌘J（等价模拟）与之同步', () => {
     render(
       <>
         <TabBar />
         <ConversationPanel />
       </>,
     )
-    expect(screen.getByTitle('收起面板 (⌘J)')).toBeTruthy()
     expect(screen.getByTitle('隐藏对话面板 (⌘J)')).toBeTruthy()
+    expect(document.querySelector('.conv-panel-dock')).toBeTruthy() // 展开态面板存在
 
-    // 从面板自己的折叠按钮收起
-    fireEvent.click(screen.getByTitle('收起面板 (⌘J)'))
+    // 从 TabBar 唯一的开关按钮收起
+    fireEvent.click(screen.getByTitle('隐藏对话面板 (⌘J)'))
     expect(useLayout.getState().panelCollapsed).toBe(true)
-    expect(screen.getByTitle('展开面板 (⌘J)')).toBeTruthy() // 面板变成竖条
-    expect(screen.getByTitle('显示对话面板 (⌘J)')).toBeTruthy() // TabBar 按钮同步翻转
+    expect(screen.getByTitle('显示对话面板 (⌘J)')).toBeTruthy() // 按钮翻转为"显示"
+    expect(document.querySelector('.conv-panel-dock')).toBeNull() // 面板完全消失
 
     // ⌘J 在 App.tsx 里就是直接调用同一个 store 方法，这里等价模拟
     act(() => { useLayout.getState().togglePanel() })
     expect(useLayout.getState().panelCollapsed).toBe(false)
-    expect(screen.getByTitle('收起面板 (⌘J)')).toBeTruthy()
     expect(screen.getByTitle('隐藏对话面板 (⌘J)')).toBeTruthy()
+    expect(document.querySelector('.conv-panel-dock')).toBeTruthy() // 面板重新出现
 
-    // 从 TabBar 按钮收起
+    // 同一个按钮再次点击可以收起——证明它双向工作，不是两个各管一头的独立开关
     fireEvent.click(screen.getByTitle('隐藏对话面板 (⌘J)'))
     expect(useLayout.getState().panelCollapsed).toBe(true)
-    expect(screen.getByTitle('展开面板 (⌘J)')).toBeTruthy()
+    expect(document.querySelector('.conv-panel-dock')).toBeNull()
   })
 })

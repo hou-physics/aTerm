@@ -18,6 +18,8 @@ function windowCap(px: number): number {
 export function ConversationPanel() {
   const dirName = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.dirName)
   const rootKey = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.rootKey)
+  // 提前到这里读取（而不是留在渲染末尾）：下面的 effect 需要把它订阅进依赖数组。
+  const panelCollapsed = useLayout((s) => s.panelCollapsed)
   const [conv, setConv] = useState<Conversation | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -70,6 +72,14 @@ export function ConversationPanel() {
     if (dirName && rootKey) load()
   }, [dirName, rootKey, load, seedExpandedDates])
 
+  useEffect(() => {
+    if (!panelCollapsed) return
+    // 折叠有可能恰好发生在拖拽宽度的中途：手柄随折叠一起从 DOM 卸载，浏览器会隐式
+    // 释放指针捕获但不会补发 pointerup，onResizePointerUp 里的 commitPanelWidth 就
+    // 不会执行。这里兜底：折叠瞬间把内存中（已经是最新值的）宽度落盘，避免那次拖拽白拖。
+    useLayout.getState().commitPanelWidth()
+  }, [panelCollapsed])
+
   const toggleDateGroup = useCallback((key: string) => {
     setExpandedDates((prev) => {
       const next = new Set(prev)
@@ -106,25 +116,19 @@ export function ConversationPanel() {
   }, [])
 
   const onResizeDoubleClick = useCallback(() => {
+    // 复位到 400px 时同样经过 windowCap：窄窗口下"不超过窗口宽度 60%"这条不变量
+    // 优先于字面上的 400（可能复位到比 400 更小），这是有意为之，不要"修正"掉。
     useLayout.getState().setPanelWidth(windowCap(PANEL_WIDTH_DEFAULT))
     useLayout.getState().commitPanelWidth()
   }, [])
 
-  const panelCollapsed = useLayout((s) => s.panelCollapsed)
-  const togglePanel = useLayout((s) => s.togglePanel)
   const panelWidth = useLayout((s) => s.panelWidth)
 
-  // 折叠态：面板不整个消失，收成一条 28px 的竖条（带展开按钮），让"再点一下展开"
-  // 有个可点的地方。panelCollapsed 是 store/layout.ts 里唯一的真相来源——面板自己的
-  // 折叠按钮、这里的展开按钮、TabBar 的开关按钮、App.tsx 的 ⌘J 全部读写同一个字段，
-  // 天然保持同步，不引入第二个标志位。
-  if (panelCollapsed) {
-    return (
-      <aside className="conv-panel-strip">
-        <button type="button" className="conv-strip-expand" onClick={() => togglePanel()} title="展开面板 (⌘J)">‹</button>
-      </aside>
-    )
-  }
+  // 折叠态：面板完全不渲染、不占宽度，终端拿满剩余空间。唯一的开关入口是 TabBar
+  // 右端的按钮（与 ⌘J 共享同一个 store 方法）；面板自身不再带折叠按钮，也不再
+  // 收成一条竖条——panelCollapsed 是 store/layout.ts 里唯一的真相来源，不引入
+  // 第二个标志位。
+  if (panelCollapsed) return null
 
   const hasThread = Boolean(dirName && rootKey)
   const groups = conv ? groupUserTurnsByDate(conv.turns) : []
@@ -145,10 +149,11 @@ export function ConversationPanel() {
         />
         <div className="conv-header">
           <span className="conv-title">对话</span>
-          <div className="conv-header-actions">
-            {hasThread && <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>}
-            <button type="button" className="conv-collapse" onClick={() => togglePanel()} title="收起面板 (⌘J)">›</button>
-          </div>
+          {hasThread && (
+            <div className="conv-header-actions">
+              <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>
+            </div>
+          )}
         </div>
         {!hasThread && <div className="conv-empty">当前标签没有关联的对话</div>}
         {hasThread && loading && <div className="conv-status">加载中…</div>}
