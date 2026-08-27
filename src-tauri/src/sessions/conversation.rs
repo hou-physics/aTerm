@@ -62,12 +62,25 @@ fn parse_line(line: &str) -> Option<Turn> {
     if !line.contains("\"type\":\"user\"") && !line.contains("\"type\":\"assistant\"") {
         return None;
     }
-    // 规则 3（同一顺序精神的延伸）：content 是数组形态、但连 "type":"text" 子串都不
-    // 含时，说明这是一条纯工具调用记录——tool_use 项常携带体积不小的 input 负载
+    // 规则 3（同一顺序精神的延伸，spec §4 未明文列出、为达成 §5 冷读 <50ms
+    // 预算而追加）：content 是数组形态、但连 "type":"text" 子串都不含时，说明
+    // 这是一条纯工具调用记录——tool_use 项常携带体积不小的 input 负载
     // （如整份文件内容），既然它必然提取不出任何正文，不必为它整行做 JSON 解析。
     // content 为普通字符串（"content":"..."）时该子串天然不存在，不受此规则影响，
     // 照常往下解析；子串一旦真实出现在其他字段里（极小概率），只是多解析一次，
     // 不会造成漏判——真正的判定仍由下面的类型化提取完成。
+    //
+    // 这条规则依赖的假设是硬性的、必须写清楚：转录文件是**紧凑、不含空白的**
+    // JSON 序列化（`serde_json` 默认输出），使得只要数组里存在一个文本块，
+    // `"type":"text"` 这个子串就**逐字节**出现在该行里——不论键的先后顺序。
+    // 若这份转录 JSON 的序列化方式将来发生变化（例如带上了空白/换行做美化输出，
+    // 或者字段名/取值被重新拼接导致这个子串不再逐字符出现），这条假设就不成立，
+    // 而此规则会在假阳性之外产生真正的假阴性——静默丢弃真实正文。届时**必须整条
+    // 删除这条规则**，而不是打补丁（例如加更多子串变体）——保持规则的形状简单、
+    // 可推理，比多留一层子串匹配更重要。删除后仍能通过下面的类型化 JSON 解析正确
+    // 工作，只是慢回 spec §5 记录的 ~13ms，不影响正确性。见下方
+    // `content_array_with_text_block_not_skipped_by_byte_heuristic` 测试，它把
+    // "含文本块的数组不会被此规则误杀"这一契约钉死为回归测试。
     if line.contains("\"content\":[") && !line.contains("\"type\":\"text\"") {
         return None;
     }
@@ -628,6 +641,105 @@ mod tests {
         let second = read_conversation_in(tmp.path(), "-tmp-proj-n", "root-u").unwrap();
         assert!(second.turns.iter().any(|t| t.uuid == "a1"), "旧轮次必须保留");
         assert!(second.turns.iter().any(|t| t.uuid == "a2"), "新追加的轮次必须被解析出来");
+    }
+
+    /// 钉住字节筛选规则 3（"content 数组但不含 type:text 子串则跳过"）的契约：
+    /// content 数组里真实存在文本块时，该行必然逐字节含 "type":"text" 子串，
+    /// 规则 3 绝不能把它连同数组一起跳过。若这个断言有一天失败，说明规则 3
+    /// 依赖的"紧凑无空白 JSON 序列化"假设已经不成立，应删除该规则而非修补它
+    /// （见 parse_line 里规则 3 上方的注释）。
+    #[test]
+    fn content_array_with_text_block_not_skipped_by_byte_heuristic() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_chain(
+            tmp.path(),
+            "-tmp-proj-o",
+            SID_A,
+            "root-u",
+            vec![assistant_line(
+                "a1",
+                &serde_json::json!([{"type": "text", "text": "数组形态的单个文本块"}]),
+                "2026-08-20T09:00:05.000Z",
+            )],
+        );
+        let out = read_conversation_in(tmp.path(), "-tmp-proj-o", "root-u").unwrap();
+        let turn = out.turns.iter().find(|t| t.uuid == "a1");
+        assert!(turn.is_some(), "content 数组含文本块时必须产生 Turn，不能被字节筛选规则 3 误杀");
+        assert_eq!(turn.unwrap().text, "数组形态的单个文本块");
+    }
+
+    fn append_raw(path: &Path, s: &str) {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        f.write_all(s.as_bytes()).unwrap();
+    }
+
+    fn append_line(path: &Path, s: &str) {
+        append_raw(path, s);
+        append_raw(path, "\n");
+    }
+
+    /// 在一个合法的 UTF-8 字符边界上把 `s` 切成"约一半"，供构造撕裂的半行写入。
+    fn safe_torn_point(s: &str, approx: usize) -> usize {
+        let mut idx = approx.min(s.len());
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        idx
+    }
+
+    /// 多步增量续读：至少追加三次，每次追加后都调用一次 read，断言每一步累积的
+    /// 轮次都完整、正确；其中一步以"半行"（无换行符，模拟运行中会话写到一半）
+    /// 落地，下一步补完该行后再追加新内容，断言补完的轮次恰好出现一次——既不
+    /// 丢失也不重复。P2b 的实时跟随会高频命中这条路径，这里补齐 review 指出的
+    /// 覆盖缺口（此前只测过单次增量）。
+    #[test]
+    fn multi_step_incremental_append_including_torn_final_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (proj, _) = setup_chain(
+            tmp.path(),
+            "-tmp-proj-q",
+            SID_A,
+            "root-u",
+            vec![assistant_line("a1", &serde_json::json!("第一条回答"), "2026-08-20T09:00:05.000Z")],
+        );
+        let path = proj.join(format!("{SID_A}.jsonl"));
+
+        let uuids = |c: &Conversation| c.turns.iter().map(|t| t.uuid.clone()).collect::<Vec<_>>();
+
+        // 步骤 1：基线读取。
+        let r1 = read_conversation_in(tmp.path(), "-tmp-proj-q", "root-u").unwrap();
+        assert_eq!(uuids(&r1), vec!["root-u", "a1"]);
+
+        // 步骤 2：完整追加第二轮，读取。
+        append_line(&path, &assistant_line("a2", &serde_json::json!("第二条回答"), "2026-08-20T09:00:10.000Z"));
+        let r2 = read_conversation_in(tmp.path(), "-tmp-proj-q", "root-u").unwrap();
+        assert_eq!(uuids(&r2), vec!["root-u", "a1", "a2"], "第二步：旧轮次保留、新轮次出现");
+
+        // 步骤 3：只追加半行（无换行符），模拟运行中会话写到一半就被读到。
+        let line3 = assistant_line("a3", &serde_json::json!("第三条回答，写入中被截断"), "2026-08-20T09:00:15.000Z");
+        let split = safe_torn_point(&line3, line3.len() / 2);
+        append_raw(&path, &line3[..split]);
+        let r3 = read_conversation_in(tmp.path(), "-tmp-proj-q", "root-u").unwrap();
+        assert_eq!(
+            uuids(&r3),
+            vec!["root-u", "a1", "a2"],
+            "第三步：未写完的半行不应产生 Turn，也不应丢失此前已解析的轮次"
+        );
+
+        // 步骤 4：补完那一行，再追加第四轮，读取。
+        append_raw(&path, &line3[split..]);
+        append_raw(&path, "\n");
+        append_line(&path, &assistant_line("a4", &serde_json::json!("第四条回答"), "2026-08-20T09:00:20.000Z"));
+        let r4 = read_conversation_in(tmp.path(), "-tmp-proj-q", "root-u").unwrap();
+        assert_eq!(
+            uuids(&r4),
+            vec!["root-u", "a1", "a2", "a3", "a4"],
+            "第四步：补完的轮次必须恰好出现一次，且新轮次正确解析"
+        );
+        assert_eq!(r4.turns.iter().filter(|t| t.uuid == "a3").count(), 1, "补完的轮次不能重复");
+        let a3 = r4.turns.iter().find(|t| t.uuid == "a3").unwrap();
+        assert_eq!(a3.text, "第三条回答，写入中被截断", "跨两次追加拼接后的正文必须完整、不截断");
     }
 }
 
