@@ -11,28 +11,17 @@ import { TerminalView } from './components/TerminalView'
 import { useLayout } from './store/layout'
 import { useSessions } from './store/sessions'
 import { useTabs } from './store/tabs'
-import { useTheme } from './store/theme'
-import { themeForAppearance } from './themes/data'
-import { applyUiVars } from './themes/derive'
 
 export default function App() {
   const { tabs, activeId } = useTabs()
   const refresh = useSessions((s) => s.refresh)
   const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed)
-  const resolvedTheme = useTheme((s) => s.resolved)
   useEffect(() => {
     refresh().catch(console.error)
     const onFocus = () => { refresh().catch(console.error) }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [refresh])
-  // 全站 UI 配色（侧栏/标签栏/面板）与终端配色共用同一套 Theme 数据（见 themes/derive.ts）；
-  // 应用方式是把推导出的 --color-* 变量写成 document.documentElement 的内联样式，取代过去
-  // 单纯靠 [data-theme] 属性选择器切换两套硬编码值的做法（该属性仍会同步设置，供其余可能
-  // 依赖它的 CSS 使用）。resolved → 代表性 Theme 的映射同样是过渡逻辑，见 themes/data.ts。
-  useEffect(() => {
-    applyUiVars(themeForAppearance(resolvedTheme))
-  }, [resolvedTheme])
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       // Control+Tab / Control+Shift+Tab：像 Chrome 一样在标签间循环切换（含主页标签），

@@ -1,18 +1,10 @@
 import { resumeThread } from '../actions'
 import { useSessions } from '../store/sessions'
 import { basename, formatRelative } from '../time'
-import { useTheme, type ThemeMode } from '../store/theme'
-
-const THEME_LABEL: Record<ThemeMode, string> = {
-  system: '🌗 跟随系统',
-  dark: '🌙 暗色',
-  light: '☀️ 亮色',
-}
+import { ThemeSwitcher } from './ThemeSwitcher'
 
 export function Sidebar() {
   const { projects } = useSessions()
-  const mode = useTheme((s) => s.mode)
-  const cycleMode = useTheme((s) => s.cycleMode)
   const recent = projects
     .flatMap((p) => p.threads.map((t) => ({ p, t })))
     .sort((a, b) => b.t.lastActivityMs - a.t.lastActivityMs)
@@ -28,9 +20,7 @@ export function Sidebar() {
           </div>
         ))}
       </div>
-      <div className="theme-toggle">
-        <button type="button" onClick={() => cycleMode()}>{THEME_LABEL[mode]}</button>
-      </div>
+      <ThemeSwitcher />
     </>
   )
 }

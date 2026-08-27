@@ -7,7 +7,6 @@ import { ptyResize, ptyWrite } from '../ipc'
 import { attachPty } from '../ptyBuffer'
 import { useLayout } from '../store/layout'
 import { useTheme } from '../store/theme'
-import { themeForAppearance } from '../themes/data'
 import { buildXtermTheme } from '../themes/derive'
 import { createWheelAmplifier, wheelDeltaToLines } from '../wheel'
 
@@ -38,7 +37,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       // 默认 1 档对触控板过慢；按住 Option 走 fastScroll 档。
       scrollSensitivity: 5,
       fastScrollSensitivity: 12,
-      theme: buildXtermTheme(themeForAppearance(useTheme.getState().resolved)),
+      theme: buildXtermTheme(useTheme.getState().activeTheme),
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -107,8 +106,8 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     window.addEventListener('keydown', onDiagKeyDown)
 
     const unsubTheme = useTheme.subscribe((state, prevState) => {
-      if (state.resolved !== prevState.resolved) {
-        term.options.theme = buildXtermTheme(themeForAppearance(state.resolved))
+      if (state.activeTheme.id !== prevState.activeTheme.id) {
+        term.options.theme = buildXtermTheme(state.activeTheme)
       }
     })
 
