@@ -9,6 +9,7 @@
 
 pub mod engine;
 pub mod hooks;
+pub mod installer;
 pub mod watcher;
 
 use engine::Status;

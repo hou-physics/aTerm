@@ -133,6 +133,7 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_is_alive,
             status::get_session_statuses,
+            status::installer::hooks_status,
             confirm_exit
         ])
         .setup(|app| {
