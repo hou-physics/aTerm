@@ -1,4 +1,11 @@
-import { useCallback, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { newTerminal } from '../actions'
 import { resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabRects } from '../paneDropDom'
@@ -7,7 +14,8 @@ import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
-import { useTabs } from '../store/tabs'
+import { type Tab, useTabs } from '../store/tabs'
+import { ContextMenu } from './ContextMenu'
 
 // 拖动超过这个像素距离才算真的在拖标签，而不是一次普通点击——阈值太小会让手抖的
 // 点击被误判成拖拽，太大会让拖拽感觉迟钝；4px 是这类交互的常见取值（设计文档要求
@@ -67,6 +75,7 @@ export function TabBar() {
 
   const dragRef = useRef<DragState | null>(null)
   const suppressClickRef = useRef(false)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
 
   const onTabPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, tabId: string) => {
     // 关闭按钮自己的点击语义（stopPropagation + closeTab）不参与拖拽判定，原样放行。
@@ -157,6 +166,17 @@ export function TabBar() {
     [setActive],
   )
 
+  // 标签右键菜单：主页标签没有可拆的窗格、也不可关闭（closeTab 本身对 home 是
+  // 空操作），因此不弹出菜单——不是"弹出一个空菜单"，是右键在主页标签上和右键在
+  // 已被 contextMenu.ts 全局拦截、终端区域之外的其它空白处一样，什么都不出现。
+  const onTabContextMenu = useCallback((e: ReactMouseEvent<HTMLDivElement>, tab: Tab) => {
+    if (tab.kind !== 'term') return
+    e.preventDefault()
+    setContextMenu({ x: e.clientX, y: e.clientY, tabId: tab.id })
+  }, [])
+
+  const contextMenuTab = contextMenu ? tabs.find((t) => t.id === contextMenu.tabId) : undefined
+
   return (
     <div className="tabbar">
       <button
@@ -177,6 +197,7 @@ export function TabBar() {
           onPointerUp={onTabPointerUp}
           onPointerCancel={onTabPointerUp}
           onClick={() => onTabClick(t.id)}
+          onContextMenu={(e) => onTabContextMenu(e, t)}
         >
           <span className="tab-title">{t.kind === 'home' ? '⌂' : t.title}</span>
           {t.kind !== 'home' && (
@@ -204,6 +225,24 @@ export function TabBar() {
           TabBarDropIndicator 注释。渲染顺序放最后，画在其它标签栏元素之上，
           不依赖 z-index（与 .pane-drop-indicator 在 App.tsx 里的取舍一致）。 */}
       <TabBarDropIndicator />
+      {/* 标签右键菜单：复用 TabPanes.tsx 窗格标题栏那一份 ContextMenu 组件，不写
+          第二份。「拆分为独立标签」只在该标签持有多于一个窗格时才出现（单窗格标签
+          没有什么可拆的，splitTabPanes 对它是 no-op，这里直接不渲染这一项，不依赖
+          调用后的返回值判断）；「关闭标签」始终存在，直接复用既有的 closeTab（含其
+          确认逻辑）。 */}
+      {contextMenu && contextMenuTab && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={[
+            ...(contextMenuTab.panes.length > 1
+              ? [{ label: '拆分为独立标签', onSelect: () => useTabs.getState().splitTabPanes(contextMenuTab.id) }]
+              : []),
+            { label: '关闭标签', onSelect: () => void closeTab(contextMenuTab.id) },
+          ]}
+          onDismiss={() => setContextMenu(null)}
+        />
+      )}
     </div>
   )
 }

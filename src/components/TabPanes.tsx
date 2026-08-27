@@ -13,7 +13,7 @@ import { clampDividerDrag, equalPaneWidths } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { type Pane, type Tab, useTabs } from '../store/tabs'
-import { PaneContextMenu } from './PaneContextMenu'
+import { ContextMenu } from './ContextMenu'
 import { PanePicker } from './PanePicker'
 
 // 与 TabBar.tsx/Sidebar.tsx 同一个阈值/idiom：拖动超过这个像素距离才判定为拖拽而不是
@@ -134,11 +134,13 @@ function PaneTitleBar({
       <span className="pane-titlebar-title" title={title}>{title}</span>
       <span className="pane-titlebar-close" onClick={onClose}>×</span>
       {contextMenu && (
-        <PaneContextMenu
+        <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
-          onDetach={() => detach()}
-          onClose={onClose}
+          items={[
+            { label: '移出为独立标签', onSelect: () => detach() },
+            { label: '关闭窗格', onSelect: onClose },
+          ]}
           onDismiss={() => setContextMenu(null)}
         />
       )}

@@ -469,6 +469,54 @@ describe('useTabs — detachPaneToNewTab：把窗格拆出成独立标签（拖�
   })
 })
 
+// 标签栏右键菜单「拆分为独立标签」（把已合并的多窗格标签重新拆回一个个独立标签，
+// movePanesToTab 的反方向——不是拆出"其中一个"，是全部拆开）：核心不变量同样是每个
+// Pane 对象的 id/ptyId 原样保留。
+describe('useTabs — splitTabPanes：把多窗格标签拆成 N 个独立标签（标签栏右键菜单）', () => {
+  it('三窗格标签拆分：产生 3 个各持有一个窗格的新标签，id/ptyId 原样不变，原标签被替换', () => {
+    const p1 = makePane({ title: '窗格甲' })
+    const p2 = makePane({ title: '窗格乙' })
+    const p3 = makePane({ title: '窗格丙' })
+    const sourceTab = makeTermTab({ panes: [p1, p2, p3], activePaneId: p2.id })
+    const otherTab = makeTermTab()
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, otherTab], activeId: sourceTab.id })
+
+    const newTabIds = useTabs.getState().splitTabPanes(sourceTab.id)
+
+    expect(newTabIds).toHaveLength(3)
+    const { tabs, activeId } = useTabs.getState()
+    // 原标签被替换在原位，otherTab 的相对位置不受影响
+    expect(tabs.map((t) => t.id)).toEqual([HOME_TAB.id, ...newTabIds!, otherTab.id])
+    const [t1, t2, t3] = newTabIds!.map((id) => tabs.find((t) => t.id === id)!)
+    expect(t1.panes).toEqual([{ id: p1.id, ptyId: p1.ptyId, title: p1.title }])
+    expect(t2.panes).toEqual([{ id: p2.id, ptyId: p2.ptyId, title: p2.title }])
+    expect(t3.panes).toEqual([{ id: p3.id, ptyId: p3.ptyId, title: p3.title }])
+    expect(t1.activePaneId).toBe(p1.id)
+    expect(t2.activePaneId).toBe(p2.id)
+    expect(t3.activePaneId).toBe(p3.id)
+    // 原本聚焦的是 p2，拆分后应聚焦 p2 所在的新标签
+    expect(activeId).toBe(t2.id)
+  })
+
+  it('单窗格标签：no-op，返回 null，不做任何状态变更（菜单项本就不会渲染，这里是防御性兜底）', () => {
+    const p1 = makePane()
+    const sourceTab = makeTermTab({ panes: [p1], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab], activeId: sourceTab.id })
+    const before = useTabs.getState().tabs
+
+    const result = useTabs.getState().splitTabPanes(sourceTab.id)
+
+    expect(result).toBeNull()
+    expect(useTabs.getState().tabs).toBe(before)
+  })
+
+  it('标签不存在，或是 home 标签：拒绝，返回 null', () => {
+    useTabs.setState({ tabs: [HOME_TAB], activeId: 'home' })
+    expect(useTabs.getState().splitTabPanes('does-not-exist')).toBeNull()
+    expect(useTabs.getState().splitTabPanes('home')).toBeNull()
+  })
+})
+
 describe('useTabs — closePane：关窗格 vs 关标签', () => {
   it('多窗格标签：关闭一个窗格不弹确认（该窗格从未 spawn 过 PTY），只从数组移除并重新等分', async () => {
     const p1 = makePane({ ptyId: undefined }) // 待选窗格，从未 spawn

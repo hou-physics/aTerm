@@ -223,6 +223,70 @@ describe('TabBar — 拖已打开的标签进窗格区（设计文档 §5-B 场�
   })
 })
 
+// 标签右键菜单（设计文档新增）：复用 TabPanes.tsx 窗格标题栏那一份 ContextMenu 组件
+// （见该组件顶部注释），这里只测标签栏这一处接线——菜单本身"点外部/Escape/失焦关闭"
+// 三种方式已经在 PaneDetach.test.tsx 里覆盖过组件行为，不重复测。
+describe('TabBar — 标签右键菜单（拆分为独立标签 / 关闭标签）', () => {
+  it('多窗格标签：菜单列出「拆分为独立标签」与「关闭标签」两项', async () => {
+    const MULTI = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }], activePaneId: 'p1' }
+    useTabs.setState({ tabs: [HOME, MULTI], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(tabEl('2 个对话'), { clientX: 50, clientY: 10 }) })
+
+    expect(screen.getByText('拆分为独立标签')).toBeTruthy()
+    expect(screen.getByText('关闭标签')).toBeTruthy()
+  })
+
+  it('单窗格标签：菜单只有「关闭标签」，没有「拆分为独立标签」这一项', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(tabEl('A'), { clientX: 50, clientY: 10 }) })
+
+    expect(screen.queryByText('拆分为独立标签')).toBeNull()
+    expect(screen.getByText('关闭标签')).toBeTruthy()
+  })
+
+  it('主页标签：右键不弹出任何菜单', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    const home = document.querySelector('.tab[data-tab-id="home"]') as HTMLElement
+
+    await act(async () => { fireEvent.contextMenu(home, { clientX: 10, clientY: 10 }) })
+
+    expect(screen.queryByText('关闭标签')).toBeNull()
+  })
+
+  it('点击「拆分为独立标签」：产生 N 个各持有一个窗格的新标签，pane id 原样保留，菜单随即关闭', async () => {
+    const MULTI = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }], activePaneId: 'p1' }
+    useTabs.setState({ tabs: [HOME, MULTI], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(tabEl('2 个对话'), { clientX: 50, clientY: 10 }) })
+    await act(async () => { fireEvent.click(screen.getByText('拆分为独立标签')) })
+
+    expect(screen.queryByText('拆分为独立标签')).toBeNull() // 菜单已关闭
+    const { tabs } = useTabs.getState()
+    expect(tabs).toHaveLength(3) // home + 两个拆出来的新标签
+    const newTabs = tabs.filter((t) => t.id !== 'home')
+    expect(newTabs.map((t) => t.panes.map((p) => p.id))).toEqual([['p1'], ['p2']])
+    expect(newTabs.map((t) => t.panes[0].ptyId)).toEqual(['pty-1', 'pty-2']) // ptyId 原样不变
+  })
+
+  it('点击「关闭标签」：走既有的 closeTab 路径（无存活 PTY 时直接移除，不弹确认）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(tabEl('A'), { clientX: 50, clientY: 10 }) })
+    await act(async () => { fireEvent.click(screen.getByText('关闭标签')) })
+
+    await vi.waitFor(() => {
+      expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')).toBeUndefined()
+    })
+  })
+})
+
 describe('TabBar — ⌘D 窄窗口降级复用同一套 decidePaneFit（拖拽路径）', () => {
   // 与 App.test.tsx 的 ⌘D 用例同一手法：getContentWidth() 读的是 `.content` 元素的
   // clientWidth，jsdom 恒为 0，用 Object.defineProperty 在原型上伪造一个固定值，

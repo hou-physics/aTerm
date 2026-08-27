@@ -70,6 +70,7 @@ type TabsState = {
   insertPaneAt(tabId: string, index: number): string | null
   movePanesToTab(sourceTabId: string, targetTabId: string, target: DropTarget): boolean
   detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
+  splitTabPanes(tabId: string): string[] | null
   startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
@@ -255,6 +256,36 @@ export const useTabs = create<TabsState>((set, get) => ({
       return { tabs: nextTabs, activeId: newTabId }
     })
     return newTabId
+  },
+  // 标签栏右键菜单「拆分为独立标签」：把一个多窗格标签的每个窗格各自拆成一个独立标签
+  // ——是把窗格逐个拖出（detachPaneToNewTab）连续做 N-1 次的批量版本，同样的核心
+  // 不变量：每个 Pane 对象原样保留，绝不重新创建（id/ptyId 都不变，TerminalLayer.tsx
+  // 按 pane.id 做 key，xterm 实例与其回滚缓冲因此不受影响）。单窗格标签没有什么可拆的，
+  // 返回 null，不做任何状态变更（调用方——TabBar.tsx 的右键菜单——也据此不渲染这一项，
+  // 这里的拒绝只是防御性兜底）。
+  //
+  // 拆出的新标签就地插入到原标签在 tabs 数组里的位置（替换它），标签栏里其它标签的
+  // 相对顺序不受影响；原本聚焦哪个窗格，拆出后就聚焦它所在的那个新标签（"看到的内容
+  // 不因为这次操作而跳走"）。
+  splitTabPanes: (tabId) => {
+    const sourceTab = get().tabs.find((t) => t.id === tabId)
+    if (!sourceTab || sourceTab.kind !== 'term' || sourceTab.panes.length <= 1) return null
+    const focusPaneId = sourceTab.activePaneId
+    const newTabs: Tab[] = sourceTab.panes.map((pane) => ({
+      id: `tab-${nextTab++}`,
+      kind: 'term',
+      title: pane.title,
+      panes: [pane],
+      activePaneId: pane.id,
+    }))
+    const activeNewTab = newTabs.find((t) => t.activePaneId === focusPaneId) ?? newTabs[0]
+    set((s) => {
+      const idx = s.tabs.findIndex((t) => t.id === tabId)
+      if (idx === -1) return s
+      const tabs = [...s.tabs.slice(0, idx), ...newTabs, ...s.tabs.slice(idx + 1)]
+      return { tabs, activeId: activeNewTab.id }
+    })
+    return newTabs.map((t) => t.id)
   },
   // 窗格选择器（设计文档 §5-A）选定后调用：给此前没有 ptyId 的窗格补上真正的终端。
   startPaneTerminal: async (tabId, paneId, { title, cwd, inject, threadKey, dirName, rootKey }) => {

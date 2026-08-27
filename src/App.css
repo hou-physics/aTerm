@@ -103,12 +103,13 @@ body.dragging-no-select { user-select: none; -webkit-user-select: none; }
 .pane-titlebar-close { flex: none; padding: 0 4px; border-radius: 4px; cursor: default; }
 .pane-titlebar-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
 
-/* 窗格标题栏右键菜单（设计文档 §5-C）：自包含小组件（PaneContextMenu.tsx），
+/* 通用右键菜单（自包含小组件 ContextMenu.tsx）：窗格标题栏「移出为独立标签/关闭窗格」
+   （设计文档 §5-C）与标签栏「拆分为独立标签/关闭标签」共用同一份样式/组件。
    position:fixed 直接定位到光标处（组件自己钳在视口内），风格与 .theme-picker/
    .pane-picker-item 同一基调——边框、既有强调色变量，不引入阴影或新配色。 */
-.pane-context-menu { position: fixed; z-index: 10; display: flex; flex-direction: column; padding: 4px; min-width: 140px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-panel); }
-.pane-context-menu-item { padding: 6px 10px; border-radius: 6px; font-size: 12.5px; color: var(--color-text); cursor: default; white-space: nowrap; }
-.pane-context-menu-item:hover { background: var(--color-elevated); }
+.context-menu { position: fixed; z-index: 10; display: flex; flex-direction: column; padding: 4px; min-width: 140px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-panel); }
+.context-menu-item { padding: 6px 10px; border-radius: 6px; font-size: 12.5px; color: var(--color-text); cursor: default; white-space: nowrap; }
+.context-menu-item:hover { background: var(--color-elevated); }
 
 /* ⌘D 新建窗格后、选定会话之前的选择列表（设计文档 §5-A），视觉上沿用侧边栏
    .side-item / 主页 .thread-row 的既有条目样式基调。 */
