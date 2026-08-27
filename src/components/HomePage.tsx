@@ -25,7 +25,7 @@ export function HomePage() {
             {expanded === p.dirName && (
               <div className="thread-list" onClick={(e) => e.stopPropagation()}>
                 {p.threads.slice(0, 8).map((t) => (
-                  <div key={t.rootKey} className="thread-row" onClick={() => void resumeThread(p.cwd, t)}>
+                  <div key={t.rootKey} className="thread-row" onClick={() => void resumeThread(p.dirName, p.cwd, t)}>
                     <span className="t">{t.title}</span>
                     <span className="time">{formatRelative(t.lastActivityMs)}</span>
                   </div>

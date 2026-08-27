@@ -8,7 +8,9 @@ vi.mock('../ipc', () => ({
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 import * as ipc from '../ipc'
+import { resumeThread } from '../actions'
 import { useTabs } from '../store/tabs'
+import type { ThreadInfo } from '../ipc'
 
 beforeEach(() => {
   useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页' }], activeId: 'home' })
@@ -34,8 +36,48 @@ describe('useTabs', () => {
     expect(ipc.ptyKill).toHaveBeenCalledWith('pty-9')
     expect(useTabs.getState().activeId).toBe('home')
   })
-  it('home 不可关闭', async () => {
-    await useTabs.getState().closeTab('home', async () => true)
+  it('home 不可关闭（⌘W 作用于 home 时应为空操作，无需确认弹窗）', async () => {
+    const confirmFn = vi.fn(async () => true)
+    await useTabs.getState().closeTab('home', confirmFn)
     expect(useTabs.getState().tabs).toHaveLength(1)
+    expect(useTabs.getState().activeId).toBe('home')
+    expect(confirmFn).not.toHaveBeenCalled()
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+  })
+  it('focusThread：已存在的 threadKey 激活原标签且不重新 spawn，未知 key 返回 false', async () => {
+    // threadKey 采用「项目:会话」复合键格式（见 resumeThread），store 层本身按不透明字符串处理
+    await useTabs.getState().openTerminal({ title: '修复登录', cwd: '/tmp/p', inject: 'claude --resume abc', threadKey: 'proj-a:thread-abc' })
+    const tabId = useTabs.getState().tabs[1].id
+    useTabs.getState().setActive('home')
+    vi.clearAllMocks()
+
+    const found = useTabs.getState().focusThread('proj-a:thread-abc')
+    expect(found).toBe(true)
+    expect(useTabs.getState().activeId).toBe(tabId)
+    expect(useTabs.getState().tabs).toHaveLength(2)
+    expect(ipc.ptySpawn).not.toHaveBeenCalled()
+
+    const missing = useTabs.getState().focusThread('proj-b:thread-abc')
+    expect(missing).toBe(false)
+  })
+  it('resumeThread：相同 rootKey 在不同项目下不互相误切，各自独立开标签', async () => {
+    const threadA: ThreadInfo = { rootKey: 'r1', resumeSessionId: 'sid-a', title: '会话A', cwd: '/proj-a', lastActivityMs: 0, fileCount: 1 }
+    const threadB: ThreadInfo = { rootKey: 'r1', resumeSessionId: 'sid-b', title: '会话B', cwd: '/proj-b', lastActivityMs: 0, fileCount: 1 }
+
+    await resumeThread('proj-a', '/proj-a', threadA)
+    await resumeThread('proj-b', '/proj-b', threadB)
+
+    const { tabs } = useTabs.getState()
+    expect(tabs).toHaveLength(3)
+    expect(tabs[1].threadKey).toBe('proj-a:r1')
+    expect(tabs[2].threadKey).toBe('proj-b:r1')
+    expect(ipc.ptySpawn).toHaveBeenCalledTimes(2)
+
+    // 再次 resumeThread 同一项目同一 rootKey 应命中原标签而非新开
+    vi.clearAllMocks()
+    await resumeThread('proj-a', '/proj-a', threadA)
+    expect(useTabs.getState().tabs).toHaveLength(3)
+    expect(useTabs.getState().activeId).toBe(tabs[1].id)
+    expect(ipc.ptySpawn).not.toHaveBeenCalled()
   })
 })

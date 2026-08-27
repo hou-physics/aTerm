@@ -41,10 +41,14 @@ body {
 .sidebar-list { flex: 1; min-height: 0; overflow-y: auto; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .tabbar { display: flex; gap: 4px; padding: 6px 8px 0; background: var(--color-panel); border-bottom: 1px solid var(--color-border); overflow-x: auto; }
+.sidebar-toggle { flex: none; align-self: flex-start; position: sticky; left: 0; z-index: 1; width: 24px; height: 26px; margin-right: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.sidebar-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 .tab { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 7px 7px 0 0; background: var(--color-elevated); color: var(--color-text-dim); cursor: default; white-space: nowrap; font-size: 13px; }
 .tab.active { background: var(--color-bg); color: var(--color-text); }
 .tab-close { padding: 0 2px; border-radius: 4px; }
 .tab-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
+.tab-new { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.tab-new:hover { border-color: var(--color-accent); color: var(--color-text); }
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .home-wrap { position: absolute; inset: 0; overflow-y: auto; }
 .term-wrap { position: absolute; inset: 0; background: var(--color-term-bg); padding: 4px 6px 6px 6px; overscroll-behavior: contain; }
@@ -52,17 +56,23 @@ body {
 .terminal-host { width: 100%; height: 100%; }
 
 .sidebar-list::-webkit-scrollbar,
-.home-wrap::-webkit-scrollbar,
-.term-wrap .xterm-viewport::-webkit-scrollbar { width: 8px; }
+.home-wrap::-webkit-scrollbar { width: 8px; }
 .sidebar-list::-webkit-scrollbar-track,
-.home-wrap::-webkit-scrollbar-track,
-.term-wrap .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+.home-wrap::-webkit-scrollbar-track { background: transparent; }
 .sidebar-list::-webkit-scrollbar-thumb,
-.home-wrap::-webkit-scrollbar-thumb,
-.term-wrap .xterm-viewport::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+.home-wrap::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 .sidebar-list::-webkit-scrollbar-thumb:hover,
-.home-wrap::-webkit-scrollbar-thumb:hover,
-.term-wrap .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+.home-wrap::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+
+/* xterm 6 用 VS Code ScrollableElement 渲染滚动条（非原生）。滑块颜色由 xterm 主题以内联样式写入（见
+   TerminalView.tsx 的 XTERM_THEME），CSS 管不到；这里只负责阻止其空闲 800ms 后的淡出，让滚动条常驻可见。
+   选择器特异度 0,4,0 / 0,5,0，高于 xterm 自带的 0,3,0，无需 !important 即可覆盖。 */
+.xterm .xterm-scrollable-element > .scrollbar.invisible,
+.xterm .xterm-scrollable-element > .scrollbar.invisible.fade { opacity: 1; }
+
+/* alt-screen（Claude Code 等 TUI）没有回滚，滚动条只是一条无意义的满高噪音条，直接隐藏。
+   class 由 TerminalView.tsx 在 term.buffer.onBufferChange 中切换到 .terminal-host 上。 */
+.terminal-host.alt-screen .xterm .xterm-scrollable-element > .scrollbar { display: none; }
 .section-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .08em; margin: 14px 0 8px; }
 .side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-item:hover { background: var(--color-elevated); }

@@ -39,6 +39,14 @@ pub fn spawn(
     cmd.args(args);
     cmd.env("TERM", "xterm-256color");
     if std::env::var("LANG").is_err() { cmd.env("LANG", "en_US.UTF-8"); }
+    // 不冒充宿主终端身份：aTerm 可能是从 Apple Terminal/iTerm 等启动的，继承的
+    // TERM_PROGRAM（如 Apple_Terminal）会被 Claude Code 内置能力表在检查
+    // COLORTERM 之前优先匹配，导致其把颜色深度错误地降级为 256 色。这里无条件
+    // 覆盖（而非仅在缺失时兜底），因为 aTerm 自己知道其真实渲染能力：
+    // xterm.js 6 支持真彩色（24-bit）及删除线等文本属性。
+    cmd.env("TERM_PROGRAM", "aTerm");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    cmd.env("COLORTERM", "truecolor");
     // aTerm 可能从 Claude 会话内启动；剥离继承的 CLAUDE* 变量，避免内部 claude 误判为子会话。
     // zsh -l 会重新 source 用户 profile，用户自己 export 的变量不受影响。
     for (key, _) in std::env::vars() {
@@ -141,5 +149,24 @@ mod tests {
         let out = String::from_utf8_lossy(&all);
         assert!(out.contains("TERM=xterm-256color"), "sanity: env output visible, got: {out}");
         assert!(!out.contains("CLAUDE_PROBE_FOR_TEST"), "CLAUDE* var leaked into child: {out}");
+    }
+
+    #[test]
+    fn child_reports_own_terminal_identity_and_truecolor() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (etx, erx) = std::sync::mpsc::channel::<u32>();
+        let _h = spawn("/usr/bin/env", &[], None, None, 80, 24,
+            Box::new(move |b| { let _ = tx.send(b.to_vec()); }),
+            Box::new(move |c| { let _ = etx.send(c); }),
+        ).unwrap();
+        let code = erx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(code, 0);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut all = Vec::new();
+        while let Ok(chunk) = rx.try_recv() { all.extend(chunk); }
+        let out = String::from_utf8_lossy(&all);
+        assert!(out.contains("TERM=xterm-256color"), "sanity: env output visible, got: {out}");
+        assert!(out.contains("TERM_PROGRAM=aTerm"), "TERM_PROGRAM 应上报为 aTerm，不冒充宿主终端: {out}");
+        assert!(out.contains("COLORTERM=truecolor"), "COLORTERM 应声明真彩色能力: {out}");
     }
 }
