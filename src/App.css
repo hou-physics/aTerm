@@ -62,8 +62,24 @@ body {
 .pane-picker { height: 100%; overflow-y: auto; padding: 10px; }
 .pane-picker-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-picker-item:hover { background: var(--color-elevated); }
-.pane-picker-item .sub { color: var(--color-text-faint); font-size: 11px; }
+.pane-picker-item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-picker-item .sub { color: var(--color-text-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-picker-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; margin: 10px 0 6px; }
+
+/* 顶部搜索框：与 .cmd-input 同一基调，收窄内边距/字号以适应窗格最小 320px 宽度。 */
+.pane-picker-search { width: 100%; padding: 6px 8px; margin-bottom: 8px; border-radius: 6px; border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-text); font-size: 12.5px; outline: none; }
+.pane-picker-search:focus { border-color: var(--color-accent); }
+
+/* 「全部项目」段：每个项目一行标题（📁 + 会话数），点击展开/收起其会话列表，
+   与 HomePage.tsx 的 .card/.thread-list 同一交互，只是纵向列表而非卡片网格。 */
+.pane-picker-project { margin-bottom: 2px; }
+.pane-picker-project-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: default; }
+.pane-picker-project-head:hover { background: var(--color-elevated); }
+.pane-picker-project-head .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.pane-picker-project-head .sub { color: var(--color-text-faint); font-size: 11px; flex: none; }
+.pane-picker-thread-list { margin: 0 0 4px 10px; padding-left: 6px; border-left: 1px solid var(--color-border); }
+.pane-picker-subpick { margin: 2px 0 6px; padding: 4px 0 4px 10px; border-left: 2px solid var(--color-border); }
+.pane-picker-empty { color: var(--color-text-faint); font-size: 12px; padding: 8px 6px; }
 
 /* ⌘D 被拒绝（已达 3 个窗格 / 窄窗口装不下）时的内联轻提示：浮在内容区底部居中，
    定时自行消失（见 App.tsx 的 showHint），不是弹窗。 */
@@ -72,19 +88,23 @@ body {
 .sidebar-list::-webkit-scrollbar,
 .home-wrap::-webkit-scrollbar,
 .theme-picker::-webkit-scrollbar,
-.theme-picker-list::-webkit-scrollbar { width: 8px; }
+.theme-picker-list::-webkit-scrollbar,
+.pane-picker::-webkit-scrollbar { width: 8px; }
 .sidebar-list::-webkit-scrollbar-track,
 .home-wrap::-webkit-scrollbar-track,
 .theme-picker::-webkit-scrollbar-track,
-.theme-picker-list::-webkit-scrollbar-track { background: transparent; }
+.theme-picker-list::-webkit-scrollbar-track,
+.pane-picker::-webkit-scrollbar-track { background: transparent; }
 .sidebar-list::-webkit-scrollbar-thumb,
 .home-wrap::-webkit-scrollbar-thumb,
 .theme-picker::-webkit-scrollbar-thumb,
-.theme-picker-list::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+.theme-picker-list::-webkit-scrollbar-thumb,
+.pane-picker::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 .sidebar-list::-webkit-scrollbar-thumb:hover,
 .home-wrap::-webkit-scrollbar-thumb:hover,
 .theme-picker::-webkit-scrollbar-thumb:hover,
-.theme-picker-list::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+.theme-picker-list::-webkit-scrollbar-thumb:hover,
+.pane-picker::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
 
 /* xterm 6 用 VS Code ScrollableElement 渲染滚动条（非原生）。滑块颜色由 xterm 主题以内联样式写入（见
    src/themes/derive.ts 的 buildXtermTheme），CSS 管不到；这里只负责阻止其空闲 800ms 后的淡出，让滚动条常驻可见。

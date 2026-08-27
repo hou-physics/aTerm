@@ -108,7 +108,7 @@ function PaneItem({
         {pane.ptyId ? (
           <TerminalView ptyId={pane.ptyId} active={isActiveTab && focused} />
         ) : (
-          <PanePicker tabId={tab.id} paneId={pane.id} />
+          <PanePicker tab={tab} paneId={pane.id} />
         )}
       </div>
     </div>
