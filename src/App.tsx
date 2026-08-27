@@ -1,5 +1,6 @@
 import './ptyBuffer'
 import './closeRequest'
+import './contextMenu'
 import './App.css'
 import { useEffect, useRef } from 'react'
 import { newTerminal } from './actions'
