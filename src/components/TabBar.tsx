@@ -4,6 +4,7 @@ import { resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabRects } from '../paneDropDom'
 import { decidePaneFit, MAX_PANES } from '../paneLayout'
 import { useDnd } from '../store/dnd'
+import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
@@ -13,7 +14,7 @@ import { useTabs } from '../store/tabs'
 // "small movement threshold (e.g. 4px)"）。
 const DRAG_THRESHOLD_PX = 4
 
-type DragState = { tabId: string; startX: number; startY: number; dragging: boolean }
+type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean }
 
 // 把窗格拖出成独立标签、松手时落在标签栏上（设计文档 §5-C，TabPanes.tsx 的
 // PaneTitleBar 是拖拽源）应插入的位置指示：一条竖线，与 DropIndicator.tsx 的
@@ -69,8 +70,14 @@ export function TabBar() {
   const onTabPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, tabId: string) => {
     // 关闭按钮自己的点击语义（stopPropagation + closeTab）不参与拖拽判定，原样放行。
     if ((e.target as HTMLElement).closest('.tab-close')) return
+    // 屏蔽文本选择（用户反馈"拖拽会顺带选中相邻文字"）：在发起这次手势的 pointerdown
+    // 上调用，不等到确认是拖拽才做——真正的 user-select:none 只在跨过 4px 阈值、
+    // 确认是拖拽而不是点击后才通过 store/dragGhost.ts 的 start() 生效（见下方
+    // onTabPointerMove），这里的 preventDefault 只是浏览器层面的默认动作抑制，不影响
+    // 随后仍会正常触发的合成 click（因此普通点击标签的行为不变）。
+    e.preventDefault()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false }
+    dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false }
   }, [])
 
   const onTabPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -84,10 +91,17 @@ export function TabBar() {
     const dragTab = tabs.find((t) => t.id === drag.tabId)
     // 主页标签没有窗格可移动；拖的正是当前激活标签本身时，那是"拖到自己标签的窗格
     // 区"——设计文档明确要求这是空操作，这里索性连落点都不解析、指示条也不出现
-    // （"no visual churn"），而不是等到 pointerup 才悄悄拒绝。
+    // （"no visual churn"），而不是等到 pointerup 才悄悄拒绝。这种情况下也不显示拖拽
+    // 指示（没有什么可拖的），因此 ghost 只在下面确认是有效拖拽目标后才启动。
     if (!dragTab || dragTab.kind !== 'term' || dragTab.id === activeId) {
       useDnd.getState().setTarget(null)
       return
+    }
+    if (!drag.ghostStarted) {
+      drag.ghostStarted = true
+      useDragGhost.getState().start(dragTab.title, e.clientX, e.clientY)
+    } else {
+      useDragGhost.getState().move(e.clientX, e.clientY)
     }
     const activeTab = tabs.find((t) => t.id === activeId)
     useDnd.getState().setTarget(resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY))
@@ -99,6 +113,11 @@ export function TabBar() {
     e.currentTarget.releasePointerCapture?.(e.pointerId)
     const target = useDnd.getState().target
     useDnd.getState().setTarget(null)
+    // 无条件调用，任何后续 return 都不可能让屏蔽选择的 body class 卡住——与上面
+    // setTarget(null) 同一时机、同一理由；这个函数同时接在 onPointerUp 和
+    // onPointerCancel 上，两条退出路径因此都被覆盖，end() 对"根本没开始过"是安全的
+    // 空操作（见 store/dragGhost.ts 注释）。
+    useDragGhost.getState().end()
     if (!drag || !drag.dragging) return
     suppressClickRef.current = true
     if (!target) return // 松手时不在任何窗格范围内，视为放弃这次拖拽

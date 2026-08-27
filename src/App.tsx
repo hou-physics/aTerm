@@ -4,6 +4,7 @@ import './App.css'
 import { useEffect, useRef } from 'react'
 import { newTerminal } from './actions'
 import { ConversationPanel } from './components/ConversationPanel'
+import { DragGhost } from './components/DragGhost'
 import { DropIndicator } from './components/DropIndicator'
 import { HomePage } from './components/HomePage'
 import { Sidebar } from './components/Sidebar'
@@ -152,6 +153,10 @@ export default function App() {
         </div>
       </div>
       <ConversationPanel />
+      {/* 跟随光标的拖拽指示（TabBar.tsx/Sidebar.tsx/TabPanes.tsx 三处拖拽源共用，见
+          store/dragGhost.ts）：position:fixed，挂在树里任何位置效果都一样，渲染顺序
+          放最后确保画在最上层。 */}
+      <DragGhost />
     </div>
   )
 }

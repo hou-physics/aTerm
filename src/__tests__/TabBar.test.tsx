@@ -14,6 +14,7 @@ vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 
 import App from '../App'
 import { useDnd } from '../store/dnd'
+import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
@@ -26,10 +27,13 @@ beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
   useHint.setState({ message: null })
   useDnd.setState({ target: null })
+  useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
+  document.body.classList.remove('dragging-no-select')
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  document.body.classList.remove('dragging-no-select') // 防止某条断言失败时把 class 遗留给下一条用例
 })
 
 async function renderApp() {
@@ -207,5 +211,104 @@ describe('TabBar — ⌘D 窄窗口降级复用同一套 decidePaneFit（拖拽�
     expect(screen.getByText('窗口太窄，放不下新窗格')).toBeTruthy()
     expect(useLayout.getState().panelCollapsed).toBe(false)
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+})
+
+// 拖拽期间屏蔽文本选择 + 跟随光标的拖拽指示（用户反馈"拖拽会顺带选中相邻文字"/
+// "拖拽过程中没有任何视觉反馈"）：三个拖拽源共用 store/dragGhost.ts，这里只覆盖
+// TabBar.tsx 这一处交互层面的接线是否正确；store 本身的行为在 dragGhost.test.ts。
+describe('TabBar — 拖拽期间屏蔽文本选择并显示跟随光标的拖拽指示', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('跨过 4px 阈值确认是拖拽后：body 加上屏蔽选择的 class，指示显示被拖标签的标题', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 超过 4px 阈值
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.querySelector('.drag-ghost')?.textContent).toBe('B')
+
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false) // 落地后移除
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+  })
+
+  it('pointercancel 同样移除 body class 与指示（不只是正常松手这一条路径）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    await act(async () => {
+      fireEvent.pointerCancel(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+  })
+
+  it('落点被拒绝（超过上限）时同样正常清理，不留下卡住的 class', async () => {
+    const TWO_A = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', ptyId: 'p-a2', title: 'A2' }], activePaneId: 'a1' }
+    const TWO_B = { id: 'tab-b', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'b1', ptyId: 'p-b1', title: 'B1' }, { id: 'b2', ptyId: 'p-b2', title: 'B2' }], activePaneId: 'b1' }
+    useTabs.setState({ tabs: [HOME, TWO_A, TWO_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 300, height: 100 } })
+    const b = screen.getAllByText('2 个对话')[1].closest('.tab') as HTMLElement
+
+    await drag(b, { x: 900, y: 10 }, { x: 100, y: 50 })
+
+    expect(screen.getByText('最多支持 3 个窗格')).toBeTruthy() // 拒绝分支确实被走到
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+  })
+
+  it('小幅移动（低于 4px 阈值）的普通点击：既不显示指示也不设置 class', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 100, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 101, clientY: 10, pointerId: 1 }) // 1px，低于阈值
+      fireEvent.pointerUp(b, { clientX: 101, clientY: 10, pointerId: 1 })
+      fireEvent.click(b)
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+    expect(useTabs.getState().activeId).toBe('tab-b') // 普通点击行为不变，仍正常切换标签
+  })
+
+  it('拖到自己标签的窗格区（no-op 分支）：从不显示指示，也不设置 class', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const a = tabEl('A')
+
+    await drag(a, { x: 10, y: 10 }, { x: 300, y: 50 })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
   })
 })

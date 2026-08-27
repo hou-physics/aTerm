@@ -5,6 +5,7 @@ import { dropInsertionIndex, resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
 import { decidePaneFit, MAX_PANES } from '../paneLayout'
 import { useDnd } from '../store/dnd'
+import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { useSessions } from '../store/sessions'
@@ -16,7 +17,7 @@ import { ThemeSwitcher } from './ThemeSwitcher'
 // 一次普通点击（设计文档要求 "small movement threshold (e.g. 4px)"）。
 const DRAG_THRESHOLD_PX = 4
 
-type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean }
+type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean }
 
 // 从侧边栏「最近会话」拖入（设计文档 §5-B 场景 B）：落点解析、上限/窄窗口降级判断、
 // 轻提示三处都复用与 TabBar.tsx 场景 A 完全相同的纯函数/store（paneDrop.ts、
@@ -39,8 +40,11 @@ export function Sidebar() {
   const suppressClickRef = useRef(false)
 
   const onItemPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => {
+    // 屏蔽文本选择，与 TabBar.tsx 的 onTabPointerDown 同一理由/同一时机——不影响随后
+    // 仍会正常触发的合成 click，普通点击会话条目的行为不变。
+    e.preventDefault()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false }
+    dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false }
   }, [])
 
   const onItemPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -53,10 +57,16 @@ export function Sidebar() {
     const { tabs, activeId } = useTabs.getState()
     const activeTab = tabs.find((x) => x.id === activeId)
     // 唯一可见的落点区域是激活标签的窗格区（home 标签没有窗格）；不是 term 标签时
-    // 落点恒为 null，指示条也不出现。
+    // 落点恒为 null，指示条也不出现，这种情况下也不显示拖拽指示（没有地方可以放）。
     if (!activeTab || activeTab.kind !== 'term') {
       useDnd.getState().setTarget(null)
       return
+    }
+    if (!drag.ghostStarted) {
+      drag.ghostStarted = true
+      useDragGhost.getState().start(drag.t.title, e.clientX, e.clientY)
+    } else {
+      useDragGhost.getState().move(e.clientX, e.clientY)
     }
     useDnd.getState().setTarget(resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY))
   }, [])
@@ -67,6 +77,9 @@ export function Sidebar() {
     e.currentTarget.releasePointerCapture?.(e.pointerId)
     const target = useDnd.getState().target
     useDnd.getState().setTarget(null)
+    // 无条件调用，与 TabBar.tsx 的 onTabPointerUp 同一理由：任何后续 return 都不会让
+    // body class 卡住，end() 对"根本没开始过"是安全的空操作。
+    useDragGhost.getState().end()
     if (!drag || !drag.dragging) return
     suppressClickRef.current = true
     if (!target) return // 松手时不在任何窗格范围内，视为放弃这次拖拽

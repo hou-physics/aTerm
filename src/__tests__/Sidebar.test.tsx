@@ -25,6 +25,7 @@ vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 
 import App from '../App'
 import { useDnd } from '../store/dnd'
+import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useTabs } from '../store/tabs'
 
@@ -35,10 +36,13 @@ beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
   useHint.setState({ message: null })
   useDnd.setState({ target: null })
+  useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
+  document.body.classList.remove('dragging-no-select')
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  document.body.classList.remove('dragging-no-select')
 })
 
 async function renderApp() {
@@ -172,5 +176,75 @@ describe('Sidebar — 从「最近会话」拖入窗格区（设计文档 §5-B 
 
     expect(useDnd.getState().target).toBeNull()
     expect(useTabs.getState().tabs).toBe(before)
+  })
+})
+
+// 与 TabBar.test.tsx 同一组断言，验证 Sidebar.tsx 这一处拖拽源接线正确；
+// store 本身的行为在 dragGhost.test.ts。
+describe('Sidebar — 拖拽期间屏蔽文本选择并显示跟随光标的拖拽指示', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('跨过 4px 阈值后：body 加上屏蔽选择的 class，指示显示被拖会话的标题', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.querySelector('.drag-ghost')?.textContent).toBe('修复登录')
+
+    await act(async () => {
+      fireEvent.pointerUp(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+  })
+
+  it('pointercancel 同样移除 body class 与指示', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    await act(async () => {
+      fireEvent.pointerCancel(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+  })
+
+  it('小幅移动（低于 4px 阈值）的普通点击：既不显示指示也不设置 class', async () => {
+    await renderApp() // activeId 默认 home
+    const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(item, { clientX: 11, clientY: 10, pointerId: 1 }) // 1px，低于阈值
+      fireEvent.pointerUp(item, { clientX: 11, clientY: 10, pointerId: 1 })
+      fireEvent.click(item)
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+    expect(useTabs.getState().tabs).toHaveLength(2) // 普通点击行为不变，仍正常打开会话
   })
 })

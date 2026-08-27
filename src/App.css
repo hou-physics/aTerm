@@ -14,6 +14,33 @@ body {
   transition: background-color .15s ease, color .15s ease;
 }
 .app { display: flex; height: 100vh; }
+
+/* 拖拽期间屏蔽文本选择（用户反馈"拖拽会顺带选中相邻文字"）：由 store/dragGhost.ts 的
+   start()/end() 在 document.body 上增删，覆盖标签/窗格标题栏/侧边栏会话三处拖拽源。
+   user-select 是可继承属性，写在 body 上即对全树生效，不需要额外的 `* { }` 规则。 */
+body.dragging-no-select { user-select: none; -webkit-user-select: none; }
+
+/* 跟随光标的拖拽指示（DragGhost.tsx）：position:fixed，用 transform 定位（由组件按
+   store 里的 x/y 现算写入，避免触发布局），既有强调色系配色，不新增调色板条目。 */
+.drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 20;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--color-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  font-size: 12.5px;
+  opacity: .85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+  pointer-events: none;
+  will-change: transform;
+}
 .sidebar { width: 230px; flex: none; background: var(--color-panel); border-right: 1px solid var(--color-border); padding: 10px; display: flex; flex-direction: column; }
 .sidebar-list { flex: 1; min-height: 0; overflow-y: auto; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }

@@ -14,6 +14,7 @@ vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 
 import App from '../App'
 import { useDnd } from '../store/dnd'
+import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useTabs } from '../store/tabs'
 
@@ -23,10 +24,13 @@ beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
   useHint.setState({ message: null })
   useDnd.setState({ target: null, tabBarIndex: null })
+  useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
+  document.body.classList.remove('dragging-no-select')
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  document.body.classList.remove('dragging-no-select')
 })
 
 async function renderApp() {
@@ -123,6 +127,73 @@ describe('TabPanes — 拖出窗格标题栏成为独立标签（设计文档 §
 
     const { tabs } = useTabs.getState()
     expect(tabs.map((t) => t.id)).toEqual(['home', 'tab-a', tabs[2].id, 'tab-other'])
+  })
+})
+
+// 与 TabBar.test.tsx/Sidebar.test.tsx 同一组断言，验证窗格标题栏这一处拖拽源接线
+// 正确；store 本身的行为在 dragGhost.test.ts。
+describe('TabPanes — 拖拽窗格标题栏期间屏蔽文本选择并显示跟随光标的拖拽指示', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+
+  it('跨过 4px 阈值后：body 加上屏蔽选择的 class，指示显示被拖窗格的标题', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 300, clientY: 200, pointerId: 1 }) // 超过 4px 阈值
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.querySelector('.drag-ghost')?.textContent).toBe('P2')
+
+    await act(async () => {
+      fireEvent.pointerUp(titlebar, { clientX: 300, clientY: 200, pointerId: 1 })
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+  })
+
+  it('pointercancel 同样移除 body class 与指示', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 300, clientY: 200, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    await act(async () => {
+      fireEvent.pointerCancel(titlebar, { clientX: 300, clientY: 200, pointerId: 1 })
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+  })
+
+  it('小幅移动（低于 4px 阈值）：既不显示指示也不设置 class，窗格聚焦行为不变', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 301, clientY: 60, pointerId: 1 }) // 1px，低于阈值
+      fireEvent.pointerUp(titlebar, { clientX: 301, clientY: 60, pointerId: 1 })
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.activePaneId).toBe('p2') // 点击仍正常聚焦该窗格（既有捕获阶段逻辑）
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2) // 没有被拆出
   })
 })
 

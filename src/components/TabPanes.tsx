@@ -11,6 +11,7 @@ import { pointInRect, resolveTabBarInsertIndex } from '../paneDrop'
 import { getPaneRowRect, getTabBarRect, getTabRects } from '../paneDropDom'
 import { clampDividerDrag, equalPaneWidths } from '../paneLayout'
 import { useDnd } from '../store/dnd'
+import { useDragGhost } from '../store/dragGhost'
 import { type Pane, type Tab, useTabs } from '../store/tabs'
 import { PaneContextMenu } from './PaneContextMenu'
 import { PanePicker } from './PanePicker'
@@ -19,7 +20,7 @@ import { PanePicker } from './PanePicker'
 // 一次普通点击。
 const DRAG_THRESHOLD_PX = 4
 
-type TitlebarDragState = { startX: number; startY: number; dragging: boolean }
+type TitlebarDragState = { startX: number; startY: number; dragging: boolean; ghostStarted: boolean }
 
 // 窗格标题栏（设计文档 §4）：仅在标签持有多于一个窗格时渲染（单窗格与现状保持一致，
 // 不占高度）。左侧标题过长用 CSS 省略号截断；右侧 × 关闭该窗格。聚焦窗格用强调色
@@ -59,24 +60,37 @@ function PaneTitleBar({
 
   const onPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).closest('.pane-titlebar-close')) return
+    // 屏蔽文本选择，与 TabBar.tsx/Sidebar.tsx 同一理由/同一时机——不影响随后仍会正常
+    // 触发的合成 click（标题栏本身没有绑定 click，但捕获阶段聚焦逻辑挂在祖先 `.pane`
+    // 上，不受这里的 preventDefault 影响，见 TabPanes.tsx 顶部 PaneItem 注释）。
+    e.preventDefault()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { startX: e.clientX, startY: e.clientY, dragging: false }
+    dragRef.current = { startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false }
   }, [])
 
-  const onPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current
-    if (!drag) return
-    if (!drag.dragging) {
-      if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
-      drag.dragging = true
-    }
-    const tabBarRect = getTabBarRect()
-    if (tabBarRect && pointInRect(e.clientX, e.clientY, tabBarRect)) {
-      useDnd.getState().setTabBarIndex(resolveTabBarInsertIndex(getTabRects(), e.clientX))
-    } else {
-      useDnd.getState().setTabBarIndex(null)
-    }
-  }, [])
+  const onPointerMove = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = dragRef.current
+      if (!drag) return
+      if (!drag.dragging) {
+        if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
+        drag.dragging = true
+      }
+      if (!drag.ghostStarted) {
+        drag.ghostStarted = true
+        useDragGhost.getState().start(pane.title, e.clientX, e.clientY)
+      } else {
+        useDragGhost.getState().move(e.clientX, e.clientY)
+      }
+      const tabBarRect = getTabBarRect()
+      if (tabBarRect && pointInRect(e.clientX, e.clientY, tabBarRect)) {
+        useDnd.getState().setTabBarIndex(resolveTabBarInsertIndex(getTabRects(), e.clientX))
+      } else {
+        useDnd.getState().setTabBarIndex(null)
+      }
+    },
+    [pane.title],
+  )
 
   const onPointerUp = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -85,6 +99,9 @@ function PaneTitleBar({
       e.currentTarget.releasePointerCapture?.(e.pointerId)
       const tabBarIndex = useDnd.getState().tabBarIndex
       useDnd.getState().setTabBarIndex(null)
+      // 无条件调用，与 TabBar.tsx/Sidebar.tsx 同一理由：任何后续 return 都不会让
+      // body class 卡住；这个函数同时接在 onPointerUp 和 onPointerCancel 上。
+      useDragGhost.getState().end()
       if (!drag || !drag.dragging) return
       const rowRect = getPaneRowRect(tab.id)
       if (rowRect && pointInRect(e.clientX, e.clientY, rowRect)) return // 仍在源标签自己的窗格行里：没有真的拖出去
