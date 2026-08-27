@@ -131,6 +131,53 @@ describe('ConversationPanel', () => {
   })
 })
 
+// 分屏第二步：面板始终跟随"聚焦窗格"所属的会话（设计文档 §7）。ConversationPanel.tsx
+// 本身从 step1 起就已经是"先找激活标签、再取其 activePaneId 对应窗格"的两级 selector
+// （见该文件顶部注释），本用例只是证明：同一标签内切换 focusPane（⌘⌥←/→ 的落地动作）
+// 也会驱动面板切换内容，并同样走 requestIdRef 过期响应保护，不需要也没有改动
+// ConversationPanel.tsx 一行代码。
+describe('ConversationPanel — 同一标签内切换聚焦窗格时，面板跟随切换内容', () => {
+  it('多窗格标签：focusPane 切换后面板重新加载并只显示新聚焦窗格的会话', async () => {
+    const convPane1 = {
+      turns: [{ role: 'assistant', text: '窗格一的回答', tsMs: Date.now(), uuid: 'pane1-a' }],
+      files: ['/1.jsonl'],
+      totalBytes: 1,
+    }
+    const convPane2 = {
+      turns: [{ role: 'assistant', text: '窗格二的回答', tsMs: Date.now(), uuid: 'pane2-a' }],
+      files: ['/2.jsonl'],
+      totalBytes: 1,
+    }
+    vi.mocked(ipc.readConversation).mockImplementation((dirName: string) =>
+      Promise.resolve(dirName === 'proj-1' ? convPane1 : convPane2)
+    )
+    const tab = {
+      id: 'tab-multi',
+      kind: 'term' as const,
+      title: '2 个对话',
+      panes: [
+        { id: 'pane-1', ptyId: 'pty-1', title: '窗格一', dirName: 'proj-1', rootKey: 'root-1' },
+        { id: 'pane-2', ptyId: 'pty-2', title: '窗格二', dirName: 'proj-2', rootKey: 'root-2' },
+      ],
+      activePaneId: 'pane-1',
+    }
+    useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }, tab], activeId: 'tab-multi' })
+
+    render(<ConversationPanel />)
+    expect(await screen.findByText('窗格一的回答')).toBeTruthy()
+    expect(screen.queryByText('窗格二的回答')).toBeNull()
+
+    // 模拟 ⌘⌥→：焦点窗格从 pane-1 移到 pane-2（不切标签，activeId 不变）
+    act(() => {
+      useTabs.getState().focusPane('tab-multi', 'pane-2')
+    })
+
+    await waitFor(() => expect(ipc.readConversation).toHaveBeenCalledWith('proj-2', 'root-2'))
+    expect(await screen.findByText('窗格二的回答')).toBeTruthy()
+    expect(screen.queryByText('窗格一的回答')).toBeNull() // 旧窗格内容被替换，不是叠加显示
+  })
+})
+
 const TWO_DAY_CONV = {
   turns: [
     { role: 'user', text: '8月27日的话题\n详情A', tsMs: new Date(2026, 7, 27, 12, 19).getTime(), uuid: 'u-27' },

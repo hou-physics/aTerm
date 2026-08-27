@@ -53,9 +53,44 @@ body {
 .panel-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .home-wrap { position: absolute; inset: 0; overflow-y: auto; }
-.term-wrap { position: absolute; inset: 0; background: var(--color-term-bg); padding: 4px 6px 6px 6px; overscroll-behavior: contain; }
+/* display 在 TabPanes.tsx 里按"是否为激活标签"在 flex/none 间切换（保留原先
+   block/none 的显隐策略，只是行内容从单个终端换成横向排列的窗格行）。 */
+.term-wrap { position: absolute; inset: 0; background: var(--color-term-bg); padding: 4px 6px 6px 6px; overscroll-behavior: contain; display: flex; }
 .term-wrap .xterm-viewport { overscroll-behavior: contain; }
 .terminal-host { width: 100%; height: 100%; }
+
+/* 单个窗格：flexGrow 由 TabPanes.tsx 按 Tab.paneWidths 的占比现算（flexBasis:0 +
+   flexShrink:0，纯按 grow 权重分配剩余空间，不受分隔条固定宽度影响，见该文件注释）。
+   边框默认透明，单窗格标签下恒不显示标题栏、也不会带上 .pane-focused，观感与分屏前
+   完全一致；只有多窗格时聚焦窗格才会真正描边。 */
+.pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid transparent; border-radius: 4px; overflow: hidden; }
+.pane.pane-focused { border-color: var(--color-accent); }
+.pane-body { flex: 1; min-height: 0; min-width: 0; }
+
+/* 相邻窗格间的拖拽分隔条：与 .conv-panel-resize-handle 同一处理——命中区（含左右
+   4px 内边距，共 9px）比视觉细线（1px，background-clip: content-box）宽，方便抓取
+   又不会让细线本身显得粗。 */
+.pane-divider { flex: none; width: 1px; padding: 0 4px; box-sizing: content-box; background: var(--color-border); background-clip: content-box; cursor: col-resize; }
+.pane-divider:hover, .pane-divider:active { background-color: var(--color-accent); }
+
+/* 窗格标题栏：约 24px，仅多窗格标签渲染（见 TabPanes.tsx 的 showTitlebar）。 */
+.pane-titlebar { flex: none; height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px 0 8px; font-size: 12px; color: var(--color-text-dim); background: var(--color-elevated); border-bottom: 1px solid var(--color-border); }
+.pane-titlebar-focused { color: var(--color-text); border-bottom-color: var(--color-accent); }
+.pane-titlebar-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-titlebar-close { flex: none; padding: 0 4px; border-radius: 4px; cursor: default; }
+.pane-titlebar-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
+
+/* ⌘D 新建窗格后、选定会话之前的选择列表（设计文档 §5-A），视觉上沿用侧边栏
+   .side-item / 主页 .thread-row 的既有条目样式基调。 */
+.pane-picker { height: 100%; overflow-y: auto; padding: 10px; }
+.pane-picker-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-picker-item:hover { background: var(--color-elevated); }
+.pane-picker-item .sub { color: var(--color-text-faint); font-size: 11px; }
+.pane-picker-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; margin: 10px 0 6px; }
+
+/* ⌘D 被拒绝（已达 3 个窗格 / 窄窗口装不下）时的内联轻提示：浮在内容区底部居中，
+   定时自行消失（见 App.tsx 的 showHint），不是弹窗。 */
+.pane-hint { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px; background: var(--color-elevated); color: var(--color-text); border: 1px solid var(--color-border); font-size: 12.5px; z-index: 5; pointer-events: none; }
 
 .sidebar-list::-webkit-scrollbar,
 .home-wrap::-webkit-scrollbar,
