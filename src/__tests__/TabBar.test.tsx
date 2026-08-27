@@ -26,7 +26,7 @@ const TAB_B = { id: 'tab-b', kind: 'term' as const, title: 'B', panes: [{ id: 'p
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
   useHint.setState({ message: null })
-  useDnd.setState({ target: null })
+  useDnd.setState({ target: null, tabBarIndex: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
   document.body.classList.remove('dragging-no-select')
   document.body.classList.remove('dragging-grab')
@@ -63,6 +63,28 @@ function mockPaneRects(rects: Record<string, { left: number; top?: number; width
 
 function tabEl(title: string): HTMLElement {
   return screen.getByText(title).closest('.tab') as HTMLElement
+}
+
+// 标签拖拽排序（设计文档新增，见 store/tabs.ts 的 reorderTab 注释）用到的矩形伪造：
+// 与 PaneDetach.test.tsx 的 mockRects 同一手法——按元素本身分类而不是按属性值查表，
+// 因为 .tabbar 和标签栏里每个 .tab[data-tab-id] 是完全不同的两块区域。这里不需要
+// 区分 .term-wrap（本文件的合并测试直接用现成的 mockPaneRects 处理 [data-pane-id]，
+// 排序测试不需要窗格矩形），因此比 PaneDetach 那份少一类。
+function mockTabBarRects(rects: Record<string, { left: number; top?: number; width: number; height?: number }>) {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    let key: string | undefined
+    if (this.classList.contains('tabbar')) key = 'tabbar'
+    else if (this.classList.contains('tab') && this.hasAttribute('data-tab-id')) key = `tab:${this.getAttribute('data-tab-id')}`
+    const r = key ? rects[key] : undefined
+    const top = r?.top ?? 0
+    const height = r?.height ?? 26
+    const left = r?.left ?? 0
+    const width = r?.width ?? 0
+    return {
+      top, left, width, height, right: left + width, bottom: top + height, x: left, y: top,
+      toJSON() { return {} },
+    } as DOMRect
+  })
 }
 
 async function drag(el: HTMLElement, from: { x: number; y: number }, to: { x: number; y: number }) {
@@ -286,6 +308,134 @@ describe('TabBar — 标签右键菜单（拆分为独立标签 / 关闭标签�
     await vi.waitFor(() => {
       expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')).toBeUndefined()
     })
+  })
+})
+
+// 标签拖拽排序（设计文档新增）：与"拖已打开的标签进窗格区"是同一次拖拽手势的两个
+// 落点分支——光标在标签栏上走排序，在窗格区走既有的合并——见 TabBar.tsx 的
+// onTabPointerMove/onTabPointerUp。这里只测标签栏这一处接线；纯数组数学
+// （reorderInsertIndex/moveArrayItem）单独在 tabs.test.ts 里测。
+describe('TabBar — 标签页拖拽排序（光标在标签栏上时，同一次拖拽走排序而不是合并）', () => {
+  it('把标签拖到标签栏另一个位置：显示插入指示，松手后按位置重新排序', async () => {
+    const TAB_C = { id: 'tab-c', kind: 'term' as const, title: 'C', panes: [{ id: 'pane-c', ptyId: 'pty-c', title: 'C' }], activePaneId: 'pane-c' }
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B, TAB_C], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },
+      'tab:tab-a': { left: 50, width: 100 }, // 中点 100
+      'tab:tab-b': { left: 150, width: 100 }, // 中点 200
+      'tab:tab-c': { left: 250, width: 100 }, // 中点 300
+    })
+    const c = tabEl('C')
+
+    // 把 C 拖到 A/B 之间（x=150，介于 A 中点 100 与 B 中点 200 之间，应插在 B 之前）
+    await act(async () => {
+      fireEvent.pointerDown(c, { clientX: 300, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(c, { clientX: 150, clientY: 10, pointerId: 1 })
+    })
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeTruthy() // 插入指示出现
+    expect(useDnd.getState().target).toBeNull() // 不是合并落点
+
+    await act(async () => {
+      fireEvent.pointerUp(c, { clientX: 150, clientY: 10, pointerId: 1 })
+    })
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-c', 'tab-b'])
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeNull() // 落地后指示消失
+  })
+
+  it('主页标签恒排第一：不能被拖动（整个手势视为无效目标，不产生任何变化）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },
+      'tab:tab-a': { left: 50, width: 100 },
+      'tab:tab-b': { left: 150, width: 100 },
+    })
+    const home = document.querySelector('.tab[data-tab-id="home"]') as HTMLElement
+    const before = useTabs.getState().tabs
+
+    await act(async () => {
+      fireEvent.pointerDown(home, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(home, { clientX: 200, clientY: 10, pointerId: 1 })
+    })
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeNull() // 无效目标，不显示指示
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+
+    await act(async () => {
+      fireEvent.pointerUp(home, { clientX: 200, clientY: 10, pointerId: 1 })
+    })
+
+    expect(useTabs.getState().tabs).toBe(before) // 连数组引用都没变
+  })
+
+  it('其它标签不能被拖到主页标签前面：插入下标被钳在 1', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 }, // 中点 25
+      'tab:tab-a': { left: 50, width: 100 },
+      'tab:tab-b': { left: 150, width: 100 },
+    })
+    const b = tabEl('B')
+
+    // 拖到主页标签中点左侧（几何换算的原始下标是 0），应被钳到 1（紧跟在主页后面）
+    await drag(b, { x: 200, y: 10 }, { x: 5, y: 10 })
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-b', 'tab-a'])
+  })
+
+  it('落回原位：no-op，不产生状态变化', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },
+      'tab:tab-a': { left: 50, width: 100 }, // 中点 100
+      'tab:tab-b': { left: 150, width: 100 }, // 中点 200
+    })
+    const b = tabEl('B')
+    const before = useTabs.getState().tabs
+
+    // B 自己就在下标 2；把它拖到自己中点附近（几何换算仍是插在 B 之前，等同原地）
+    await drag(b, { x: 200, y: 10 }, { x: 210, y: 10 })
+
+    expect(useTabs.getState().tabs).toBe(before)
+  })
+
+  it('光标移出标签栏、落在窗格区：改走既有的合并行为，不误判成排序', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    // 局部覆盖 clientWidth，测完立即还原——不像本文件其它describe 块那样用
+    // beforeEach/afterEach 包一层（只有这一条用例需要），直接手动 save/restore 避免
+    // 泄漏给后面的用例/文件。
+    const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('tabbar')) {
+        return { top: 0, left: 0, width: 800, height: 30, right: 800, bottom: 30, x: 0, y: 0, toJSON() { return {} } } as DOMRect
+      }
+      if (this.hasAttribute('data-pane-id')) {
+        return { top: 100, left: 0, width: 400, height: 100, right: 400, bottom: 200, x: 0, y: 100, toJSON() { return {} } } as DOMRect
+      }
+      return { top: 0, left: 0, width: 0, height: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON() { return {} } } as DOMRect
+    })
+    const b = tabEl('B')
+
+    try {
+      // 光标终点 y=150 落在窗格矩形 [100,200) 内、在标签栏矩形 [0,30) 之外
+      await drag(b, { x: 500, y: 10 }, { x: 300, y: 150 })
+
+      // 走的是合并（B 被移入 A），不是排序（tabs 顺序里 B 已经不存在了，而不是被重排）
+      expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeUndefined()
+      const t = useTabs.getState().tabs.find((t) => t.id === 'tab-a')!
+      expect(t.panes.map((p) => p.id)).toEqual(['pane-a', 'pane-b'])
+    } finally {
+      if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+    }
   })
 })
 

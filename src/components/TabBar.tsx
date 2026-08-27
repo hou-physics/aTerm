@@ -7,8 +7,8 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { newTerminal } from '../actions'
-import { resolveDropTarget } from '../paneDrop'
-import { getContentWidth, getPaneSlotRects, getTabRects } from '../paneDropDom'
+import { pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
+import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
 import { decidePaneFit, MAX_PANES } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
@@ -104,11 +104,38 @@ export function TabBar() {
     e.preventDefault()
     const { tabs, activeId } = useTabs.getState()
     const dragTab = tabs.find((t) => t.id === drag.tabId)
-    // 主页标签没有窗格可移动；拖的正是当前激活标签本身时，那是"拖到自己标签的窗格
-    // 区"——设计文档明确要求这是空操作，这里索性连落点都不解析、指示条也不出现
-    // （"no visual churn"），而不是等到 pointerup 才悄悄拒绝。这种情况下也不显示拖拽
-    // 指示（没有什么可拖的），因此 ghost 只在下面确认是有效拖拽目标后才启动。
-    if (!dragTab || dragTab.kind !== 'term' || dragTab.id === activeId) {
+    // 主页标签既没有窗格可合并、自己也不可被拖动排序（设计要求恒排第一）——整个手势
+    // 在这里就判定为无效目标，索性连落点都不解析、指示条/ghost 也不出现（"no visual
+    // churn"），而不是等到 pointerup 才悄悄拒绝。
+    if (!dragTab || dragTab.kind !== 'term') {
+      useDnd.getState().setTarget(null)
+      useDnd.getState().setTabBarIndex(null)
+      return
+    }
+    // 光标落在标签栏上：这一段拖拽此刻的落点语义是"标签排序"（新增），不是"合并进
+    // 窗格区"——与下面的合并分支不同，即便正在拖的就是当前激活标签本身，在这里也是
+    // 合法操作（挪动它在标签栏里的位置），因此不复用下面"拖到自己标签的窗格区是
+    // 空操作"那条判定。复用既有的 useDnd().tabBarIndex 字段与 TabBarDropIndicator
+    // 组件——这两者本是上一轮为"窗格拖出成独立标签、落在标签栏上"这条路径建的，两种
+    // 拖拽源共用同一份落点状态与同一条指示线，互不冲突（同一时刻只有一个 drag 在跑）。
+    const tabBarRect = getTabBarRect()
+    if (tabBarRect && pointInRect(e.clientX, e.clientY, tabBarRect)) {
+      const rawIndex = resolveTabBarInsertIndex(getTabRects(), e.clientX)
+      useDnd.getState().setTabBarIndex(Math.max(1, rawIndex)) // 不能插到主页标签前面
+      useDnd.getState().setTarget(null)
+      if (!drag.ghostStarted) {
+        drag.ghostStarted = true
+        useDragGhost.getState().start(dragTab.title, e.clientX, e.clientY)
+      } else {
+        useDragGhost.getState().move(e.clientX, e.clientY)
+      }
+      return
+    }
+    useDnd.getState().setTabBarIndex(null)
+    // 光标落在窗格区：还原成既有的"合并进当前激活标签的窗格区"这条行为。拖的正是
+    // 当前激活标签本身时（"拖到自己标签的窗格区"）依旧是设计文档明确要求的空操作
+    // ——这条判定只在这个分支里生效，不影响上面标签栏排序那条分支。
+    if (dragTab.id === activeId) {
       useDnd.getState().setTarget(null)
       return
     }
@@ -127,7 +154,9 @@ export function TabBar() {
     dragRef.current = null
     e.currentTarget.releasePointerCapture?.(e.pointerId)
     const target = useDnd.getState().target
+    const tabBarIndex = useDnd.getState().tabBarIndex
     useDnd.getState().setTarget(null)
+    useDnd.getState().setTabBarIndex(null)
     // 无条件调用，任何后续 return 都不可能让屏蔽选择的 body class 卡住——与上面
     // setTarget(null) 同一时机、同一理由；这个函数同时接在 onPointerUp 和
     // onPointerCancel 上，两条退出路径因此都被覆盖，end() 对"根本没开始过"是安全的
@@ -135,6 +164,12 @@ export function TabBar() {
     useDragGhost.getState().end()
     if (!drag || !drag.dragging) return
     suppressClickRef.current = true
+    if (tabBarIndex !== null) {
+      // 松手时落在标签栏上：这是排序落点，不是合并——纯数组挪动，不涉及窗格/上限/
+      // 窄窗口降级那一整套校验（reorderTab 内部对"落回原位"这类空操作已经处理好）。
+      useTabs.getState().reorderTab(drag.tabId, tabBarIndex)
+      return
+    }
     if (!target) return // 松手时不在任何窗格范围内，视为放弃这次拖拽
     const { tabs, activeId } = useTabs.getState()
     const sourceTab = tabs.find((t) => t.id === drag.tabId)

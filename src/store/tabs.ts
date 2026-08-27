@@ -59,6 +59,36 @@ function insertPaneAtIndex(tabs: Tab[], tabId: string, insertAt: number): { tabs
   return { tabs: nextTabs, paneId: pane.id }
 }
 
+// 标签拖拽排序（标签栏内拖动标签本身，与"把标签拖进窗格区合并"是同一次拖拽手势的两个
+// 落点分支，见 TabBar.tsx）用到的两个纯数组函数，与 store 本身解耦，单独可测。
+//
+// rawTargetIndex 来自 paneDrop.ts 的 resolveTabBarInsertIndex：光标 x 坐标 + 标签矩形
+// 数组（这份矩形数组是"当前顺序、含正在被拖拽的标签自己"的真实 DOM 快照，因为拖拽
+// 过程中并不隐藏或挪动被拖标签本身，只有跟随光标的 ghost 在动）算出的几何插入下标——
+// 它不知道也不需要知道"哪个是拖拽源"，纯粹是"光标落在哪两个标签中间"。reorderInsertIndex
+// 把这个几何下标换算成"从 order 里移除拖拽源之后，它该插入的下标"：目标下标若大于
+// 源下标，说明移除源标签后，同一个视觉缝隙对应的下标要向前挪一格。minIndex 钳住不能
+// 把任何标签排到主页标签前面——主页恒为下标 0，设计要求它既不能被顶替、自己也不可被
+// 拖动（后者由调用方在识别到 dragTab.kind !== 'term' 时整个手势直接判定无效来保证，
+// 这里只负责钳住"别人"不能插到它前面）。
+export function reorderInsertIndex(order: string[], sourceId: string, rawTargetIndex: number, minIndex = 1): number {
+  const srcIdx = order.indexOf(sourceId)
+  const clamped = Math.max(minIndex, Math.min(rawTargetIndex, order.length))
+  if (srcIdx === -1) return clamped
+  return clamped > srcIdx ? clamped - 1 : clamped
+}
+
+// 纯数组挪动：把下标 fromIndex 的元素搬到 toIndex（原地让路，不做其它变换），与业务
+// 语义无关。fromIndex 越界或与 toIndex 相同时原样返回同一个数组引用（no-op，不产生
+// 新对象——与本文件其它"真正的空操作"同一惯例，例如 movePanesToTab 拖到自己标签时）。
+export function moveArrayItem<T>(arr: T[], fromIndex: number, toIndex: number): T[] {
+  if (fromIndex < 0 || fromIndex >= arr.length || fromIndex === toIndex) return arr
+  const copy = arr.slice()
+  const [item] = copy.splice(fromIndex, 1)
+  copy.splice(toIndex, 0, item)
+  return copy
+}
+
 type TabsState = {
   tabs: Tab[]
   activeId: string
@@ -71,6 +101,7 @@ type TabsState = {
   movePanesToTab(sourceTabId: string, targetTabId: string, target: DropTarget): boolean
   detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
   splitTabPanes(tabId: string): string[] | null
+  reorderTab(tabId: string, rawTargetIndex: number): boolean
   startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
@@ -286,6 +317,23 @@ export const useTabs = create<TabsState>((set, get) => ({
       return { tabs, activeId: activeNewTab.id }
     })
     return newTabs.map((t) => t.id)
+  },
+  // 标签拖拽排序（拖标签这同一次手势，落点在标签栏上时的分支，见 TabBar.tsx）：
+  // rawTargetIndex 是 paneDrop.ts 的 resolveTabBarInsertIndex 算出的几何下标（含
+  // 拖拽源自身、未做任何移除调整），这里换算 + 落盘一次做完。srcIdx <= 0 覆盖两种
+  // 拒绝情况——标签不存在，或正是不可拖动的主页标签（永远排第一，见类型上方设计要求）
+  // ——都返回 false、不做任何状态变更；调用方（TabBar.tsx）正常也不会让这两种情况
+  // 走到这里（home 拖拽在识别阶段就已经整个手势判定无效），这里只是防御性兜底。
+  // 落回原位（换算后的插入下标与源下标相同）同样是空操作，不触发 set，连数组引用都
+  // 不变——与本文件其它"真正的空操作"同一惯例。
+  reorderTab: (tabId, rawTargetIndex) => {
+    const order = get().tabs.map((t) => t.id)
+    const srcIdx = order.indexOf(tabId)
+    if (srcIdx <= 0) return false
+    const insertion = reorderInsertIndex(order, tabId, rawTargetIndex)
+    if (insertion === srcIdx) return false
+    set((s) => ({ tabs: moveArrayItem(s.tabs, srcIdx, insertion) }))
+    return true
   },
   // 窗格选择器（设计文档 §5-A）选定后调用：给此前没有 ptyId 的窗格补上真正的终端。
   startPaneTerminal: async (tabId, paneId, { title, cwd, inject, threadKey, dirName, rootKey }) => {

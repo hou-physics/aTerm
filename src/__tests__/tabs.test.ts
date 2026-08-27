@@ -9,7 +9,7 @@ vi.mock('../ipc', () => ({
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 import * as ipc from '../ipc'
 import { resumeThread } from '../actions'
-import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, useTabs } from '../store/tabs'
+import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
 import type { ThreadInfo } from '../ipc'
 import { HOME_TAB, makePane, makeTermTab } from './factories'
 import { MAX_PANES } from '../paneLayout'
@@ -514,6 +514,113 @@ describe('useTabs — splitTabPanes：把多窗格标签拆成 N 个独立标签
     useTabs.setState({ tabs: [HOME_TAB], activeId: 'home' })
     expect(useTabs.getState().splitTabPanes('does-not-exist')).toBeNull()
     expect(useTabs.getState().splitTabPanes('home')).toBeNull()
+  })
+})
+
+// 标签拖拽排序用到的两个纯函数（见 store/tabs.ts 顶部注释）：reorderInsertIndex 把
+// "光标落在哪两个标签中间"这个几何下标换算成"移除拖拽源之后"该插入的下标；
+// moveArrayItem 是与业务无关的纯数组挪动。
+describe('reorderInsertIndex：几何插入下标换算成"移除拖拽源自身后"的真实插入下标', () => {
+  const order = ['home', 'a', 'b', 'c']
+
+  it('目标下标小于源下标：不需要调整，原样返回（钳过 minIndex 之后）', () => {
+    expect(reorderInsertIndex(order, 'c', 1)).toBe(1) // c 从下标3挪到1，之前的元素不受影响
+  })
+  it('目标下标大于源下标：移除源标签后同一条视觉缝隙对应的下标要向前挪一格', () => {
+    expect(reorderInsertIndex(order, 'a', 3)).toBe(2) // a 从下标1挪到"原下标3那条缝"，移除a后是2
+  })
+  it('目标下标等于源下标：换算结果就是原地（调用方据此判断 no-op）', () => {
+    expect(reorderInsertIndex(order, 'b', 2)).toBe(2)
+  })
+  it('钳住不能插到主页标签（下标 0）前面：rawTargetIndex 为 0 时至少是 minIndex（默认 1）', () => {
+    expect(reorderInsertIndex(order, 'c', 0)).toBe(1)
+  })
+  it('sourceId 不在 order 里：退化为只做 minIndex/上限钳位，不做自身移除调整', () => {
+    expect(reorderInsertIndex(order, 'not-there', 0)).toBe(1)
+    expect(reorderInsertIndex(order, 'not-there', 99)).toBe(order.length)
+  })
+})
+
+describe('moveArrayItem：纯数组挪动', () => {
+  it('把元素从靠前的下标挪到靠后的下标，其余元素顺次补位', () => {
+    expect(moveArrayItem(['a', 'b', 'c', 'd'], 0, 2)).toEqual(['b', 'c', 'a', 'd'])
+  })
+  it('把元素从靠后的下标挪到靠前的下标', () => {
+    expect(moveArrayItem(['a', 'b', 'c', 'd'], 3, 1)).toEqual(['a', 'd', 'b', 'c'])
+  })
+  it('fromIndex === toIndex：原样返回同一个数组引用（no-op）', () => {
+    const arr = ['a', 'b', 'c']
+    expect(moveArrayItem(arr, 1, 1)).toBe(arr)
+  })
+  it('fromIndex 越界：原样返回同一个数组引用', () => {
+    const arr = ['a', 'b', 'c']
+    expect(moveArrayItem(arr, -1, 0)).toBe(arr)
+    expect(moveArrayItem(arr, 3, 0)).toBe(arr)
+  })
+})
+
+// 标签栏右键菜单是「拆分为独立标签」，拖拽排序则是"标签栏内拖动标签本身"（与拖去
+// 合并进窗格区是同一次手势的两个落点分支，交互层面的接线在 TabBar.test.tsx）：这里
+// 只测 store 方法本身的状态变更。
+describe('useTabs — reorderTab：标签拖拽排序（纯数组挪动落盘）', () => {
+  it('把靠后的标签挪到靠前的位置', () => {
+    const a = makeTermTab({ title: 'A' })
+    const b = makeTermTab({ title: 'B' })
+    const c = makeTermTab({ title: 'C' })
+    useTabs.setState({ tabs: [HOME_TAB, a, b, c], activeId: a.id })
+
+    const ok = useTabs.getState().reorderTab(c.id, 1)
+
+    expect(ok).toBe(true)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([HOME_TAB.id, c.id, a.id, b.id])
+  })
+
+  it('主页标签：拒绝，返回 false，不做任何状态变更', () => {
+    const a = makeTermTab()
+    useTabs.setState({ tabs: [HOME_TAB, a], activeId: a.id })
+    const before = useTabs.getState().tabs
+
+    const ok = useTabs.getState().reorderTab('home', 1)
+
+    expect(ok).toBe(false)
+    expect(useTabs.getState().tabs).toBe(before)
+  })
+
+  it('不存在的标签：拒绝，返回 false，不做任何状态变更', () => {
+    const a = makeTermTab()
+    useTabs.setState({ tabs: [HOME_TAB, a], activeId: a.id })
+    const before = useTabs.getState().tabs
+
+    const ok = useTabs.getState().reorderTab('does-not-exist', 1)
+
+    expect(ok).toBe(false)
+    expect(useTabs.getState().tabs).toBe(before)
+  })
+
+  it('目标下标钳到 0（试图插到主页标签前面）：实际落在主页之后，不会顶替主页', () => {
+    const a = makeTermTab()
+    const b = makeTermTab()
+    useTabs.setState({ tabs: [HOME_TAB, a, b], activeId: a.id })
+
+    useTabs.getState().reorderTab(b.id, 0)
+
+    const ids = useTabs.getState().tabs.map((t) => t.id)
+    expect(ids[0]).toBe(HOME_TAB.id) // 主页恒排第一，未被顶替
+    expect(ids).toEqual([HOME_TAB.id, b.id, a.id])
+  })
+
+  it('换算后落回原位：no-op，连数组引用都不变', () => {
+    const a = makeTermTab()
+    const b = makeTermTab()
+    useTabs.setState({ tabs: [HOME_TAB, a, b], activeId: a.id })
+    const before = useTabs.getState().tabs
+
+    // a 目前在下标 1；rawTargetIndex=1 换算后（reorderInsertIndex：1 不大于 srcIdx 1，
+    // 原样返回 1）就是原地
+    const ok = useTabs.getState().reorderTab(a.id, 1)
+
+    expect(ok).toBe(false)
+    expect(useTabs.getState().tabs).toBe(before)
   })
 })
 
