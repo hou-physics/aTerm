@@ -661,6 +661,109 @@ describe('TabBar — 指针捕获丢失或组件卸载时同样清理拖拽状�
   })
 })
 
+// 窗口级兜底（本次新增，src/dragSafetyNet.ts）：上面的 lostpointercapture 测试只能
+// 证明"收到这个事件名字后处理器本身做了正确的事"——jsdom 完全没实现
+// setPointerCapture/releasePointerCapture/隐式释放，无法验证"真实 WKWebView 里，
+// 被移出 DOM 的节点是否真的会把 lostpointercapture 送到 React"这一层（这正是
+// .superpowers/drag-cleanup-report.md 的"关切点"）。这里验证的是比这更差的一种
+// 情形：元素被移出 DOM 之后*完全不触发*任何指针事件（不发 lostpointercapture、也
+// 不发 pointerup/pointercancel），只有原生 pointerup/blur 落在 window 上——窗口级
+// 监听不依赖被拖元素是否还在 DOM 里、也不经过 React 的合成事件委托，应当仍能兜住。
+describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失、且未收到任何指针事件时仍能清理', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('元素被移出 DOM（不触发任何指针事件）后，window 上的原生 pointerup 仍能清理', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 跨过阈值，真正开始拖拽
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.body.classList.contains('dragging-grab')).toBe(true)
+    expect(useDnd.getState().target).not.toBeNull()
+
+    // 直接把被拖的标签节点从 DOM 里摘掉——不经过 lostpointercapture，只留下"节点已经
+    // 不在文档树里"这一个既成事实，专门验证不依赖它的窗口级兜底。
+    b.remove()
+
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+      await Promise.resolve() // 兜底的 endDrag() 被 queueMicrotask 推迟，见 dragSafetyNet.ts 顶部注释
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().target).toBeNull()
+    expect(useDnd.getState().tabBarIndex).toBeNull()
+    // 没有完成任何动作——窗口级兜底和 lostpointercapture 一样只清理，不识别落点。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+
+  it('元素被移出 DOM 后，window 上的原生 blur（例如 ⌘Tab 切到另一个 App）同样能清理', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    b.remove()
+
+    await act(async () => {
+      window.dispatchEvent(new Event('blur'))
+      await Promise.resolve()
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().target).toBeNull()
+  })
+
+  it('endDrag() 会摘掉窗口级兜底监听器：清理之后不会残留全局 pointerup/pointercancel/blur 监听', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    // 故意不伪造任何窗格矩形——jsdom 默认的 getBoundingClientRect() 恒为全 0，光标
+    // 因此落不进任何窗格范围，target 恒为 null，pointerup 走到 endDrag() 但不完成
+    // 任何合并动作，专注验证监听器本身的挂/摘，不与"合并成功"的断言互相干扰。
+    const b = tabEl('B')
+    const removeSpy = vi.spyOn(window, 'removeEventListener')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+      fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 正常路径收尾，走 endDrag()
+    })
+
+    const removedCaptureTypes = removeSpy.mock.calls
+      .filter(([, , opts]) => typeof opts === 'object' && opts !== null && opts.capture === true)
+      .map(([type]) => type)
+    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel', 'blur']))
+
+    // 监听器确实摘掉了：清理之后再有一次原生 pointerup 落在 window 上，不会再产生任何
+    // 可观察效果（body class 早已是干净状态，不会被重新弄脏，也不会误触发任何动作）。
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+      await Promise.resolve()
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+})
+
 // 拖放路径也使用修正后的可用宽度（review 发现：⌘D 的拒绝阈值已经用 usablePaneAreaWidth
 // 扣掉了容器内边距/分隔条/窗格边框开销，但 TabBar.tsx 的合并落点仍在用原始
 // clientWidth，同一份几何在两条路径上可能给出矛盾的结论）。数字与

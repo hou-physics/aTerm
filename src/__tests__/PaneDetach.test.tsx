@@ -391,3 +391,97 @@ describe('TabPanes — 指针捕获丢失或组件卸载时同样清理拖拽状
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2) // 没有意外拆出新标签
   })
 })
+
+// 窗口级兜底（本次新增，src/dragSafetyNet.ts）：上面的 lostpointercapture 测试只能
+// 证明"收到这个事件名字后处理器本身做了正确的事"——jsdom 完全没实现
+// setPointerCapture/releasePointerCapture/隐式释放，无法验证"真实 WKWebView 里，被
+// 移出 DOM 的节点是否真的会把 lostpointercapture 送到 React"这一层。这里验证的是比
+// 这更差的一种情形：标题栏元素被移出 DOM 之后*完全不触发*任何指针事件，只有原生
+// pointerup/blur 落在 window 上——窗口级监听不依赖被拖元素是否还在 DOM 里、也不经过
+// React 的合成事件委托，应当仍能兜住。
+describe('TabPanes — 窗口级兜底：被拖标题栏在拖拽中途从 DOM 消失、且未收到任何指针事件时仍能清理', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+
+  it('标题栏被移出 DOM（不触发任何指针事件）后，window 上的原生 pointerup 仍能清理', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 300, clientY: 200, pointerId: 1 }) // 跨过阈值，真正开始拖拽
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.body.classList.contains('dragging-grab')).toBe(true)
+
+    // 直接把被拖的标题栏节点从 DOM 里摘掉——不经过 lostpointercapture，只留下"节点
+    // 已经不在文档树里"这一个既成事实，专门验证不依赖它的窗口级兜底。
+    titlebar.remove()
+
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+      await Promise.resolve() // 兜底的 endDrag() 被 queueMicrotask 推迟，见 dragSafetyNet.ts 顶部注释
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().tabBarIndex).toBeNull()
+    // 没有完成任何动作——窗口级兜底和 lostpointercapture 一样只清理，不识别落点/拆出新标签。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2)
+    expect(useTabs.getState().tabs).toHaveLength(2)
+  })
+
+  it('标题栏被移出 DOM 后，window 上的原生 blur（例如 ⌘Tab 切到另一个 App）同样能清理', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 300, clientY: 200, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    titlebar.remove()
+
+    await act(async () => {
+      window.dispatchEvent(new Event('blur'))
+      await Promise.resolve()
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().tabBarIndex).toBeNull()
+  })
+
+  it('endDrag() 会摘掉窗口级兜底监听器：清理之后不会残留全局 pointerup/pointercancel/blur 监听', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    // 让松手点始终落在源标签自己的窗格行范围内——走既有的"没有真的拖出去"分支，
+    // 不产生拆出新标签的动作，专注验证监听器本身的挂/摘。
+    mockRects({ 'row:tab-a': { left: 0, top: 40, width: 600, height: 300 } })
+    const titlebar = titlebarFor('P2')
+    const removeSpy = vi.spyOn(window, 'removeEventListener')
+
+    await drag(titlebar, { x: 300, y: 60 }, { x: 200, y: 100 }) // 正常路径收尾，走 endDrag()
+
+    const removedCaptureTypes = removeSpy.mock.calls
+      .filter(([, , opts]) => typeof opts === 'object' && opts !== null && opts.capture === true)
+      .map(([type]) => type)
+    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel', 'blur']))
+
+    // 监听器确实摘掉了：清理之后再有一次原生 pointerup 落在 window 上，不会再产生任何
+    // 可观察效果（body class 早已是干净状态，不会被重新弄脏，也不会误触发任何动作）。
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+      await Promise.resolve()
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2)
+    expect(useTabs.getState().tabs).toHaveLength(2)
+  })
+})

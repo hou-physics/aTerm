@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { resumeThread } from '../actions'
+import { attachDragSafetyNet } from '../dragSafetyNet'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { DRAG_THRESHOLD_PX, dropInsertionIndex, resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
@@ -13,7 +14,7 @@ import { useTabs } from '../store/tabs'
 import { basename, formatRelative } from '../time'
 import { ThemeSwitcher } from './ThemeSwitcher'
 
-type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean }
+type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
 
 // 从侧边栏「最近会话」拖入（设计文档 §5-B 场景 B）：落点解析、上限/窄窗口降级判断、
 // 轻提示三处都复用与 TabBar.tsx 场景 A 完全相同的纯函数/store（paneDrop.ts、
@@ -34,15 +35,24 @@ export function Sidebar() {
   // 一遍 resumeThread（那样会在新窗格之外，同时在旧的 focusThread/openTerminal 路径
   // 上重复处理同一条会话）。与 TabBar.tsx 同一套一次性抑制手法。
   const suppressClickRef = useRef(false)
+  // 窗口级兜底监听器的卸载函数，见 dragSafetyNet.ts 顶部注释与 TabBar.tsx 同名字段
+  // 的注释（不塞进 DragState，理由相同）。
+  const netCleanupRef = useRef<(() => void) | null>(null)
 
   // 拖拽清理的唯一入口，与 TabBar.tsx 的 endDrag 同一理由——这里格外关键：「最近会话」
   // 列表在 window focus 时 refresh()，可能把正被拖拽的那一条会话挤出前 12 条，使其
   // DOM 节点在拖拽中途消失，浏览器不会补发 pointerup，只会发 lostpointercapture（见
-  // 下方 onItemLostPointerCapture）。pointerup/pointercancel（同一个 onItemPointerUp）、
-  // lostpointercapture、组件卸载兜底（下面的 effect）三条退出路径全部委托给这一个
-  // 函数，不写第二份清理逻辑；它触碰的两处状态（useDnd 的 target、useDragGhost）本身
-  // 都是幂等的，被调用两次也完全无害。
+  // 下方 onItemLostPointerCapture）——这正是这个组件比另外两处更需要 dragSafetyNet.ts
+  // 那层窗口级兜底的地方：Sidebar 组件本身没有卸载（只是列表项消失），
+  // lostpointercapture 若因元素已从 DOM 摘除而没能冒泡到 React 委托根节点，组件卸载
+  // 兜底也帮不上忙，只有不依赖元素是否还在 DOM 里的窗口级监听能兜住。
+  // pointerup/pointercancel（同一个 onItemPointerUp）、lostpointercapture、组件卸载
+  // 兜底（下面的 effect）、窗口级兜底四条退出路径全部委托给这一个函数，不写第二份
+  // 清理逻辑；它触碰的两处状态（useDnd 的 target、useDragGhost）本身都是幂等的，被
+  // 调用多次也完全无害。
   const endDrag = useCallback(() => {
+    netCleanupRef.current?.()
+    netCleanupRef.current = null
     dragRef.current = null
     useDnd.getState().setTarget(null)
     useDragGhost.getState().end()
@@ -64,8 +74,10 @@ export function Sidebar() {
     // 调用，不影响随后仍会正常触发的合成 click，普通点击会话条目的行为不变。
     useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false }
-  }, [])
+    dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId }
+    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。
+    netCleanupRef.current = attachDragSafetyNet(e.pointerId, () => dragRef.current !== null, endDrag)
+  }, [endDrag])
 
   const onItemPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current

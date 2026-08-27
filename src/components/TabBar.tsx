@@ -8,6 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { newTerminal } from '../actions'
+import { attachDragSafetyNet } from '../dragSafetyNet'
 import { DRAG_THRESHOLD_PX, pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
 import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
@@ -18,7 +19,7 @@ import { useLayout } from '../store/layout'
 import { type Tab, useTabs } from '../store/tabs'
 import { ContextMenu } from './ContextMenu'
 
-type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean }
+type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
 
 // 把窗格拖出成独立标签、松手时落在标签栏上（设计文档 §5-C，TabPanes.tsx 的
 // PaneTitleBar 是拖拽源）应插入的位置指示：一条竖线，与 DropIndicator.tsx 的
@@ -71,18 +72,26 @@ export function TabBar() {
 
   const dragRef = useRef<DragState | null>(null)
   const suppressClickRef = useRef(false)
+  // 窗口级兜底监听器的卸载函数，见 dragSafetyNet.ts 顶部注释。与 dragRef 分开存放
+  // （不塞进 DragState 里）：endDrag() 需要先调用它再清空 dragRef，顺序反过来的话
+  // 兜底监听器里读 dragRef.current 的 isDragActive() 就会先一步看到 null。
+  const netCleanupRef = useRef<(() => void) | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
 
   // 拖拽清理的唯一入口：pointerup/pointercancel（同一个 onTabPointerUp）、
   // lostpointercapture（指针捕获被浏览器隐式释放——例如被拖的标签因为其它原因中途
   // 移出 DOM，浏览器不会补发 pointerup，只会发 lostpointercapture，见下方
-  // onTabLostPointerCapture）、以及组件卸载兜底（下面的 effect），四条退出路径全部
-  // 委托给这一个函数，不写第二份清理逻辑。它对"根本没有拖拽在进行"是安全的空操作：
-  // 触碰的三处状态——useDnd 的 target/tabBarIndex、useDragGhost——本身都已经是幂等的
-  // （反复调用不产生任何新的可观察效果，见各自文件顶部注释），因此这里不需要再加一层
-  // "是否已经清理过"的判断，被调用两次（例如 lostpointercapture 之后又收到
-  // pointerup）也完全无害。
+  // onTabLostPointerCapture）、组件卸载兜底（下面的 effect）、以及窗口级兜底
+  // （dragSafetyNet.ts，指针捕获丢失的时序不可靠，窗口级监听不依赖被拖元素是否仍在
+  // DOM 中，是最后一道保险）——五条退出路径全部委托给这一个函数，不写第二份清理逻辑。
+  // 它对"根本没有拖拽在进行"是安全的空操作：触碰的三处状态——useDnd 的
+  // target/tabBarIndex、useDragGhost——本身都已经是幂等的（反复调用不产生任何新的
+  // 可观察效果，见各自文件顶部注释），因此这里不需要再加一层"是否已经清理过"的判断，
+  // 被调用多次（例如 lostpointercapture 之后又收到 pointerup，或窗口级兜底与正常路径
+  // 前后各触发一次）也完全无害。
   const endDrag = useCallback(() => {
+    netCleanupRef.current?.()
+    netCleanupRef.current = null
     dragRef.current = null
     useDnd.getState().setTarget(null)
     useDnd.getState().setTabBarIndex(null)
@@ -109,8 +118,11 @@ export function TabBar() {
     // 随后的原生 click 照常触发。
     useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false }
-  }, [])
+    dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId }
+    // 窗口级兜底：见 dragSafetyNet.ts 顶部注释。在这里（拖拽开始的唯一入口）挂上，
+    // 在 endDrag()（拖拽结束的唯一出口）里摘掉，二者是同一对，不会有挂了忘摘的情况。
+    netCleanupRef.current = attachDragSafetyNet(e.pointerId, () => dragRef.current !== null, endDrag)
+  }, [endDrag])
 
   const onTabPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current
