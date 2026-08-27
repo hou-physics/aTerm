@@ -121,8 +121,15 @@ body {
 .conv-panel-resize-handle:hover, .conv-panel-resize-handle:active { background-color: var(--color-accent); }
 .conv-header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
 .conv-title { font-size: 13px; font-weight: 600; }
-.conv-refresh { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
-.conv-refresh:hover { border-color: var(--color-accent); color: var(--color-text); }
+.conv-header-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.conv-refresh, .conv-collapse { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.conv-refresh:hover, .conv-collapse:hover { border-color: var(--color-accent); color: var(--color-text); }
+
+/* 折叠态：面板收成一条 28px 竖条，展开按钮居中在顶部，视觉上与 TabBar 里的
+   sidebar-toggle / panel-toggle 是同一套按钮语言（沿用既有 CSS 变量，不新增调色板）。 */
+.conv-panel-strip { width: 28px; flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; justify-content: center; padding-top: 6px; }
+.conv-strip-expand { flex: none; width: 22px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.conv-strip-expand:hover { border-color: var(--color-accent); color: var(--color-text); }
 .conv-timeline { flex: none; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--color-border); padding: 6px 10px; }
 .conv-date-label { display: flex; align-items: center; gap: 5px; width: 100%; border: none; background: none; padding: 0; margin: 10px 0 4px; font-family: inherit; font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .04em; text-align: left; cursor: default; }
 .conv-date-label:hover { color: var(--color-text-dim); }

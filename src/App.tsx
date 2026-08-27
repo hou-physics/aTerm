@@ -15,8 +15,6 @@ export default function App() {
   const { tabs, activeId } = useTabs()
   const refresh = useSessions((s) => s.refresh)
   const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed)
-  const panelCollapsed = useLayout((s) => s.panelCollapsed)
-  const panelWidth = useLayout((s) => s.panelWidth)
   useEffect(() => {
     refresh().catch(console.error)
     const onFocus = () => { refresh().catch(console.error) }
@@ -69,11 +67,7 @@ export default function App() {
           ))}
         </div>
       </div>
-      {!panelCollapsed && (
-        <aside className="conv-panel-dock" style={{ width: panelWidth }}>
-          <ConversationPanel />
-        </aside>
-      )}
+      <ConversationPanel />
     </div>
   )
 }

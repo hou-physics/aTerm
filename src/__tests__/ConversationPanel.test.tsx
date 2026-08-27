@@ -13,6 +13,7 @@ import * as ipc from '../ipc'
 import { useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
 import { ConversationPanel } from '../components/ConversationPanel'
+import { TabBar } from '../components/TabBar'
 
 const CONV = {
   turns: [
@@ -250,5 +251,55 @@ describe('ConversationPanel — 面板宽度可拖拽', () => {
     expect(useLayout.getState().panelWidth).toBe(400)
     expect(setItemSpy).toHaveBeenCalledWith('aterm-panel-width', '400')
     setItemSpy.mockRestore()
+  })
+})
+
+describe('ConversationPanel — 面板自带折叠按钮 + 折叠后的细条', () => {
+  beforeEach(() => {
+    useLayout.setState({ panelCollapsed: false })
+  })
+
+  it('点击面板自己的折叠按钮后，面板收成 28px 竖条，露出展开按钮', () => {
+    render(<ConversationPanel />)
+    fireEvent.click(screen.getByTitle('收起面板 (⌘J)'))
+    expect(useLayout.getState().panelCollapsed).toBe(true)
+    expect(screen.getByTitle('展开面板 (⌘J)')).toBeTruthy()
+    expect(screen.queryByTitle('收起面板 (⌘J)')).toBeNull()
+  })
+
+  it('点击细条上的展开按钮恢复完整面板', () => {
+    useLayout.setState({ panelCollapsed: true })
+    render(<ConversationPanel />)
+    fireEvent.click(screen.getByTitle('展开面板 (⌘J)'))
+    expect(useLayout.getState().panelCollapsed).toBe(false)
+    expect(screen.getByTitle('收起面板 (⌘J)')).toBeTruthy()
+  })
+
+  it('panelCollapsed 是唯一真相来源：面板自身按钮、TabBar 按钮、⌘J 三处操作互相同步', () => {
+    render(
+      <>
+        <TabBar />
+        <ConversationPanel />
+      </>,
+    )
+    expect(screen.getByTitle('收起面板 (⌘J)')).toBeTruthy()
+    expect(screen.getByTitle('隐藏对话面板 (⌘J)')).toBeTruthy()
+
+    // 从面板自己的折叠按钮收起
+    fireEvent.click(screen.getByTitle('收起面板 (⌘J)'))
+    expect(useLayout.getState().panelCollapsed).toBe(true)
+    expect(screen.getByTitle('展开面板 (⌘J)')).toBeTruthy() // 面板变成竖条
+    expect(screen.getByTitle('显示对话面板 (⌘J)')).toBeTruthy() // TabBar 按钮同步翻转
+
+    // ⌘J 在 App.tsx 里就是直接调用同一个 store 方法，这里等价模拟
+    act(() => { useLayout.getState().togglePanel() })
+    expect(useLayout.getState().panelCollapsed).toBe(false)
+    expect(screen.getByTitle('收起面板 (⌘J)')).toBeTruthy()
+    expect(screen.getByTitle('隐藏对话面板 (⌘J)')).toBeTruthy()
+
+    // 从 TabBar 按钮收起
+    fireEvent.click(screen.getByTitle('隐藏对话面板 (⌘J)'))
+    expect(useLayout.getState().panelCollapsed).toBe(true)
+    expect(screen.getByTitle('展开面板 (⌘J)')).toBeTruthy()
   })
 })

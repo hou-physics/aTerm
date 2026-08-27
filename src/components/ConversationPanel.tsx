@@ -110,67 +110,88 @@ export function ConversationPanel() {
     useLayout.getState().commitPanelWidth()
   }, [])
 
+  const panelCollapsed = useLayout((s) => s.panelCollapsed)
+  const togglePanel = useLayout((s) => s.togglePanel)
+  const panelWidth = useLayout((s) => s.panelWidth)
+
+  // 折叠态：面板不整个消失，收成一条 28px 的竖条（带展开按钮），让"再点一下展开"
+  // 有个可点的地方。panelCollapsed 是 store/layout.ts 里唯一的真相来源——面板自己的
+  // 折叠按钮、这里的展开按钮、TabBar 的开关按钮、App.tsx 的 ⌘J 全部读写同一个字段，
+  // 天然保持同步，不引入第二个标志位。
+  if (panelCollapsed) {
+    return (
+      <aside className="conv-panel-strip">
+        <button type="button" className="conv-strip-expand" onClick={() => togglePanel()} title="展开面板 (⌘J)">‹</button>
+      </aside>
+    )
+  }
+
   const hasThread = Boolean(dirName && rootKey)
   const groups = conv ? groupUserTurnsByDate(conv.turns) : []
 
   return (
-    <div className="conv-panel">
-      <div
-        className="conv-panel-resize-handle"
-        role="separator"
-        aria-orientation="vertical"
-        title="拖动调整面板宽度（双击复位）"
-        onPointerDown={onResizePointerDown}
-        onPointerMove={onResizePointerMove}
-        onPointerUp={onResizePointerUp}
-        onPointerCancel={onResizePointerUp}
-        onDoubleClick={onResizeDoubleClick}
-      />
-      <div className="conv-header">
-        <span className="conv-title">对话</span>
-        {hasThread && <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>}
-      </div>
-      {!hasThread && <div className="conv-empty">当前标签没有关联的对话</div>}
-      {hasThread && loading && <div className="conv-status">加载中…</div>}
-      {hasThread && error && <div className="conv-status conv-error">加载失败：{error}</div>}
-      {hasThread && !loading && !error && conv && (
-        <>
-          <div className="conv-timeline">
-            {groups.map((g) => {
-              const expanded = expandedDates.has(g.key)
-              return (
-                <div key={g.key} className="conv-date-group">
-                  <button
-                    type="button"
-                    className="conv-date-label"
-                    aria-expanded={expanded}
-                    onClick={() => toggleDateGroup(g.key)}
-                  >
-                    <span className="conv-date-disclosure">{expanded ? '▾' : '▸'}</span>
-                    {g.label}
-                    {!expanded && <span className="conv-date-count">({g.turns.length})</span>}
-                  </button>
-                  {expanded && g.turns.map((t) => (
-                    <div key={t.uuid} className="conv-timeline-item" onClick={() => scrollToTurn(t.uuid)}>
-                      <span className="dot">●</span>
-                      <span className="time">{formatTimeHM(t.tsMs)}</span>
-                      <span className="summary">{firstLineSummary(t.text)}</span>
-                    </div>
-                  ))}
+    <aside className="conv-panel-dock" style={{ width: panelWidth }}>
+      <div className="conv-panel">
+        <div
+          className="conv-panel-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          title="拖动调整面板宽度（双击复位）"
+          onPointerDown={onResizePointerDown}
+          onPointerMove={onResizePointerMove}
+          onPointerUp={onResizePointerUp}
+          onPointerCancel={onResizePointerUp}
+          onDoubleClick={onResizeDoubleClick}
+        />
+        <div className="conv-header">
+          <span className="conv-title">对话</span>
+          <div className="conv-header-actions">
+            {hasThread && <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>}
+            <button type="button" className="conv-collapse" onClick={() => togglePanel()} title="收起面板 (⌘J)">›</button>
+          </div>
+        </div>
+        {!hasThread && <div className="conv-empty">当前标签没有关联的对话</div>}
+        {hasThread && loading && <div className="conv-status">加载中…</div>}
+        {hasThread && error && <div className="conv-status conv-error">加载失败：{error}</div>}
+        {hasThread && !loading && !error && conv && (
+          <>
+            <div className="conv-timeline">
+              {groups.map((g) => {
+                const expanded = expandedDates.has(g.key)
+                return (
+                  <div key={g.key} className="conv-date-group">
+                    <button
+                      type="button"
+                      className="conv-date-label"
+                      aria-expanded={expanded}
+                      onClick={() => toggleDateGroup(g.key)}
+                    >
+                      <span className="conv-date-disclosure">{expanded ? '▾' : '▸'}</span>
+                      {g.label}
+                      {!expanded && <span className="conv-date-count">({g.turns.length})</span>}
+                    </button>
+                    {expanded && g.turns.map((t) => (
+                      <div key={t.uuid} className="conv-timeline-item" onClick={() => scrollToTurn(t.uuid)}>
+                        <span className="dot">●</span>
+                        <span className="time">{formatTimeHM(t.tsMs)}</span>
+                        <span className="summary">{firstLineSummary(t.text)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+              })}
+              {groups.length === 0 && <div className="conv-status">暂无用户发起的轮次</div>}
+            </div>
+            <div className="conv-body">
+              {conv.turns.map((t) => (
+                <div key={t.uuid} id={`turn-${t.uuid}`} className={`conv-turn conv-turn-${t.role}`}>
+                  {t.text}
                 </div>
-              )
-            })}
-            {groups.length === 0 && <div className="conv-status">暂无用户发起的轮次</div>}
-          </div>
-          <div className="conv-body">
-            {conv.turns.map((t) => (
-              <div key={t.uuid} id={`turn-${t.uuid}`} className={`conv-turn conv-turn-${t.role}`}>
-                {t.text}
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </aside>
   )
 }
