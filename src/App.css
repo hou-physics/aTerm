@@ -137,7 +137,7 @@ body {
    class 由 TerminalView.tsx 在 term.buffer.onBufferChange 中切换到 .terminal-host 上。 */
 .terminal-host.alt-screen .xterm .xterm-scrollable-element > .scrollbar { display: none; }
 .section-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .08em; margin: 14px 0 8px; }
-.side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: none; }
 .side-item:hover { background: var(--color-elevated); }
 .side-item .sub { color: var(--color-text-faint); font-size: 11px; }
 .home { padding: 28px 32px; max-width: 980px; margin: 0 auto; }
