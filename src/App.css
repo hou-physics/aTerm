@@ -1,32 +1,9 @@
-:root[data-theme='dark'] {
-  --color-bg: #1a1b26;
-  --color-panel: #16161e;
-  --color-elevated: #1f2030;
-  --color-border: #2a2b3a;
-  --color-text: #c0caf5;
-  --color-text-dim: #787c99;
-  --color-text-faint: #565a7a;
-  --color-accent: #3d59a1;
-  --color-accent-text: #7aa2f7;
-  --color-term-bg: #15161e;
-  --color-tab-close-hover-bg: #3b3d57;
-  --color-tab-close-hover-text: #fff;
-}
-
-:root[data-theme='light'] {
-  --color-bg: #f5f5f7;
-  --color-panel: #ffffff;
-  --color-elevated: #ececf1;
-  --color-border: #d5d5dc;
-  --color-text: #2a2a35;
-  --color-text-dim: #6a6a74;
-  --color-text-faint: #9a9aa4;
-  --color-accent: #3d59a1;
-  --color-accent-text: #2f5cc4;
-  --color-term-bg: #ffffff;
-  --color-tab-close-hover-bg: #d5d5dc;
-  --color-tab-close-hover-text: #2a2a35;
-}
+/* 曾经这里有两个 :root[data-theme='dark'/'light'] 硬编码兜底色块（早期 Tokyo-Night
+   底色的手写值）。自主题系统改为从终端主题派生配色后，applyUiVars() 在每次加载/切换
+   主题时都会把同一批 --color-* 变量以内联样式写在 document.documentElement 上，内联
+   样式的优先级恒高于这里任何选择器，两块规则已完全不可能生效，故删除。data-theme
+   属性本身仍由 applyUiVars() 同步维护（见 derive.ts）；全仓库范围内没有其它 CSS
+   规则依赖 [data-theme] 选择器（已用 grep 核实），删除这两块不影响任何其它样式。 */
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #root { height: 100%; }
@@ -37,15 +14,58 @@ body {
   transition: background-color .15s ease, color .15s ease;
 }
 .app { display: flex; height: 100vh; }
+
+/* 拖拽期间屏蔽文本选择（用户反馈"拖拽会顺带选中相邻文字"）：由 store/dragGhost.ts 的
+   start()/end() 在 document.body 上增删，覆盖标签/窗格标题栏/侧边栏会话三处拖拽源。
+   user-select 是可继承属性，写在 body 上即对全树生效，不需要额外的 `* { }` 规则。 */
+body.dragging-no-select { user-select: none; -webkit-user-select: none; }
+
+/* 拖拽期间光标读作"抓取"，不是文本选择的 I-beam（用户反馈"拖拽窗格标题栏时光标变成
+   文本选择光标"）：由 store/dragGhost.ts 的 start()/end() 与上面的 no-select class
+   同一时机增删。`* ` 通配 + !important 是必须的——光标经过的元素可能自己就带着更具体
+   的 cursor 声明（终端文字是 text、分隔条是 col-resize、按钮是 default 等），拖拽这
+   件事发生在页面最上层，理应无条件盖过它们，光标不该在拖拽途中忽而抓取忽而变回别的
+   形状。 */
+body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
+
+/* 跟随光标的拖拽指示（DragGhost.tsx）：position:fixed，用 transform 定位（由组件按
+   store 里的 x/y 现算写入，避免触发布局），既有强调色系配色，不新增调色板条目。 */
+.drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 20;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--color-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  font-size: 12.5px;
+  opacity: .85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+  pointer-events: none;
+  will-change: transform;
+}
 .sidebar { width: 230px; flex: none; background: var(--color-panel); border-right: 1px solid var(--color-border); padding: 10px; display: flex; flex-direction: column; }
 .sidebar-list { flex: 1; min-height: 0; overflow-y: auto; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.tabbar { display: flex; gap: 4px; padding: 6px 8px 0; background: var(--color-panel); border-bottom: 1px solid var(--color-border); overflow-x: auto; }
+.tabbar { position: relative; display: flex; gap: 4px; padding: 6px 8px 0; background: var(--color-panel); border-bottom: 1px solid var(--color-border); overflow-x: auto; }
+/* 窗格拖出成独立标签（设计文档 §5-C）落在标签栏上的插入位置指示：一条竖线，位置由
+   TabBar.tsx 的 TabBarDropIndicator 按目标标签实测矩形现算写入内联 left。用既有强调色
+   变量，不新增调色板条目；pointer-events:none 与 .pane-drop-indicator 同理，不拦截
+   拖拽过程中持续发生的指针事件。 */
+.tabbar-drop-indicator { position: absolute; top: 4px; bottom: 2px; width: 2px; background: var(--color-accent); border-radius: 1px; z-index: 5; pointer-events: none; }
 .sidebar-toggle { flex: none; align-self: flex-start; position: sticky; left: 0; z-index: 1; width: 24px; height: 26px; margin-right: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .sidebar-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
-.tab { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 7px 7px 0 0; background: var(--color-elevated); color: var(--color-text-dim); cursor: default; white-space: nowrap; font-size: 13px; }
+/* cursor: grab——标签本身是拖拽手柄（TabBar.tsx 场景 A：把已打开的标签拖进窗格区/
+   拖拽排序），hover 时应该读作"可以抓起来"；.tab-close 单独有自己的 cursor:default，
+   不受这里影响（显式声明优先于从父级继承的值，见该规则）。 */
+.tab { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 7px 7px 0 0; background: var(--color-elevated); color: var(--color-text-dim); cursor: grab; white-space: nowrap; font-size: 13px; user-select: none; }
 .tab.active { background: var(--color-bg); color: var(--color-text); }
-.tab-close { padding: 0 2px; border-radius: 4px; }
+.tab-close { padding: 0 2px; border-radius: 4px; cursor: default; }
 .tab-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
 .tab-new { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .tab-new:hover { border-color: var(--color-accent); color: var(--color-text); }
@@ -53,21 +73,115 @@ body {
 .panel-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .home-wrap { position: absolute; inset: 0; overflow-y: auto; }
-.term-wrap { position: absolute; inset: 0; background: var(--color-term-bg); padding: 4px 6px 6px 6px; overscroll-behavior: contain; }
+/* display 在 TabPanes.tsx 里按"是否为激活标签"在 flex/none 间切换（保留原先
+   block/none 的显隐策略，只是行内容从单个终端换成横向排列的窗格行）。 */
+.term-wrap { position: absolute; inset: 0; background: var(--color-term-bg); padding: 4px 6px 6px 6px; overscroll-behavior: contain; display: flex; }
 .term-wrap .xterm-viewport { overscroll-behavior: contain; }
 .terminal-host { width: 100%; height: 100%; }
 
+/* 单个窗格：flexGrow 由 TabPanes.tsx 按 Tab.paneWidths 的占比现算（flexBasis:0 +
+   flexShrink:0，纯按 grow 权重分配剩余空间，不受分隔条固定宽度影响，见该文件注释）。
+   边框默认透明，单窗格标签下恒不显示标题栏、也不会带上 .pane-focused，观感与分屏前
+   完全一致；只有多窗格时聚焦窗格才会真正描边。 */
+.pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid transparent; border-radius: 4px; overflow: hidden; }
+.pane.pane-focused { border-color: var(--color-accent); }
+/* 持有 PTY 的窗格，这块本身不再有可见内容（不含 TerminalView）——它只是一个几何占位，
+   供 TerminalLayer.tsx 用 getBoundingClientRect() 量出 top/left/width/height，再把
+   绝对定位的 .terminal-wrapper（见下方）精确盖在它正上方。没有 PTY 的窗格仍在这里
+   原地渲染 PanePicker，与终端层无关。 */
+.pane-body { flex: 1; min-height: 0; min-width: 0; }
+
+/* 扁平终端层（TerminalLayer.tsx）：每个持有 PTY 的窗格一个包裹层，绝对定位覆盖在其
+   插槽（上面的 .pane-body[data-pane-slot]）正上方，top/left/width/height/borderRadius
+   由 TerminalLayer 按插槽实测矩形逐条内联写入（见 paneGeometry.ts 与该组件顶部注释）。
+   包含块是 .content（position:relative，见上）——TerminalLayer 与各标签的 TabPanes 是
+   它的同级子元素，共享同一个包含块，插槽矩形减去 .content 自身矩形就是这里要写的
+   坐标，不需要再乘任何缩放系数。overflow:hidden 配合内联的 borderRadius，复原原先
+   终端嵌在 .pane 内部时被其 border-radius+overflow:hidden 裁出的圆角（挪到扁平层后
+   不会再自动继承祖先的裁剪，需要显式补回，否则窗格四角会从"被裁去的圆角"变成方角）。 */
+.terminal-wrapper { position: absolute; overflow: hidden; }
+
+/* 相邻窗格间的拖拽分隔条：与 .conv-panel-resize-handle 同一处理——命中区（含左右
+   4px 内边距，共 9px）比视觉细线（1px，background-clip: content-box）宽，方便抓取
+   又不会让细线本身显得粗。 */
+.pane-divider { flex: none; width: 1px; padding: 0 4px; box-sizing: content-box; background: var(--color-border); background-clip: content-box; cursor: col-resize; }
+.pane-divider:hover, .pane-divider:active { background-color: var(--color-accent); }
+
+/* 窗格标题栏：约 24px，仅多窗格标签渲染（见 TabPanes.tsx 的 showTitlebar）。 */
+/* cursor: grab——同 .tab，窗格标题栏是拖拽手柄（TabPanes.tsx 拖出成独立标签）；
+   .pane-titlebar-close 单独有自己的 cursor:default，不受这里影响。 */
+.pane-titlebar { flex: none; height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px 0 8px; font-size: 12px; color: var(--color-text-dim); background: var(--color-elevated); border-bottom: 1px solid var(--color-border); cursor: grab; }
+.pane-titlebar-focused { color: var(--color-text); border-bottom-color: var(--color-accent); }
+.pane-titlebar-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-titlebar-close { flex: none; padding: 0 4px; border-radius: 4px; cursor: default; }
+.pane-titlebar-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
+
+/* 通用右键菜单（自包含小组件 ContextMenu.tsx）：窗格标题栏「移出为独立标签/关闭窗格」
+   （设计文档 §5-C）与标签栏「拆分为独立标签/关闭标签」共用同一份样式/组件。
+   position:fixed 直接定位到光标处（组件自己钳在视口内），风格与 .theme-picker/
+   .pane-picker-item 同一基调——边框、既有强调色变量，不引入阴影或新配色。 */
+.context-menu { position: fixed; z-index: 10; display: flex; flex-direction: column; padding: 4px; min-width: 140px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-panel); }
+.context-menu-item { padding: 6px 10px; border-radius: 6px; font-size: 12.5px; color: var(--color-text); cursor: default; white-space: nowrap; }
+.context-menu-item:hover { background: var(--color-elevated); }
+
+/* ⌘D 新建窗格后、选定会话之前的选择列表（设计文档 §5-A），视觉上沿用侧边栏
+   .side-item / 主页 .thread-row 的既有条目样式基调。 */
+.pane-picker { height: 100%; overflow-y: auto; padding: 10px; }
+.pane-picker-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-picker-item:hover { background: var(--color-elevated); }
+.pane-picker-item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-picker-item .sub { color: var(--color-text-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-picker-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; margin: 10px 0 6px; }
+
+/* 顶部搜索框：与 .cmd-input 同一基调，收窄内边距/字号以适应窗格最小 320px 宽度。 */
+.pane-picker-search { width: 100%; padding: 6px 8px; margin-bottom: 8px; border-radius: 6px; border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-text); font-size: 12.5px; outline: none; }
+.pane-picker-search:focus { border-color: var(--color-accent); }
+
+/* 「全部项目」段：每个项目一行标题（📁 + 会话数），点击展开/收起其会话列表，
+   与 HomePage.tsx 的 .card/.thread-list 同一交互，只是纵向列表而非卡片网格。 */
+.pane-picker-project { margin-bottom: 2px; }
+.pane-picker-project-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: default; }
+.pane-picker-project-head:hover { background: var(--color-elevated); }
+.pane-picker-project-head .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.pane-picker-project-head .sub { color: var(--color-text-faint); font-size: 11px; flex: none; }
+.pane-picker-thread-list { margin: 0 0 4px 10px; padding-left: 6px; border-left: 1px solid var(--color-border); }
+.pane-picker-subpick { margin: 2px 0 6px; padding: 4px 0 4px 10px; border-left: 2px solid var(--color-border); }
+.pane-picker-empty { color: var(--color-text-faint); font-size: 12px; padding: 8px 6px; }
+
+/* ⌘D 被拒绝（已达 3 个窗格 / 窄窗口装不下）时的内联轻提示：浮在内容区底部居中，
+   定时自行消失（见 store/hint.ts 的 useHint），不是弹窗。 */
+.pane-hint { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px; background: var(--color-elevated); color: var(--color-text); border: 1px solid var(--color-border); font-size: 12.5px; z-index: 5; pointer-events: none; }
+
+/* 拖放落点指示（设计文档 §5-B）：半透明色块覆盖目标窗格的左半或右半，位置/尺寸由
+   DropIndicator.tsx 按目标窗格实测矩形现算写入内联样式（与 .terminal-wrapper 同一套
+   坐标换算）。用既有强调色变量叠加透明度，不引入新的调色板条目；pointer-events:none
+   确保它绝不拦截拖拽过程中持续发生的指针事件（拖拽源用 setPointerCapture 接管，
+   指示条只是纯视觉浮层）。 */
+.pane-drop-indicator { position: absolute; background: var(--color-accent); opacity: .18; border-radius: 4px; z-index: 4; pointer-events: none; }
+
 .sidebar-list::-webkit-scrollbar,
-.home-wrap::-webkit-scrollbar { width: 8px; }
+.home-wrap::-webkit-scrollbar,
+.theme-picker::-webkit-scrollbar,
+.theme-picker-list::-webkit-scrollbar,
+.pane-picker::-webkit-scrollbar { width: 8px; }
 .sidebar-list::-webkit-scrollbar-track,
-.home-wrap::-webkit-scrollbar-track { background: transparent; }
+.home-wrap::-webkit-scrollbar-track,
+.theme-picker::-webkit-scrollbar-track,
+.theme-picker-list::-webkit-scrollbar-track,
+.pane-picker::-webkit-scrollbar-track { background: transparent; }
 .sidebar-list::-webkit-scrollbar-thumb,
-.home-wrap::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+.home-wrap::-webkit-scrollbar-thumb,
+.theme-picker::-webkit-scrollbar-thumb,
+.theme-picker-list::-webkit-scrollbar-thumb,
+.pane-picker::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 .sidebar-list::-webkit-scrollbar-thumb:hover,
-.home-wrap::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+.home-wrap::-webkit-scrollbar-thumb:hover,
+.theme-picker::-webkit-scrollbar-thumb:hover,
+.theme-picker-list::-webkit-scrollbar-thumb:hover,
+.pane-picker::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
 
 /* xterm 6 用 VS Code ScrollableElement 渲染滚动条（非原生）。滑块颜色由 xterm 主题以内联样式写入（见
-   TerminalView.tsx 的 XTERM_THEME），CSS 管不到；这里只负责阻止其空闲 800ms 后的淡出，让滚动条常驻可见。
+   src/themes/derive.ts 的 buildXtermTheme），CSS 管不到；这里只负责阻止其空闲 800ms 后的淡出，让滚动条常驻可见。
    选择器特异度 0,4,0 / 0,5,0，高于 xterm 自带的 0,3,0，无需 !important 即可覆盖。 */
 .xterm .xterm-scrollable-element > .scrollbar.invisible,
 .xterm .xterm-scrollable-element > .scrollbar.invisible.fade { opacity: 1; }
@@ -76,7 +190,9 @@ body {
    class 由 TerminalView.tsx 在 term.buffer.onBufferChange 中切换到 .terminal-host 上。 */
 .terminal-host.alt-screen .xterm .xterm-scrollable-element > .scrollbar { display: none; }
 .section-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .08em; margin: 14px 0 8px; }
-.side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* cursor: grab——同 .tab，会话条目是拖拽手柄（Sidebar.tsx 场景 B：从「最近会话」
+   拖入窗格区）。 */
+.side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: grab; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: none; }
 .side-item:hover { background: var(--color-elevated); }
 .side-item .sub { color: var(--color-text-faint); font-size: 11px; }
 .home { padding: 28px 32px; max-width: 980px; margin: 0 auto; }
@@ -94,39 +210,137 @@ body {
 .thread-row .time { color: var(--color-text-faint); flex: none; }
 .new-conv { color: var(--color-accent-text); }
 
-.theme-toggle {
+.theme-switcher {
+  position: relative;
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--color-border);
 }
-.theme-toggle button {
+.theme-switcher-trigger {
   width: 100%;
-  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
   background: var(--color-elevated);
   color: var(--color-text-dim);
-  font-size: 12.5px;
-  cursor: default;
   font-family: inherit;
+  cursor: default;
+  text-align: left;
 }
-.theme-toggle button:hover {
+.theme-switcher-trigger:hover {
   border-color: var(--color-accent);
   color: var(--color-text);
 }
+.theme-switcher-dot { flex: none; width: 16px; height: 16px; border-radius: 5px; border: 1px solid var(--color-border); }
+.theme-switcher-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
+.theme-switcher-name { font-size: 12.5px; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-switcher-mode { font-size: 10.5px; color: var(--color-text-faint); }
 
-.conv-panel-dock { width: 400px; flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.conv-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+/* 主题选择面板：从左下角触发按钮向上展开，浮在侧栏内容之上（sidebar 无 overflow 裁剪，
+   不会被裁掉）。整体走应用一贯的"边框而非阴影"扁平风格。 */
+.theme-picker {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(420px, 70vh);
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-panel);
+  overflow-y: auto;
+  z-index: 3;
+}
+.theme-picker-modes { flex: none; display: flex; gap: 4px; }
+.theme-picker-modes button {
+  flex: 1;
+  padding: 5px 4px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-elevated);
+  color: var(--color-text-dim);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: default;
+}
+.theme-picker-modes button:hover { border-color: var(--color-accent); color: var(--color-text); }
+.theme-picker-modes button.active { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
+.theme-picker-group-label { font-size: 10.5px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; margin: 2px 0 4px; }
+.theme-picker-list { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+.theme-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: default;
+  text-align: left;
+}
+.theme-row:hover { background: var(--color-elevated); color: var(--color-text); }
+.theme-row.active { background: var(--color-elevated); color: var(--color-text); box-shadow: inset 0 0 0 1px var(--color-accent); }
+.theme-row-swatches { flex: none; display: flex; gap: 2px; }
+.theme-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--color-border); }
+.theme-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.conv-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+/* 抓取区必须整块落在 .conv-panel 的盒子内：祖先 .conv-panel-dock 有 overflow:hidden，
+   任何画在其内边距盒之外的内容既不会绘制也不会命中测试，会被静默裁掉。此前用
+   left:-4px 让抓取区跨骑在面板左边缘上，向外伸出的一半正好落在裁剪区外，实际可
+   抓宽度只剩一半（~5px）。改为不越界的非对称内边距：视觉细线仍在 x=0（面板左
+   边缘，观感不变，因为 -4px 的 left 与 4px 的左内边距互相抵消，新写法直接从 0
+   起算是同一个位置），抓取区整块向右（面板内部）铺开到 9px，不再跨边界。 */
+.conv-panel-resize-handle { position: absolute; top: 0; bottom: 0; left: 0; width: 1px; padding: 0 8px 0 0; box-sizing: content-box; background: transparent; background-clip: content-box; cursor: col-resize; z-index: 2; }
+.conv-panel-resize-handle:hover, .conv-panel-resize-handle:active { background-color: var(--color-accent); }
 .conv-header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
 .conv-title { font-size: 13px; font-weight: 600; }
-.conv-refresh { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
-.conv-refresh:hover { border-color: var(--color-accent); color: var(--color-text); }
-.conv-timeline { flex: none; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--color-border); padding: 6px 10px; }
-.conv-date-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .04em; margin: 10px 0 4px; }
+.conv-header-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.conv-refresh, .conv-timeline-toggle { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.conv-refresh:hover, .conv-timeline-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
+/* 时间线区（日期分组列表）与正文区共同的父容器，撑满头部之下的剩余高度；引入这层
+   包裹只是为了给拖拽分隔条提供一个可测量的"内容区高度"（见 ConversationPanel.tsx 的
+   timelineHeightCap /contentRef），本身不承担视觉样式。 */
+.conv-panel-content { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 高度由 ConversationPanel.tsx 通过内联 style 驱动（拖拽/折叠），不在这里写死；
+   折叠态下高度与内边距一并被内联 style 清零，不靠这里的 padding 兜底。max-height: 60%
+   是渲染时的安全网：内联的 timelineHeight 理论上应该已经被 ConversationPanel.tsx 的
+   render-time 校正 effect 钳过（见该文件 useEffect 对 timelineHeightCap 的调用），
+   但那段 JS 修正在 effect 跑完之前的那一帧、以及它取不到内容区高度时（尚未布局）都可能
+   慢半拍或干脆不生效，这条 CSS 规则本身零成本、任何时候都成立，确保就算内联高度一时
+   没被钳住，时间线也不会把分隔条和正文挤出可视区、变得连鼠标都够不到。 */
+.conv-timeline { flex: none; max-height: 60%; overflow-y: auto; padding: 6px 10px; }
+/* 时间线区与正文区之间的分隔条：整块落在 .conv-panel-content 的常规文档流里（真实占位的
+   flex 子项，不是绝对定位悬浮在边界上），天然不会被任何祖先的 overflow:hidden 裁掉——
+   这正是 .conv-panel-resize-handle 早年"手柄跨骑在裁剪边界上、抓取区被裁掉一半"那个
+   教训的反面教材，这里直接用不越界的写法从一开始就避免同一个坑。视觉上只在内容盒里
+   画一条 1px 细线（background-clip: content-box），上下各留 4px 内边距把命中区撑到 9px
+   ——与本文件里 .conv-panel-resize-handle（宽度拖拽手柄）的 9px 命中区看齐，
+   不再是比它小的 7px；不加任何箭头/圆点之类的图形提示。 */
+.conv-timeline-divider { flex: none; height: 1px; padding: 4px 0; box-sizing: content-box; background: var(--color-border); background-clip: content-box; cursor: row-resize; }
+.conv-timeline-divider:hover, .conv-timeline-divider:active { background-color: var(--color-accent); }
+/* 日期标题不带前置符号（用户明确不要任何图形提示）。可点性改由 cursor + hover 背景/字色
+   传达；负 margin 把 hover 命中区往左右各扩 4px（超出文字本身的排版宽度），让它有块可点的
+   观感，同时不影响文字相对下方时间线条目的水平位置（padding-left 依旧从 0 起算）。 */
+.conv-date-label { display: flex; align-items: center; width: calc(100% + 8px); border: none; background: none; padding: 3px 4px; margin: 10px -4px 4px -4px; border-radius: 6px; font-family: inherit; font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .04em; text-align: left; cursor: pointer; transition: background-color .12s ease, color .12s ease; }
+.conv-date-label:hover { background: var(--color-elevated); color: var(--color-text); }
 .conv-date-label:first-child { margin-top: 4px; }
-.conv-timeline-item { display: flex; align-items: baseline; gap: 6px; padding: 3px 4px; border-radius: 6px; font-size: 12.5px; cursor: default; overflow: hidden; }
+.conv-date-count { flex: none; margin-left: auto; color: var(--color-text-faint); }
+/* 缩进层级代替圆点标记条目从属于哪个日期分组：日期标题不再带前置三角，条目仍固定缩进
+   一级，与标题的 hover 内边距无关，只是视觉上把条目"挂"在标题下面一层。 */
+.conv-timeline-item { display: flex; align-items: baseline; gap: 6px; padding: 3px 4px 3px 13px; border-radius: 6px; font-size: 12.5px; cursor: default; overflow: hidden; }
 .conv-timeline-item:hover { background: var(--color-elevated); }
-.conv-timeline-item .dot { color: var(--color-accent-text); font-size: 8px; flex: none; }
 .conv-timeline-item .time { color: var(--color-text-faint); flex: none; }
 .conv-timeline-item .summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conv-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; }

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Terminal, type ITheme } from '@xterm/xterm'
+import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
@@ -7,6 +7,7 @@ import { ptyResize, ptyWrite } from '../ipc'
 import { attachPty } from '../ptyBuffer'
 import { useLayout } from '../store/layout'
 import { useTheme } from '../store/theme'
+import { buildXtermTheme } from '../themes/derive'
 import { createWheelAmplifier, wheelDeltaToLines } from '../wheel'
 
 // alt-screen（Claude Code 等 TUI）下滚轮换算的放大倍数，便于调参。
@@ -14,21 +15,9 @@ const ALT_WHEEL_MULTIPLIER = 3
 // 应用自己接管鼠标上报（如 Claude TUI）时，每个真实滚轮事件额外补发 (n-1) 个合成事件的倍数，便于调参。
 const ALT_WHEEL_MOUSE_MULTIPLIER = 3
 
-// 滚动条滑块颜色必须走主题设置：xterm 的 SmoothScrollableElement 把颜色写成内联样式，CSS 规则会被覆盖。
-const XTERM_THEME: Record<'dark' | 'light', ITheme> = {
-  dark: {
-    background: '#15161e', foreground: '#c0caf5', cursor: '#c0caf5', selectionBackground: '#3d59a166',
-    scrollbarSliderBackground: 'rgba(192,202,245,0.35)',
-    scrollbarSliderHoverBackground: 'rgba(192,202,245,0.55)',
-    scrollbarSliderActiveBackground: 'rgba(192,202,245,0.75)',
-  },
-  light: {
-    background: '#ffffff', foreground: '#2a2a35', cursor: '#2a2a35', selectionBackground: '#3d59a133',
-    scrollbarSliderBackground: 'rgba(42,42,53,0.35)',
-    scrollbarSliderHoverBackground: 'rgba(42,42,53,0.55)',
-    scrollbarSliderActiveBackground: 'rgba(42,42,53,0.75)',
-  },
-}
+// xterm 的主题现在直接来自 src/themes 里挑选出的真实 Theme（见 buildXtermTheme），不再是
+// 这里手写的两档硬编码色值——这样终端配色与全站 UI 配色（见 App.css / themes/derive.ts）
+// 才能共用同一套调色板数据。
 
 export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean }) {
   const elRef = useRef<HTMLDivElement>(null)
@@ -48,7 +37,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       // 默认 1 档对触控板过慢；按住 Option 走 fastScroll 档。
       scrollSensitivity: 5,
       fastScrollSensitivity: 12,
-      theme: XTERM_THEME[useTheme.getState().resolved],
+      theme: buildXtermTheme(useTheme.getState().activeTheme),
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -117,8 +106,8 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     window.addEventListener('keydown', onDiagKeyDown)
 
     const unsubTheme = useTheme.subscribe((state, prevState) => {
-      if (state.resolved !== prevState.resolved) {
-        term.options.theme = XTERM_THEME[state.resolved]
+      if (state.activeTheme.id !== prevState.activeTheme.id) {
+        term.options.theme = buildXtermTheme(state.activeTheme)
       }
     })
 
