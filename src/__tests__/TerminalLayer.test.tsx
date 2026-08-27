@@ -109,6 +109,52 @@ describe('TerminalLayer — 扁平挂载：终端实例不随标签切换/窗格
   })
 })
 
+// 跨标签移动窗格（设计文档 §5-B 场景 A："把已打开的标签拖进窗格区"，store 层实现见
+// movePanesToTab，交互层见 TabBar.test.tsx）：这是本次改动最关键的不变量所在——移动
+// 必须原样保留 pane.id/ptyId，且不能让 <TerminalView> 被卸载重挂（否则会销毁 xterm
+// 实例、丢光回滚缓冲，见 .superpowers/flat-mount-report.md）。这里直接调用 store 方法
+// （不模拟真实指针拖拽，那部分交互已在 TabBar.test.tsx 覆盖），只验证移动前后的 DOM
+// 节点身份与挂载次数——与本文件顶部"标签切换/窗格增删不销毁重挂"那组用例同一断言
+// 手法（toBe 而非"看起来一样"，mountCounts 而非重渲染次数）。
+describe('TerminalLayer — 跨标签移动窗格后，终端 DOM 节点与其 id/ptyId 都原样保留', () => {
+  it('移动前后同一个 DOM 节点引用，mount effect 不重新跑一次', async () => {
+    const SOURCE = { id: 'tab-source', kind: 'term' as const, title: 'S', panes: [{ id: 'pane-s', ptyId: 'pty-s', title: 'S' }], activePaneId: 'pane-s' }
+    const TARGET = { id: 'tab-target', kind: 'term' as const, title: 'T', panes: [{ id: 'pane-t', ptyId: 'pty-t', title: 'T' }], activePaneId: 'pane-t' }
+    useTabs.setState({ tabs: [HOME, SOURCE, TARGET], activeId: 'tab-target' })
+    await renderApp()
+
+    const before = screen.getByTestId('term-pty-s')
+    expect(mountCounts.get('pty-s')).toBe(1)
+
+    await act(async () => {
+      const ok = useTabs.getState().movePanesToTab('tab-source', 'tab-target', { paneId: 'pane-t', side: 'right' })
+      expect(ok).toBe(true)
+    })
+
+    const after = screen.getByTestId('term-pty-s')
+    expect(after).toBe(before) // 同一个 DOM 节点引用——没有被卸载重挂
+    expect(mountCounts.get('pty-s')).toBe(1) // mount effect 仍然只跑过一次
+
+    const movedPane = useTabs.getState().tabs.find((t) => t.id === 'tab-target')!.panes.find((p) => p.id === 'pane-s')!
+    expect(movedPane.id).toBe('pane-s') // pane id 原样不变
+    expect(movedPane.ptyId).toBe('pty-s') // ptyId 原样不变（同一个 PTY，未重新 spawn）
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-source')).toBeUndefined() // 源标签整体移除
+  })
+
+  it('源标签的终端节点移动后仍然挂载着（现在归属目标标签），只是显隐随激活标签切换', async () => {
+    const SOURCE = { id: 'tab-source', kind: 'term' as const, title: 'S', panes: [{ id: 'pane-s', ptyId: 'pty-s', title: 'S' }], activePaneId: 'pane-s' }
+    const TARGET = { id: 'tab-target', kind: 'term' as const, title: 'T', panes: [{ id: 'pane-t', ptyId: 'pty-t', title: 'T' }], activePaneId: 'pane-t' }
+    useTabs.setState({ tabs: [HOME, SOURCE, TARGET], activeId: 'tab-target' })
+    await renderApp()
+
+    await act(async () => { useTabs.getState().movePanesToTab('tab-source', 'tab-target', { paneId: 'pane-t', side: 'left' }) })
+
+    // 移动后 pane-s 归属 tab-target（当前激活标签），其包裹层应可见（display 不是 none）
+    const wrapper = screen.getByTestId('term-pty-s').closest('.terminal-wrapper') as HTMLElement
+    expect(wrapper.style.display).not.toBe('none')
+  })
+})
+
 describe('TerminalLayer — 点击终端聚焦所在窗格（设计文档 §6，终端现在渲染在扁平层里）', () => {
   it('点击某个非聚焦窗格的终端会把该窗格设为 activePaneId', async () => {
     const TWO = {
