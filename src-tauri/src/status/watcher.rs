@@ -387,9 +387,21 @@ fn run_loop(app: AppHandle, rx: std::sync::mpsc::Receiver<notify::Result<notify:
     engine_state.seed_hook_events();
     engine_state.seed_process_registry();
 
-    // 初始快照：静默写入 store，不发事件——前端用 `get_session_statuses()` 主动拉取
-    // 这份初始快照，事件只用来推送之后发生的变化（见 mod.rs 里该命令的文档）。
+    // 初始快照：写入 store，并在扫描完成的这一刻发一次 `session-status` 事件（哪怕这次
+    // 扫描一个会话都没找到，空数组本身也是"初始扫描已经跑完"这个事实的信号）。
+    //
+    // 这里刻意不套用"只在状态变化时才发事件"那条规则（spec §8 那条规则针对的是*之后*
+    // 的增量更新，见 apply_and_collect_changes）：`get_session_statuses()` 命令是前端在
+    // 挂载时主动拉取的，但初始扫描本身跑在这个后台线程里、异步完成，二者之间存在竞态
+    // ——前端拉取的那一刻这份 store 很可能还是空的（`rescan_projects_dir` 遍历
+    // `~/.claude/projects` 全量目录，量级接近 `list_projects()`），此后就再也没有第二次
+    // 拉取的机会（后续只靠事件驱动的增量合并）。如果这里不额外发一次事件，前端会永远
+    // 停留在那次过早调用拿到的空快照上，直到*下一次真实变化*才第一次收到数据——现实里
+    // 可能是几分钟甚至更久之后。发这一次事件后，前端 `applyEntries` 会按
+    // `updatedAtMs` 合并（见 `src/store/status.ts`），不需要关心它和先前拉取的快照
+    // 谁先谁后到达。
     let store = app.state::<StatusStore>();
+    let mut initial_payloads: Vec<SessionStatusPayload> = Vec::new();
     {
         let now = now_ms();
         let mut guard = match store.0.lock() {
@@ -398,20 +410,20 @@ fn run_loop(app: AppHandle, rx: std::sync::mpsc::Receiver<notify::Result<notify:
         };
         for tk in engine_state.thread_keys() {
             if let Some(c) = engine_state.compute_status(&tk, now) {
-                guard.insert(
-                    tk,
-                    SessionStatusPayload {
-                        dir_name: c.dir_name,
-                        root_key: c.root_key,
-                        session_id: c.session_id,
-                        status: c.status,
-                        last_activity_ms: c.last_activity_ms,
-                        updated_at_ms: now,
-                    },
-                );
+                let payload = SessionStatusPayload {
+                    dir_name: c.dir_name,
+                    root_key: c.root_key,
+                    session_id: c.session_id,
+                    status: c.status,
+                    last_activity_ms: c.last_activity_ms,
+                    updated_at_ms: now,
+                };
+                guard.insert(tk, payload.clone());
+                initial_payloads.push(payload);
             }
         }
     }
+    let _ = app.emit("session-status", initial_payloads);
 
     let mut debouncer: Debouncer<WatchTarget> = Debouncer::new(DEBOUNCE_MS);
     loop {

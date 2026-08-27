@@ -67,12 +67,12 @@ pub fn start(app: &AppHandle) -> watcher::WatcherGuard {
     watcher::start(app.clone())
 }
 
-/// 返回当前的状态快照，供前端启动时直接拉取一次，不必等待第一条 `session-status`
-/// 事件——初始扫描在后台线程异步完成，命令被调用的瞬间快照可能还是空的或不完整，
-/// 这是预期行为：初始扫描本身不发事件（见 `watcher::run_loop` 里的说明），随后台
-/// 扫描推进 store 会被逐步填满；前端可以在收到第一条 `session-status` 事件后视为
-/// "增量更新已经开始"，但不应假设 `get_session_statuses()` 在应用刚启动的一瞬间就
-/// 是完整的。
+/// 返回当前的状态快照，供前端启动时直接拉取一次。初始扫描在后台线程异步完成，命令
+/// 被调用的瞬间快照可能还是空的或不完整——但这不会让前端永远停留在这份不完整快照上：
+/// 初始扫描一旦完成，`watcher::run_loop` 会额外发一次 `session-status` 事件把完整结果
+/// 推给前端（哪怕结果是空数组，也代表"扫描已完成"这个事实），前端 store 按
+/// `updatedAtMs` 合并快照与事件，不需要关心两者到达的先后顺序（见
+/// `src/store/status.ts`）。
 #[tauri::command]
 pub fn get_session_statuses(store: State<StatusStore>) -> Vec<SessionStatusPayload> {
     match store.0.lock() {
