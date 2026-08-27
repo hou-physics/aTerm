@@ -99,6 +99,11 @@ function PaneItem({
       className={`pane${showTitlebar && focused ? ' pane-focused' : ''}`}
       style={{ flexGrow: width, flexShrink: 0, flexBasis: 0 }}
       onPointerDownCapture={onPointerDownCapture}
+      // 拖放落点解析（设计文档 §5-B）的稳定查询锚点：与只在持有 PTY 时才出现的
+      // data-pane-slot（TerminalLayer.tsx 专用，供绝对定位终端包裹层）不同，这里
+      // 不管窗格是终端还是还在待选（PanePicker）都恒定存在——拖拽落点需要覆盖
+      // 全部窗格，不只是已经启动终端的那些。见 paneDrop.ts / TabBar.tsx / Sidebar.tsx。
+      data-pane-id={pane.id}
     >
       {showTitlebar && <PaneTitleBar title={pane.title} focused={focused} onClose={onClose} />}
       {/* 只是几何占位：真正的 <TerminalView> 现在渲染在 TerminalLayer.tsx（App.tsx 里

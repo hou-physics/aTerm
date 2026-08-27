@@ -19,6 +19,7 @@ vi.mock('../closeRequest', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 
 import App from '../App'
+import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
 
@@ -28,6 +29,10 @@ const TAB_B = { id: 'tab-b', kind: 'term' as const, title: 'B', panes: [{ id: 'p
 
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
+  // hint 现在是独立 store（见 store/hint.ts），不再随 App 每次挂载天然重置——手动清空，
+  // 避免上一个测试触发的轻提示（真实 setTimeout，2200ms 后才会自行清除）泄漏进下一个
+  // 测试的断言。
+  useHint.setState({ message: null })
 })
 
 // App 挂载时会触发一次异步的 useSessions().refresh()（mock 的 listProjects 也是个

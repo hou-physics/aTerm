@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampDividerDrag, equalPaneWidths, fitsPanes, MAX_PANES, MIN_PANE_WIDTH_PX, neighborPaneId } from './paneLayout'
+import { clampDividerDrag, decidePaneFit, equalPaneWidths, fitsPanes, MAX_PANES, MIN_PANE_WIDTH_PX, neighborPaneId } from './paneLayout'
 
 describe('equalPaneWidths', () => {
   it('1 个窗格占满', () => {
@@ -107,6 +107,22 @@ describe('neighborPaneId：⌘⌥←/→ 焦点移动，边界不循环', () => 
   it('activePaneId 未知或缺省时落到第一个窗格', () => {
     expect(neighborPaneId(ids, undefined, 1)).toBe('a')
     expect(neighborPaneId(ids, 'not-found', -1)).toBe('a')
+  })
+})
+
+describe('decidePaneFit：窄窗口降级判断（设计文档 §8），⌘D 与拖拽两个新建/移动窗格入口共用', () => {
+  it('内容区本身就够宽：直接 fits，不管面板是否展开', () => {
+    expect(decidePaneFit(2, 640, false, 400)).toBe('fits')
+    expect(decidePaneFit(2, 640, true, 400)).toBe('fits')
+  })
+  it('内容区不够，但收起展开着的面板后腾出的宽度够：collapse-panel', () => {
+    expect(decidePaneFit(2, 600, false, 400)).toBe('collapse-panel') // 600+400=1000 >= 640
+  })
+  it('内容区不够，面板已经收起（没有面板宽度可腾）：refuse', () => {
+    expect(decidePaneFit(2, 600, true, 400)).toBe('refuse')
+  })
+  it('内容区不够，收起面板后仍然不够：refuse', () => {
+    expect(decidePaneFit(2, 300, false, 200)).toBe('refuse') // 300+200=500 < 640
   })
 })
 

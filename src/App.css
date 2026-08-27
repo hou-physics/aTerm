@@ -96,8 +96,15 @@ body {
 .pane-picker-empty { color: var(--color-text-faint); font-size: 12px; padding: 8px 6px; }
 
 /* ⌘D 被拒绝（已达 3 个窗格 / 窄窗口装不下）时的内联轻提示：浮在内容区底部居中，
-   定时自行消失（见 App.tsx 的 showHint），不是弹窗。 */
+   定时自行消失（见 store/hint.ts 的 useHint），不是弹窗。 */
 .pane-hint { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px; background: var(--color-elevated); color: var(--color-text); border: 1px solid var(--color-border); font-size: 12.5px; z-index: 5; pointer-events: none; }
+
+/* 拖放落点指示（设计文档 §5-B）：半透明色块覆盖目标窗格的左半或右半，位置/尺寸由
+   DropIndicator.tsx 按目标窗格实测矩形现算写入内联样式（与 .terminal-wrapper 同一套
+   坐标换算）。用既有强调色变量叠加透明度，不引入新的调色板条目；pointer-events:none
+   确保它绝不拦截拖拽过程中持续发生的指针事件（拖拽源用 setPointerCapture 接管，
+   指示条只是纯视觉浮层）。 */
+.pane-drop-indicator { position: absolute; background: var(--color-accent); opacity: .18; border-radius: 4px; z-index: 4; pointer-events: none; }
 
 .sidebar-list::-webkit-scrollbar,
 .home-wrap::-webkit-scrollbar,

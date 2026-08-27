@@ -1,15 +1,17 @@
 import './ptyBuffer'
 import './closeRequest'
 import './App.css'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { newTerminal } from './actions'
 import { ConversationPanel } from './components/ConversationPanel'
+import { DropIndicator } from './components/DropIndicator'
 import { HomePage } from './components/HomePage'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
 import { TerminalLayer } from './components/TerminalLayer'
-import { fitsPanes, MAX_PANES, neighborPaneId } from './paneLayout'
+import { decidePaneFit, MAX_PANES, neighborPaneId } from './paneLayout'
+import { useHint } from './store/hint'
 import { useLayout } from './store/layout'
 import { useSessions } from './store/sessions'
 import { useTabs } from './store/tabs'
@@ -19,19 +21,11 @@ export default function App() {
   const refresh = useSessions((s) => s.refresh)
   const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed)
   const contentRef = useRef<HTMLDivElement>(null)
-  // ⌘D 拒绝新建窗格（已达 3 个 / 窄窗口装不下）时的轻提示：不用对话框，几秒后自行
-  // 消失（设计文档 §5-A"无对话，内联自消失提示即可"）。只是 App 内部的瞬时 UI
-  // 状态，不进 store。
-  const [hint, setHint] = useState<string | null>(null)
-  const hintTimerRef = useRef<number | undefined>(undefined)
-  const showHint = useCallback((msg: string) => {
-    setHint(msg)
-    if (hintTimerRef.current) window.clearTimeout(hintTimerRef.current)
-    hintTimerRef.current = window.setTimeout(() => setHint(null), 2200)
-  }, [])
-  useEffect(() => () => {
-    if (hintTimerRef.current) window.clearTimeout(hintTimerRef.current)
-  }, [])
+  // ⌘D 拒绝新建窗格（已达 3 个 / 窄窗口装不下）、以及 TabBar.tsx/Sidebar.tsx 两个
+  // 拖拽入口各自的同类拒绝，共用同一条内联轻提示（store/hint.ts）：不用对话框，
+  // 几秒后自行消失（设计文档 §5-A"无对话，内联自消失提示即可"），三处触发、一处
+  // 渲染，不写第二套提示机制。
+  const hint = useHint((s) => s.message)
   useEffect(() => {
     refresh().catch(console.error)
     const onFocus = () => { refresh().catch(console.error) }
@@ -98,18 +92,19 @@ export default function App() {
         if (!tab || tab.kind !== 'term' || !tab.activePaneId) return
         const nextCount = tab.panes.length + 1
         if (nextCount > MAX_PANES) {
-          showHint('最多支持 3 个窗格')
+          useHint.getState().show('最多支持 3 个窗格')
           return
         }
         const contentWidth = contentRef.current?.clientWidth ?? 0
         const layout = useLayout.getState()
-        if (fitsPanes(nextCount, contentWidth)) {
+        const decision = decidePaneFit(nextCount, contentWidth, layout.panelCollapsed, layout.panelWidth)
+        if (decision === 'fits') {
           useTabs.getState().addPane(tab.id, tab.activePaneId)
-        } else if (!layout.panelCollapsed && fitsPanes(nextCount, contentWidth + layout.panelWidth)) {
+        } else if (decision === 'collapse-panel') {
           layout.togglePanel()
           useTabs.getState().addPane(tab.id, tab.activePaneId)
         } else {
-          showHint('窗口太窄，放不下新窗格')
+          useHint.getState().show('窗口太窄，放不下新窗格')
         }
       } else if (e.altKey && (key === 'arrowleft' || key === 'arrowright')) {
         e.preventDefault()
@@ -128,7 +123,7 @@ export default function App() {
     // preventDefault/stopPropagation，其余按键不受影响，仍会照常落到终端。
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [showHint])
+  }, [])
   return (
     <div className="app">
       {!sidebarCollapsed && <aside className="sidebar"><Sidebar /></aside>}
@@ -150,6 +145,9 @@ export default function App() {
               这里选择"之后"只是让终端包裹层在默认层叠顺序里画在插槽之上，不依赖
               z-index。 */}
           <TerminalLayer containerRef={contentRef} />
+          {/* 拖放落点指示（设计文档 §5-B）：与 TerminalLayer 同级、渲染顺序在其之后，
+              半透明色块因此总是画在终端包裹层之上，不需要额外的 z-index 博弈。 */}
+          <DropIndicator containerRef={contentRef} />
           {hint && <div className="pane-hint">{hint}</div>}
         </div>
       </div>

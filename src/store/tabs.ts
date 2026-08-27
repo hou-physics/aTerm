@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { ptyIsAlive, ptyKill, ptySpawn } from '../ipc'
 import { equalPaneWidths, MAX_PANES } from '../paneLayout'
+import { dropInsertionIndex, type DropTarget } from '../paneDrop'
 import { ptyEventsReady } from '../ptyBuffer'
 
 // Pane：标签内的单个终端会话。ptyId 缺省表示该窗格还没有终端——⌘D 新建的窗格先显示
@@ -38,6 +39,26 @@ export function buildPaneCloseConfirmMessage(): string {
   return '进程仍在运行，关闭窗格将终止它。确认关闭？'
 }
 
+// 内部共享：在 tabId 的 panes 数组下标 insertAt 处插入一个新的"待选窗格"（ptyId
+// 缺省），重新等分、重算标题、并把新窗格设为焦点。addPane（⌘D，"插在某窗格右侧"）与
+// insertPaneAt（拖放，"插在任意下标"，见设计文档 §5-B）两个公开方法各自算出 insertAt
+// 后都委托给它，避免两处重复"建 pane 对象 + 等分 + 重算标题"这段逻辑。上限校验
+// （数量，不关心像素宽度——像素宽度是否装得下由调用方在调用前用 paneLayout.ts 的
+// decidePaneFit 自行判断，同 ⌘D 既有的把关方式）在这里做一次；不满足时原样返回
+// 传入的 tabs（引用不变），paneId 为 null，调用方据此判断是否失败。
+function insertPaneAtIndex(tabs: Tab[], tabId: string, insertAt: number): { tabs: Tab[]; paneId: string | null } {
+  const tab = tabs.find((t) => t.id === tabId)
+  if (!tab || tab.kind !== 'term' || tab.panes.length >= MAX_PANES) return { tabs, paneId: null }
+  const pane: Pane = { id: `pane-${nextPane++}`, title: '新窗格' }
+  const clamped = Math.max(0, Math.min(insertAt, tab.panes.length))
+  const nextTabs = tabs.map((t) => {
+    if (t.id !== tabId) return t
+    const panes = [...t.panes.slice(0, clamped), pane, ...t.panes.slice(clamped)]
+    return { ...t, panes, activePaneId: pane.id, paneWidths: equalPaneWidths(panes.length), title: deriveTabTitle(panes, t.title) }
+  })
+  return { tabs: nextTabs, paneId: pane.id }
+}
+
 type TabsState = {
   tabs: Tab[]
   activeId: string
@@ -46,6 +67,8 @@ type TabsState = {
   focusThread(threadKey: string): boolean
   closeTab(id: string, confirmFn?: ConfirmFn): Promise<void>
   addPane(tabId: string, afterPaneId: string): boolean
+  insertPaneAt(tabId: string, index: number): string | null
+  movePanesToTab(sourceTabId: string, targetTabId: string, target: DropTarget): boolean
   startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
@@ -123,17 +146,67 @@ export const useTabs = create<TabsState>((set, get) => ({
   addPane: (tabId, afterPaneId) => {
     const tab = get().tabs.find((t) => t.id === tabId)
     if (!tab || tab.kind !== 'term') return false
-    if (tab.panes.length >= MAX_PANES) return false
     const idx = tab.panes.findIndex((p) => p.id === afterPaneId)
     const insertAt = idx === -1 ? tab.panes.length : idx + 1
-    const pane: Pane = { id: `pane-${nextPane++}`, title: '新窗格' }
-    set((s) => ({
-      tabs: s.tabs.map((t) => {
-        if (t.id !== tabId) return t
-        const panes = [...t.panes.slice(0, insertAt), pane, ...t.panes.slice(insertAt)]
-        return { ...t, panes, activePaneId: pane.id, paneWidths: equalPaneWidths(panes.length), title: deriveTabTitle(panes, t.title) }
-      }),
-    }))
+    const { tabs, paneId } = insertPaneAtIndex(get().tabs, tabId, insertAt)
+    if (!paneId) return false
+    set({ tabs })
+    return true
+  },
+  // 拖放新建窗格（设计文档 §5-B 场景 B："从侧边栏拖入"）：与 addPane 语义相同
+  // （上限校验、等分、标题重算、新窗格立即成为焦点），只是插入位置由调用方直接给出
+  // 数组下标——落点可能在最左侧（"插在第一个窗格左边"），addPane 的"插在某窗格
+  // 右侧"表达不了这种情况，因此单独给一个按下标插入的入口。成功返回新窗格 id，
+  // 供调用方（Sidebar.tsx 的拖拽处理器）紧接着调用 startPaneTerminal 填入真正的
+  // 会话——"exactly as if it had been chosen through the ⌘D picker"；失败（已达
+  // 上限）返回 null，不做任何状态变更。
+  insertPaneAt: (tabId, index) => {
+    const { tabs, paneId } = insertPaneAtIndex(get().tabs, tabId, index)
+    if (!paneId) return null
+    set({ tabs })
+    return paneId
+  },
+  // 把源标签的全部窗格移入目标标签（设计文档 §5-B 场景 A："把已打开的标签拖进窗格
+  // 区"）。窗格对象原样保留 id/ptyId 等全部字段——绝不重新创建，这是本次改动最
+  // 关键的不变量：TerminalLayer.tsx 按 pane.id 做 key，只要 id 不变，React 就不会
+  // 卸载重挂对应的 <TerminalView>，xterm 实例与其内部回滚缓冲因此不受影响（见
+  // .superpowers/flat-mount-report.md）。源标签因此整体移除——它的全部窗格都已经
+  // 搬去了目标标签，不剩任何东西——但这里不经过 closeTab："仍在运行则确认"那套
+  // 逻辑是给"真的要终止 PTY"的场景准备的，这里没有任何 PTY 被终止，窗格只是换了
+  // 个标签持有，不需要、也不应该弹确认。
+  // 上限校验只看"总窗格数量"（不关心像素宽度，同 addPane/insertPaneAt），像素宽度
+  // 是否装得下由调用方（TabBar.tsx 的拖拽处理器）在调用前用 paneLayout.ts 的
+  // decidePaneFit 自行判断。以下情况返回 false 且不做任何状态变更：源/目标标签之一
+  // 不存在或非 term 标签；源标签就是目标标签（"拖到自己标签的窗格区是空操作"，
+  // 设计文档明确要求的 no-op）；移入后总窗格数会超过上限。
+  movePanesToTab: (sourceTabId, targetTabId, target) => {
+    if (sourceTabId === targetTabId) return false
+    const { tabs } = get()
+    const sourceTab = tabs.find((t) => t.id === sourceTabId)
+    const targetTab = tabs.find((t) => t.id === targetTabId)
+    if (!sourceTab || sourceTab.kind !== 'term' || !targetTab || targetTab.kind !== 'term') return false
+    const movedPanes = sourceTab.panes
+    if (movedPanes.length === 0) return false
+    if (targetTab.panes.length + movedPanes.length > MAX_PANES) return false
+    const insertAt = dropInsertionIndex(targetTab.panes.map((p) => p.id), target)
+    // 焦点落到源标签原本的焦点窗格（拖拽前用户正盯着哪个窗格，移动后仍然盯着它）；
+    // 源标签万一没有 activePaneId（理论上不应发生，term 标签恒有），退化为移动过来
+    // 的第一个窗格。
+    const focusPaneId = sourceTab.activePaneId ?? movedPanes[0].id
+    set((s) => {
+      const withoutSource = s.tabs.filter((t) => t.id !== sourceTabId)
+      const nextTabs = withoutSource.map((t) => {
+        if (t.id !== targetTabId) return t
+        const panes = [...t.panes.slice(0, insertAt), ...movedPanes, ...t.panes.slice(insertAt)]
+        return { ...t, panes, activePaneId: focusPaneId, paneWidths: equalPaneWidths(panes.length), title: deriveTabTitle(panes, t.title) }
+      })
+      // 源标签若恰好是当前激活标签（拖拽的落点只可能在激活标签的窗格区，见设计文档
+      // §5-B——目标标签因此恒为激活标签，源标签不可能是激活标签，这条分支实际上
+      // 总是假；保留它只是不假设调用方一定遵守这条前提，防止 activeId 指向一个
+      // 已经被移除的标签）。
+      const activeId = s.activeId === sourceTabId ? targetTabId : s.activeId
+      return { tabs: nextTabs, activeId }
+    })
     return true
   },
   // 窗格选择器（设计文档 §5-A）选定后调用：给此前没有 ptyId 的窗格补上真正的终端。

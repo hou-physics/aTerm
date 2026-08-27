@@ -22,6 +22,24 @@ export function fitsPanes(paneCount: number, widthPx: number): boolean {
   return widthPx >= paneCount * MIN_PANE_WIDTH_PX
 }
 
+// 窄窗口降级判断（设计文档 §8）：先看当前内容区宽度是否装得下 nextCount 个窗格；
+// 装不下且对话面板展开着时，看收起面板腾出的宽度装不装得下；都不行则拒绝。只回答
+// "怎么办"，不执行任何副作用（不实际收起面板/不实际创建或移动窗格）——调用方
+// （App.tsx 的 ⌘D 处理器、TabBar.tsx/Sidebar.tsx 的拖放处理器，三处共用同一份判断）
+// 据此决定下一步，也据此决定要不要复用 store/hint.ts 弹出同一条轻提示。
+export type PaneFitDecision = 'fits' | 'collapse-panel' | 'refuse'
+
+export function decidePaneFit(
+  nextCount: number,
+  contentWidth: number,
+  panelCollapsed: boolean,
+  panelWidth: number,
+): PaneFitDecision {
+  if (fitsPanes(nextCount, contentWidth)) return 'fits'
+  if (!panelCollapsed && fitsPanes(nextCount, contentWidth + panelWidth)) return 'collapse-panel'
+  return 'refuse'
+}
+
 // 拖拽分隔条：只调整 index 与 index+1 这两个相邻窗格的占比，其余窗格占比原样保留
 // （设计文档 §3"拖动改变两侧占比，其余窗格不受影响"）。deltaPx 为指针在容器坐标系
 // 下的水平位移（正值＝右移＝左侧窗格变宽）。两侧窗格的像素宽度之和（pairPx）不变，
