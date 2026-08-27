@@ -570,3 +570,94 @@ describe('TabBar — 拖拽期间屏蔽文本选择并显示跟随光标的拖�
     expect(document.querySelector('.drag-ghost')).toBeNull()
   })
 })
+
+// 指针捕获丢失时的清理（review 发现：三个拖拽源此前只在 pointerup/pointercancel 上
+// 清理，元素若在拖拽中途被移出 DOM，浏览器会静默释放指针捕获、只发 lostpointercapture
+// 而不补发 pointerup，导致 body.dragging-no-select/dragging-grab 与拖拽指示永久卡住）。
+// 这里不需要真的把标签元素从 DOM 移除——只需要证明处理器对这个事件名字本身有正确
+// 反应，即证明 onTabLostPointerCapture 接线正确；真实触发场景（Sidebar.tsx 的
+// 「最近会话」列表被 refresh() 挤出前 12 条）在 Sidebar.test.tsx 里用真实的 DOM 移除
+// 复现。
+describe('TabBar — 指针捕获丢失或组件卸载时同样清理拖拽状态（不会永久卡住 body class）', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('lostpointercapture：清理 body class、拖拽指示与 useDnd 的落点状态', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 跨过阈值，真正开始拖拽
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.body.classList.contains('dragging-grab')).toBe(true)
+    expect(useDnd.getState().target).not.toBeNull()
+
+    await act(async () => {
+      fireEvent(b, new Event('lostpointercapture', { bubbles: true, cancelable: false }))
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+    expect(useDnd.getState().target).toBeNull()
+    expect(useDnd.getState().tabBarIndex).toBeNull()
+    // 没有完成任何动作——lostpointercapture 只清理，不识别落点。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+
+  it('组件卸载时若仍有一次拖拽正在进行：同样清理 body class 与拖拽状态', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    const utils = await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    await act(async () => { utils.unmount() })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().target).toBeNull()
+  })
+
+  it('清理函数被调用两次是无害的空操作（lostpointercapture 之后又收到一次 pointerup/pointercancel）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    await act(async () => {
+      fireEvent(b, new Event('lostpointercapture', { bubbles: true, cancelable: false }))
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+
+    expect(() => {
+      fireEvent.pointerCancel(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    }).not.toThrow()
+
+    // 第二次调用没有把已经清空的状态重新弄脏，也没有意外触发任何合并/排序动作。
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().target).toBeNull()
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+})
+

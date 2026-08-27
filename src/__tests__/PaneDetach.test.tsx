@@ -311,3 +311,83 @@ describe('TabPanes — 右键窗格标题栏打开上下文菜单（设计文档
     expect(screen.queryByText('移出为独立标签')).toBeNull()
   })
 })
+
+// 指针捕获丢失时的清理（review 发现：三个拖拽源此前只在 pointerup/pointercancel 上
+// 清理，元素若在拖拽中途被移出 DOM，浏览器会静默释放指针捕获、只发 lostpointercapture
+// 而不补发 pointerup）。PaneTitleBar 是三个拖拽源里唯一"每个手柄都是独立组件实例"的
+// 一个（TabBar.tsx/Sidebar.tsx 的手柄都是父组件内联 map 出的 DOM 节点），下面"组件
+// 卸载"这条用例因此格外贴合真实场景：这个标题栏所在的标签被（例如别的地方触发的）
+// 关闭操作移除时，PaneTitleBar 会随之整棵卸载，浏览器同样不会补发 pointerup。
+describe('TabPanes — 指针捕获丢失或组件卸载时同样清理拖拽状态（不会永久卡住 body class）', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+
+  it('lostpointercapture：清理 body class、拖拽指示与 useDnd 的 tabBarIndex', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 300, clientY: 200, pointerId: 1 }) // 跨过阈值，真正开始拖拽
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    await act(async () => {
+      fireEvent(titlebar, new Event('lostpointercapture', { bubbles: true, cancelable: false }))
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+    expect(useDnd.getState().tabBarIndex).toBeNull()
+    // 没有完成任何动作——lostpointercapture 只清理，不识别落点/拆出新标签。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2)
+    expect(useTabs.getState().tabs).toHaveLength(2) // home + tab-a，没有多出新标签
+  })
+
+  it('窗格标题栏所在的标签在拖拽中途被卸载：同样清理 body class 与拖拽状态', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 300, clientY: 200, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    // 模拟"标签在拖拽中途被别的路径关闭"：整个 tab-a（连同正在拖拽的 P2 标题栏）从
+    // tabs 数组里消失，TabPanes/PaneTitleBar 随之整棵卸载。
+    await act(async () => { useTabs.setState({ tabs: [HOME], activeId: 'home' }) })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(useDnd.getState().tabBarIndex).toBeNull()
+  })
+
+  it('清理函数被调用两次是无害的空操作（lostpointercapture 之后又收到一次 pointerup/pointercancel）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 300, clientY: 200, pointerId: 1 })
+    })
+
+    await act(async () => {
+      fireEvent(titlebar, new Event('lostpointercapture', { bubbles: true, cancelable: false }))
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+
+    expect(() => {
+      fireEvent.pointerCancel(titlebar, { clientX: 300, clientY: 200, pointerId: 1 })
+    }).not.toThrow()
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(useDnd.getState().tabBarIndex).toBeNull()
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2) // 没有意外拆出新标签
+  })
+})

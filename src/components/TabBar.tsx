@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -77,6 +78,31 @@ export function TabBar() {
   const suppressClickRef = useRef(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
 
+  // 拖拽清理的唯一入口：pointerup/pointercancel（同一个 onTabPointerUp）、
+  // lostpointercapture（指针捕获被浏览器隐式释放——例如被拖的标签因为其它原因中途
+  // 移出 DOM，浏览器不会补发 pointerup，只会发 lostpointercapture，见下方
+  // onTabLostPointerCapture）、以及组件卸载兜底（下面的 effect），四条退出路径全部
+  // 委托给这一个函数，不写第二份清理逻辑。它对"根本没有拖拽在进行"是安全的空操作：
+  // 触碰的三处状态——useDnd 的 target/tabBarIndex、useDragGhost——本身都已经是幂等的
+  // （反复调用不产生任何新的可观察效果，见各自文件顶部注释），因此这里不需要再加一层
+  // "是否已经清理过"的判断，被调用两次（例如 lostpointercapture 之后又收到
+  // pointerup）也完全无害。
+  const endDrag = useCallback(() => {
+    dragRef.current = null
+    useDnd.getState().setTarget(null)
+    useDnd.getState().setTabBarIndex(null)
+    useDragGhost.getState().end()
+  }, [])
+
+  // 组件卸载时若仍有一次拖拽正在进行，同样要清理，否则 body.dragging-no-select/
+  // dragging-grab 会永久卡住——不依赖任何后续事件触发（卸载之后这个元素上不会再有
+  // 任何指针事件），必须在这里主动兜底。
+  useEffect(() => {
+    return () => {
+      if (dragRef.current) endDrag()
+    }
+  }, [endDrag])
+
   const onTabPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, tabId: string) => {
     // 关闭按钮自己的点击语义（stopPropagation + closeTab）不参与拖拽判定，原样放行。
     if ((e.target as HTMLElement).closest('.tab-close')) return
@@ -151,17 +177,17 @@ export function TabBar() {
 
   const onTabPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current
-    dragRef.current = null
-    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    // 落点状态在调用 endDrag()（会清空它们）之前先取出来——releasePointerCapture 在
+    // 真实浏览器里可能同步触发下面的 onTabLostPointerCapture（它也会调用 endDrag()），
+    // 提前读好这两个值就不受调用顺序影响。
     const target = useDnd.getState().target
     const tabBarIndex = useDnd.getState().tabBarIndex
-    useDnd.getState().setTarget(null)
-    useDnd.getState().setTabBarIndex(null)
-    // 无条件调用，任何后续 return 都不可能让屏蔽选择的 body class 卡住——与上面
-    // setTarget(null) 同一时机、同一理由；这个函数同时接在 onPointerUp 和
-    // onPointerCancel 上，两条退出路径因此都被覆盖，end() 对"根本没开始过"是安全的
-    // 空操作（见 store/dragGhost.ts 注释）。
-    useDragGhost.getState().end()
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    // 无条件调用，任何后续 return 都不可能让屏蔽选择的 body class 卡住；这个函数同时
+    // 接在 onPointerUp 和 onPointerCancel 上，两条退出路径因此都被覆盖。与
+    // onTabLostPointerCapture/卸载 effect 共用同一个 endDrag()，被调用第二次
+    // （例如上面的 releasePointerCapture 已经先触发过一次）也是安全的空操作。
+    endDrag()
     if (!drag || !drag.dragging) return
     suppressClickRef.current = true
     if (tabBarIndex !== null) {
@@ -188,7 +214,17 @@ export function TabBar() {
     }
     if (decision === 'collapse-panel') layout.togglePanel()
     useTabs.getState().movePanesToTab(drag.tabId, activeId, target)
-  }, [])
+  }, [endDrag])
+
+  // 指针捕获被浏览器隐式释放时补发的退出路径（例如被拖的标签因为其它原因中途移出
+  // DOM——同一份拖拽 idiom 用在 Sidebar.tsx 的「最近会话」列表上就是真实会发生的
+  // 场景：该列表在 window focus 时 refresh()，可能把正被拖拽的会话项挤出前 12 条，
+  // 使其从 DOM 中消失。浏览器此时不会补发 pointerup，只会发 lostpointercapture）。
+  // 这里只做清理，不尝试识别落点或完成任何动作——指针已经不再受我们控制，与"松手
+  // 落空"是同一处理（不完成这次拖拽）。
+  const onTabLostPointerCapture = useCallback(() => {
+    endDrag()
+  }, [endDrag])
 
   const onTabClick = useCallback(
     (tabId: string) => {
@@ -231,6 +267,7 @@ export function TabBar() {
           onPointerMove={onTabPointerMove}
           onPointerUp={onTabPointerUp}
           onPointerCancel={onTabPointerUp}
+          onLostPointerCapture={onTabLostPointerCapture}
           onClick={() => onTabClick(t.id)}
           onContextMenu={(e) => onTabContextMenu(e, t)}
         >

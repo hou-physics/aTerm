@@ -1,4 +1,4 @@
-import { useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { resumeThread } from '../actions'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { dropInsertionIndex, resolveDropTarget } from '../paneDrop'
@@ -39,6 +39,28 @@ export function Sidebar() {
   // 上重复处理同一条会话）。与 TabBar.tsx 同一套一次性抑制手法。
   const suppressClickRef = useRef(false)
 
+  // 拖拽清理的唯一入口，与 TabBar.tsx 的 endDrag 同一理由——这里格外关键：「最近会话」
+  // 列表在 window focus 时 refresh()，可能把正被拖拽的那一条会话挤出前 12 条，使其
+  // DOM 节点在拖拽中途消失，浏览器不会补发 pointerup，只会发 lostpointercapture（见
+  // 下方 onItemLostPointerCapture）。pointerup/pointercancel（同一个 onItemPointerUp）、
+  // lostpointercapture、组件卸载兜底（下面的 effect）三条退出路径全部委托给这一个
+  // 函数，不写第二份清理逻辑；它触碰的两处状态（useDnd 的 target、useDragGhost）本身
+  // 都是幂等的，被调用两次也完全无害。
+  const endDrag = useCallback(() => {
+    dragRef.current = null
+    useDnd.getState().setTarget(null)
+    useDragGhost.getState().end()
+  }, [])
+
+  // 组件卸载时若仍有一次拖拽正在进行，同样要清理——Sidebar 本身会在 ⌘B 折叠侧边栏时
+  // 整个卸载（见 App.tsx 的 `{!sidebarCollapsed && <Sidebar/>}`），不依赖任何后续事件
+  // 触发，必须在这里主动兜底。
+  useEffect(() => {
+    return () => {
+      if (dragRef.current) endDrag()
+    }
+  }, [endDrag])
+
   const onItemPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => {
     // 屏蔽文本选择，只加 body class，不调用 e.preventDefault()——与 TabBar.tsx 的
     // onTabPointerDown 同一理由/同一时机（见 store/dragGhost.ts 的 blockSelect()
@@ -78,13 +100,15 @@ export function Sidebar() {
 
   const onItemPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current
-    dragRef.current = null
-    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    // 落点在调用 endDrag()（会清空它）之前先取出来——releasePointerCapture 在真实
+    // 浏览器里可能同步触发下面的 onItemLostPointerCapture（它也会调用 endDrag()），
+    // 提前读好这个值就不受调用顺序影响。
     const target = useDnd.getState().target
-    useDnd.getState().setTarget(null)
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
     // 无条件调用，与 TabBar.tsx 的 onTabPointerUp 同一理由：任何后续 return 都不会让
-    // body class 卡住，end() 对"根本没开始过"是安全的空操作。
-    useDragGhost.getState().end()
+    // body class 卡住；与 onItemLostPointerCapture/卸载 effect 共用同一个
+    // endDrag()，被调用第二次也是安全的空操作。
+    endDrag()
     if (!drag || !drag.dragging) return
     suppressClickRef.current = true
     if (!target) return // 松手时不在任何窗格范围内，视为放弃这次拖拽
@@ -115,7 +139,14 @@ export function Sidebar() {
       dirName: p.dirName,
       rootKey: t.rootKey,
     })
-  }, [])
+  }, [endDrag])
+
+  // 指针捕获被浏览器隐式释放时补发的退出路径——见上方 endDrag 注释描述的真实触发
+  // 场景（拖拽中的会话项被 refresh() 挤出前 12 条列表）。这里只做清理，不尝试识别
+  // 落点或完成任何动作，与"松手落空"是同一处理。
+  const onItemLostPointerCapture = useCallback(() => {
+    endDrag()
+  }, [endDrag])
 
   const onItemClick = useCallback((p: ProjectInfo, t: ThreadInfo) => {
     if (suppressClickRef.current) {
@@ -138,6 +169,7 @@ export function Sidebar() {
             onPointerMove={onItemPointerMove}
             onPointerUp={onItemPointerUp}
             onPointerCancel={onItemPointerUp}
+            onLostPointerCapture={onItemLostPointerCapture}
             onClick={() => onItemClick(p, t)}
           >
             {t.title}

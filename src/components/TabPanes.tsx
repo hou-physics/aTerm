@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
@@ -58,6 +59,23 @@ function PaneTitleBar({
     [tab.id, pane.id],
   )
 
+  // 拖拽清理的唯一入口，与 TabBar.tsx 的 endDrag/Sidebar.tsx 的 endDrag 同一理由。
+  // 这个组件是三个拖拽源里唯一"每个拖拽手柄各自是一份独立组件实例"的一个（TabBar.tsx/
+  // Sidebar.tsx 的手柄都是同一个父组件内联 map 出的 DOM 节点，不是分开的组件），下面
+  // 卸载兜底的 effect 因此格外贴合：这个标题栏所在的窗格被关闭/整个标签被关闭时，
+  // 这里会随之整棵卸载。
+  const endDrag = useCallback(() => {
+    dragRef.current = null
+    useDnd.getState().setTabBarIndex(null)
+    useDragGhost.getState().end()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (dragRef.current) endDrag()
+    }
+  }, [endDrag])
+
   const onPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).closest('.pane-titlebar-close')) return
     // 屏蔽文本选择，只加 body class，不调用 e.preventDefault()——与 TabBar.tsx/
@@ -102,20 +120,29 @@ function PaneTitleBar({
   const onPointerUp = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       const drag = dragRef.current
-      dragRef.current = null
-      e.currentTarget.releasePointerCapture?.(e.pointerId)
+      // 落点在调用 endDrag()（会清空它）之前先取出来——releasePointerCapture 在真实
+      // 浏览器里可能同步触发下面的 onLostPointerCapture（它也会调用 endDrag()），
+      // 提前读好这个值就不受调用顺序影响。
       const tabBarIndex = useDnd.getState().tabBarIndex
-      useDnd.getState().setTabBarIndex(null)
+      e.currentTarget.releasePointerCapture?.(e.pointerId)
       // 无条件调用，与 TabBar.tsx/Sidebar.tsx 同一理由：任何后续 return 都不会让
-      // body class 卡住；这个函数同时接在 onPointerUp 和 onPointerCancel 上。
-      useDragGhost.getState().end()
+      // body class 卡住；这个函数同时接在 onPointerUp 和 onPointerCancel 上，与
+      // onLostPointerCapture/卸载 effect 共用同一个 endDrag()，被调用第二次也是
+      // 安全的空操作。
+      endDrag()
       if (!drag || !drag.dragging) return
       const rowRect = getPaneRowRect(tab.id)
       if (rowRect && pointInRect(e.clientX, e.clientY, rowRect)) return // 仍在源标签自己的窗格行里：没有真的拖出去
       detach(tabBarIndex ?? undefined)
     },
-    [tab.id, detach],
+    [tab.id, detach, endDrag],
   )
+
+  // 指针捕获被浏览器隐式释放时补发的退出路径——与 TabBar.tsx/Sidebar.tsx 同一理由。
+  // 这里只做清理，不尝试识别落点或完成任何动作，与"松手落空"是同一处理。
+  const onLostPointerCapture = useCallback(() => {
+    endDrag()
+  }, [endDrag])
 
   const onContextMenu = useCallback((e: ReactMouseEvent<HTMLDivElement>) => {
     e.preventDefault()
@@ -129,6 +156,7 @@ function PaneTitleBar({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onLostPointerCapture={onLostPointerCapture}
       onContextMenu={onContextMenu}
     >
       <span className="pane-titlebar-title" title={title}>{title}</span>

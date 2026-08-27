@@ -27,6 +27,7 @@ import App from '../App'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
+import { useLayout } from '../store/layout'
 import { useTabs } from '../store/tabs'
 
 const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
@@ -278,3 +279,97 @@ describe('Sidebar — 拖拽期间屏蔽文本选择并显示跟随光标的拖�
     expect(useTabs.getState().tabs).toHaveLength(2) // 普通点击行为不变，仍正常打开会话
   })
 })
+
+// 指针捕获丢失时的清理（review 发现：三个拖拽源此前只在 pointerup/pointercancel 上
+// 清理，元素若在拖拽中途被移出 DOM，浏览器会静默释放指针捕获、只发 lostpointercapture
+// 而不补发 pointerup）。这里格外贴合真实场景——「最近会话」列表在 window focus 时
+// refresh()，可能把正被拖拽的那一条会话挤出前 12 条，使其 DOM 节点消失；侧边栏本身
+// 也会在 ⌘B 折叠时整个卸载（见 App.tsx 的 `{!sidebarCollapsed && <Sidebar/>}`），
+// 后一种场景直接用于验证下面"组件卸载"那个用例。
+describe('Sidebar — 指针捕获丢失或组件卸载时同样清理拖拽状态（不会永久卡住 body class）', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(async () => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+    document.body.classList.remove('dragging-grab')
+    // 其中一条用例会把它设为 true，避免泄漏给后面的用例；包一层 act() 避免"更新未包裹"
+    // 的噪音（这一刻仍挂载着上一条用例的 App，reset 会触发它重渲染）。
+    await act(async () => { useLayout.setState({ sidebarCollapsed: false }) })
+  })
+
+  it('lostpointercapture：清理 body class、拖拽指示与 useDnd 的落点状态', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(item, { clientX: 300, clientY: 50, pointerId: 1 }) // 跨过阈值，真正开始拖拽
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(document.body.classList.contains('dragging-grab')).toBe(true)
+    expect(useDnd.getState().target).not.toBeNull()
+
+    await act(async () => {
+      fireEvent(item, new Event('lostpointercapture', { bubbles: true, cancelable: false }))
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+    expect(useDnd.getState().target).toBeNull()
+    // 没有完成任何动作——lostpointercapture 只清理，不识别落点。
+    expect(useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes).toHaveLength(1)
+  })
+
+  it('侧边栏在拖拽中途被整个卸载（例如 ⌘B 折叠）：同样清理 body class 与拖拽状态', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+
+    // 折叠侧边栏：App.tsx 里 `{!sidebarCollapsed && <aside><Sidebar/></aside>}`，
+    // Sidebar 连同拖拽中的会话项整个从 DOM 卸载，浏览器不会补发 pointerup。
+    await act(async () => { useLayout.setState({ sidebarCollapsed: true }) })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().target).toBeNull()
+  })
+
+  it('清理函数被调用两次是无害的空操作（lostpointercapture 之后又收到一次 pointerup/pointercancel）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    await act(async () => {
+      fireEvent(item, new Event('lostpointercapture', { bubbles: true, cancelable: false }))
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+
+    expect(() => {
+      fireEvent.pointerCancel(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    }).not.toThrow()
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().target).toBeNull()
+    expect(useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes).toHaveLength(1)
+  })
+})
+
