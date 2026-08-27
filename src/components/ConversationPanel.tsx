@@ -172,7 +172,6 @@ export function ConversationPanel() {
                     </button>
                     {expanded && g.turns.map((t) => (
                       <div key={t.uuid} className="conv-timeline-item" onClick={() => scrollToTurn(t.uuid)}>
-                        <span className="dot">●</span>
                         <span className="time">{formatTimeHM(t.tsMs)}</span>
                         <span className="summary">{firstLineSummary(t.text)}</span>
                       </div>
