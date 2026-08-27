@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { clampDividerDrag, decidePaneFit, equalPaneWidths, fitsPanes, MAX_PANES, MIN_PANE_WIDTH_PX, neighborPaneId } from './paneLayout'
+import {
+  clampDividerDrag,
+  decidePaneFit,
+  DIVIDER_TOTAL_WIDTH_PX,
+  equalPaneWidths,
+  fitsPanes,
+  MAX_PANES,
+  MIN_PANE_WIDTH_PX,
+  neighborPaneId,
+  PANE_BORDER_TOTAL_WIDTH_PX,
+  TERM_WRAP_HORIZONTAL_PADDING_PX,
+  usablePaneAreaWidth,
+} from './paneLayout'
 
 describe('equalPaneWidths', () => {
   it('1 个窗格占满', () => {
@@ -30,6 +42,59 @@ describe('fitsPanes：容器宽度是否够每个窗格达到 320px 最小宽度
   })
   it('0 个窗格恒为装得下（没有要放的东西）', () => {
     expect(fitsPanes(0, 0)).toBe(true)
+  })
+})
+
+describe('usablePaneAreaWidth：扣除分隔条/窗格边框/容器内边距后的真实可用宽度', () => {
+  it('2 个窗格：扣除 12px 容器内边距 + 1 条分隔条 9px + 2 个窗格边框各 2px', () => {
+    // 与 App.css 对应关系见 paneLayout.ts 顶部常量注释：.term-wrap padding 12px、
+    // .pane-divider 9px、.pane border 2px。
+    expect(usablePaneAreaWidth(640, 2)).toBe(640 - 12 - 9 - 4)
+    expect(TERM_WRAP_HORIZONTAL_PADDING_PX).toBe(12)
+    expect(DIVIDER_TOTAL_WIDTH_PX).toBe(9)
+    expect(PANE_BORDER_TOTAL_WIDTH_PX).toBe(2)
+  })
+
+  it('3 个窗格：2 条分隔条 + 3 个窗格边框', () => {
+    expect(usablePaneAreaWidth(996, 3)).toBe(996 - 12 - 9 * 2 - 2 * 3)
+  })
+
+  it('paneCount<=0 时没有意义，原样返回测量值', () => {
+    expect(usablePaneAreaWidth(500, 0)).toBe(500)
+    expect(usablePaneAreaWidth(500, -1)).toBe(500)
+  })
+
+  it('开销大于测量值时钳在 0，不产生负数', () => {
+    expect(usablePaneAreaWidth(10, 3)).toBe(0)
+  })
+})
+
+describe('fitsPanes 接上 usablePaneAreaWidth 之后的真实边界（修正此前"测量值直接当可用宽度"的漏洞）', () => {
+  it('2 窗格：原先被误判"刚好装得下"的 640px 原始测量值，扣除开销后应正确拒绝', () => {
+    // 修正前：fitsPanes(2, 640) 直接把 640 当成可分配给窗格内容的宽度，判定为装得下；
+    // 但 640px 是 .term-wrap/.content 的原始 clientWidth，其中 12+9+4=25px 根本分不到
+    // 窗格内容区，真实可用宽度只有 615px，两个窗格无论怎么分都凑不出各 320px。
+    const usable = usablePaneAreaWidth(640, 2)
+    expect(usable).toBe(615)
+    expect(fitsPanes(2, usable)).toBe(false)
+  })
+
+  it('2 窗格：把开销加回边界后（665px 原始测量值）修正后仍然装得下', () => {
+    const usable = usablePaneAreaWidth(640 + 12 + 9 + 4, 2) // 665
+    expect(usable).toBe(640)
+    expect(fitsPanes(2, usable)).toBe(true)
+  })
+
+  it('3 窗格：原先被误判"刚好装得下"的 960px 原始测量值，扣除开销后应正确拒绝', () => {
+    const usable = usablePaneAreaWidth(960, 3)
+    expect(usable).toBe(960 - 12 - 18 - 6) // 924
+    expect(fitsPanes(3, usable)).toBe(false)
+  })
+
+  it('3 窗格：把开销加回边界后（996px 原始测量值）修正后仍然装得下', () => {
+    const usable = usablePaneAreaWidth(960 + 12 + 18 + 6, 3) // 996
+    expect(usable).toBe(960)
+    expect(fitsPanes(3, usable)).toBe(true)
   })
 })
 

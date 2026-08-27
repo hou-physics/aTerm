@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { pointInRect, resolveTabBarInsertIndex } from '../paneDrop'
 import { getPaneRowRect, getTabBarRect, getTabRects } from '../paneDropDom'
-import { clampDividerDrag, equalPaneWidths } from '../paneLayout'
+import { clampDividerDrag, equalPaneWidths, usablePaneAreaWidth } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { type Pane, type Tab, useTabs } from '../store/tabs'
@@ -160,7 +160,11 @@ function PaneDivider({ tab, index, rowRef }: { tab: Tab; index: number; rowRef: 
     (e: ReactPointerEvent<HTMLDivElement>) => {
       e.preventDefault()
       e.currentTarget.setPointerCapture?.(e.pointerId)
-      const containerWidth = rowRef.current?.clientWidth ?? 0
+      // rowRef.current.clientWidth 是 .term-wrap 的量出值，包含它自身的水平内边距、
+      // 全部分隔条的固定宽度、以及每个窗格自己的边框——这些都不是能分给窗格内容区的
+      // 那部分空间，先用 usablePaneAreaWidth 扣掉，clampDividerDrag 的 320px 下限才
+      // 真的对应渲染出来的窗格内容宽度（见 paneLayout.ts 顶部注释）。
+      const containerWidth = usablePaneAreaWidth(rowRef.current?.clientWidth ?? 0, tab.panes.length)
       const widths = tab.paneWidths ?? equalPaneWidths(tab.panes.length)
       dragRef.current = { startX: e.clientX, startWidths: widths, containerWidth }
     },

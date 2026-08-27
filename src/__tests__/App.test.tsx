@@ -213,6 +213,36 @@ describe('App — ⌘D 新建窗格（设计文档 §5-A、§8）', () => {
     await cmdD()
     expect(useTabs.getState().tabs).toHaveLength(1)
   })
+
+  // 修正 paneLayout.ts 的 320px 最小宽度扣除分隔条/窗格边框/容器内边距开销之后，⌘D
+  // 的拒绝阈值也要跟着变——这两个用例专门钉住 contentRef.current.clientWidth 这个原始
+  // 测量值（.content 无边框/内边距，数值上与 .term-wrap 相等）需要先扣掉
+  // TERM_WRAP_HORIZONTAL_PADDING_PX + DIVIDER_TOTAL_WIDTH_PX + 2*PANE_BORDER_TOTAL_WIDTH_PX
+  // = 12+9+4 = 25px 才是真正分给 2 个窗格内容区的宽度（见 paneLayout.ts）。
+  // panelCollapsed:true 让 decidePaneFit 只看第一条 fitsPanes 分支，不掺进"收起面板"
+  // 那条分支的干扰。
+  it('原始测量值 640px：修正前会被误判"刚好装得下"，修正后应正确拒绝', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 640 })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    const { getByText } = await renderApp()
+
+    await cmdD()
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1) // 没有被挤压/新建
+    expect(getByText('窗口太窄，放不下新窗格')).toBeTruthy()
+  })
+
+  it('原始测量值 665px（640 + 25px 开销）：修正后的真实边界仍然装得下', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 665 })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+
+    await cmdD()
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2)
+  })
 })
 
 describe('App — ⌘⌥←/→ 窗格焦点移动（不跨标签，边界不循环）', () => {

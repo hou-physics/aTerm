@@ -7,6 +7,36 @@
 export const MAX_PANES = 3
 export const MIN_PANE_WIDTH_PX = 320
 
+// 下面三个常量对应 App.css 里三条真实吃掉水平空间、但不参与"按 flexGrow 分配"的 DOM
+// 开销——量出来的 clientWidth（.term-wrap 或 .content）把它们都算在内，但
+// fitsPanes/clampDividerDrag 关心的是"分给窗格内容区"的可用宽度，两者不是一回事
+// （见 review：320px 保证在真实渲染像素里因此站不住）。每条常量都在旁边写明对应哪条
+// CSS 规则，改 CSS 时务必同步改这里的数字，否则这份保证会再次悄悄失效。
+// .term-wrap { padding: 4px 6px 6px 6px } —— 左右各 6px，容器自身内边距，flex 子项
+// （窗格/分隔条）分不到。
+export const TERM_WRAP_HORIZONTAL_PADDING_PX = 12
+// .pane-divider { flex: none; width: 1px; padding: 0 4px } —— 1px 视觉线 + 左右各
+// 4px 命中区 = 9px，每条分隔条都从窗格可用空间里先扣掉（(paneCount-1) 条）。
+export const DIVIDER_TOTAL_WIDTH_PX = 9
+// .pane { border: 1px solid transparent } —— 左右各 1px，物理上占用水平空间（无论
+// box-sizing 是 content-box 还是 border-box，边框本身都不是可以分给内容的那部分
+// 宽度），每个窗格都有一份，乘以窗格数一起扣掉。
+export const PANE_BORDER_TOTAL_WIDTH_PX = 2
+
+// 把"测量到的、包含上面这些开销的原始宽度"（.term-wrap 或 .content 的 clientWidth）
+// 换算成真正按 flexGrow 分给 paneCount 个窗格内容区的可用宽度。调用 fitsPanes /
+// decidePaneFit / clampDividerDrag 之前必须先过一遍这个函数——直接把测量值当成
+// "可以被 paneCount 整除"的宽度传进去，会让 320px 最小宽度这个保证在真实渲染像素
+// 里差出几到十几像素（见 review 记录的 CSS 盒模型分析）。paneCount<=0 时没有意义，
+// 原样返回测量值；结果不会低于 0（度量异常/容器还没布局时兜底，避免负数向下游
+// 传播出 NaN/Infinity）。
+export function usablePaneAreaWidth(measuredWidthPx: number, paneCount: number): number {
+  if (paneCount <= 0) return measuredWidthPx
+  const overhead =
+    TERM_WRAP_HORIZONTAL_PADDING_PX + (paneCount - 1) * DIVIDER_TOTAL_WIDTH_PX + paneCount * PANE_BORDER_TOTAL_WIDTH_PX
+  return Math.max(0, measuredWidthPx - overhead)
+}
+
 // 等分：N 个窗格各 1/N，和恒为 1（除非有浮点误差，测试里按浮点近似比较）。
 export function equalPaneWidths(n: number): number[] {
   if (n <= 0) return []

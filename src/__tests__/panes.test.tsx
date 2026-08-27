@@ -89,6 +89,43 @@ describe('TabPanes — 窗格标题栏仅在多窗格时渲染（设计文档 §
   })
 })
 
+describe('TabPanes — 分隔条拖拽：换算前先扣除容器内边距/分隔条/窗格边框开销', () => {
+  it('拖到远超右侧边界时，左侧应被夹到"扣除开销后的可用宽度 - 320px"，而不是原始 clientWidth - 320px', () => {
+    // 回归 review 记录的漏洞：修正前 PaneDivider 直接把 rowRef.current.clientWidth
+    // （.term-wrap 的原始测量值，含 12px 内边距）喂给 clampDividerDrag，会让换算出的
+    // 像素比真实渲染宽出一截。这里把 clientWidth 挂在 HTMLElement.prototype 上（jsdom
+    // 不跑真实布局，与 App.test.tsx 的 ⌘D 边界用例同一手法），断言 store 里落盘的
+    // paneWidths 换算自"扣除开销后"的可用宽度，不是原始 800px。
+    const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 800 })
+    try {
+      const tab = {
+        id: 'tab-1', kind: 'term' as const, title: '2 个对话',
+        panes: [{ id: 'p1', ptyId: 'pty-1', title: '窗格甲' }, { id: 'p2', ptyId: 'pty-2', title: '窗格乙' }],
+        activePaneId: 'p1',
+        paneWidths: [0.5, 0.5],
+      }
+      useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }, tab], activeId: 'tab-1' })
+      render(<TabPanes tab={tab} isActiveTab />)
+
+      const divider = document.querySelector('.pane-divider')!
+      fireEvent.pointerDown(divider, { clientX: 0, pointerId: 1 })
+      fireEvent.pointerMove(divider, { clientX: 1000, pointerId: 1 }) // 远超右侧边界，触发夹紧
+
+      const usable = 800 - 12 - 9 - 4 // term-wrap 内边距 12px + 1 条分隔条 9px + 2 个窗格边框各 2px
+      const t = useTabs.getState().tabs.find((x) => x.id === 'tab-1')!
+      expect(t.paneWidths![0] * usable).toBeCloseTo(usable - 320)
+      expect(t.paneWidths![1] * usable).toBeCloseTo(320)
+      // 修正前的错误换算会是相对 800（原始 clientWidth）算出的占比——用它反推得到的
+      // 像素宽度不会恰好等于 usable - 320，用这条反例确认这条用例真的在验证"用哪个
+      // 宽度换算"，不是恰好凑出同一个数字。
+      expect(t.paneWidths![0] * 800).not.toBeCloseTo(800 - 320)
+    } finally {
+      if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+    }
+  })
+})
+
 describe('TabPanes — 未选定会话的窗格显示选择器（设计文档 §5-A）', () => {
   it('待选窗格（无 ptyId）渲染选择器而不是终端插槽', () => {
     const tab = {

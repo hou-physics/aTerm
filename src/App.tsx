@@ -12,7 +12,7 @@ import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
 import { TerminalLayer } from './components/TerminalLayer'
-import { decidePaneFit, MAX_PANES, neighborPaneId } from './paneLayout'
+import { decidePaneFit, MAX_PANES, neighborPaneId, usablePaneAreaWidth } from './paneLayout'
 import { useHint } from './store/hint'
 import { useLayout } from './store/layout'
 import { useSessions } from './store/sessions'
@@ -97,7 +97,12 @@ export default function App() {
           useHint.getState().show('最多支持 3 个窗格')
           return
         }
-        const contentWidth = contentRef.current?.clientWidth ?? 0
+        // contentRef.current.clientWidth 量的是 .content 这个外层容器，比 .term-wrap
+        // 还要多绕一层，但数值上与 .term-wrap 的 clientWidth 相等（.content 自身无
+        // 边框/内边距，.term-wrap 又是 inset:0 绝对定位铺满它）——同样包含窗格分不到
+        // 的内边距/分隔条/窗格边框开销，用 usablePaneAreaWidth 扣掉，⌘D 的拒绝阈值
+        // 才对得上真实渲染像素（见 paneLayout.ts 顶部注释）。
+        const contentWidth = usablePaneAreaWidth(contentRef.current?.clientWidth ?? 0, nextCount)
         const layout = useLayout.getState()
         const decision = decidePaneFit(nextCount, contentWidth, layout.panelCollapsed, layout.panelWidth)
         if (decision === 'fits') {
