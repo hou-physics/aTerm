@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react'
 
 vi.mock('../ipc', () => ({
   ptySpawn: vi.fn(async () => 'pty-1'),
@@ -122,5 +122,79 @@ describe('ConversationPanel', () => {
 
     expect(screen.queryByText('A的回答')).toBeNull()
     expect(screen.getByText('B的回答')).toBeTruthy()
+  })
+})
+
+const TWO_DAY_CONV = {
+  turns: [
+    { role: 'user', text: '8月27日的话题\n详情A', tsMs: new Date(2026, 7, 27, 12, 19).getTime(), uuid: 'u-27' },
+    { role: 'user', text: '8月26日的话题\n详情B', tsMs: new Date(2026, 7, 26, 9, 0).getTime(), uuid: 'u-26' },
+  ],
+  files: ['/x.jsonl'],
+  totalBytes: 100,
+}
+
+describe('ConversationPanel — 时间线日期分组可折叠', () => {
+  it('只展开最新一天的分组，其余日期默认折叠并显示条目数', async () => {
+    vi.mocked(ipc.readConversation).mockResolvedValue(TWO_DAY_CONV)
+    useTabs.setState({
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      activeId: 'tab-1',
+    })
+    render(<ConversationPanel />)
+    expect(await screen.findByText('8月27日的话题')).toBeTruthy() // 最新一天默认展开
+    expect(screen.queryByText('8月26日的话题')).toBeNull() // 较旧一天默认折叠
+    const olderToggle = screen.getByText('8月26日').closest('button')!
+    expect(olderToggle).toBeTruthy()
+    expect(within(olderToggle).getByText('(1)')).toBeTruthy() // 折叠时显示条目数
+    expect(olderToggle.getAttribute('aria-expanded')).toBe('false')
+    const newerToggle = screen.getByText('8月27日').closest('button')!
+    expect(newerToggle.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('点击折叠的分组标题展开条目，再点击收起', async () => {
+    vi.mocked(ipc.readConversation).mockResolvedValue(TWO_DAY_CONV)
+    useTabs.setState({
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      activeId: 'tab-1',
+    })
+    render(<ConversationPanel />)
+    await screen.findByText('8月27日的话题')
+    fireEvent.click(screen.getByText('8月26日'))
+    expect(await screen.findByText('8月26日的话题')).toBeTruthy()
+    fireEvent.click(screen.getByText('8月26日'))
+    await waitFor(() => expect(screen.queryByText('8月26日的话题')).toBeNull())
+  })
+
+  it('切换标签加载新会话时，展开状态重新播种为新会话最新一天（不沿用旧会话的手动展开）', async () => {
+    const convA = TWO_DAY_CONV
+    const convB = {
+      turns: [
+        { role: 'user', text: 'B会话较新一天\n详情', tsMs: new Date(2026, 7, 27, 10, 0).getTime(), uuid: 'b-27' },
+        { role: 'user', text: 'B会话较旧一天\n详情', tsMs: new Date(2026, 7, 20, 10, 0).getTime(), uuid: 'b-20' },
+      ],
+      files: ['/b.jsonl'],
+      totalBytes: 1,
+    }
+    vi.mocked(ipc.readConversation).mockImplementation((dirName: string) =>
+      Promise.resolve(dirName === 'proj-a' ? convA : convB)
+    )
+    useTabs.setState({
+      tabs: [
+        { id: 'tab-a', kind: 'term', title: 'A', dirName: 'proj-a', rootKey: 'root-a' },
+        { id: 'tab-b', kind: 'term', title: 'B', dirName: 'proj-b', rootKey: 'root-b' },
+      ],
+      activeId: 'tab-a',
+    })
+    render(<ConversationPanel />)
+    await screen.findByText('8月27日的话题')
+    // 在 A 上手动展开较旧一天
+    fireEvent.click(screen.getByText('8月26日'))
+    expect(await screen.findByText('8月26日的话题')).toBeTruthy()
+
+    act(() => { useTabs.setState({ activeId: 'tab-b' }) })
+    await screen.findByText('B会话较新一天')
+    // B 的较旧一天必须是折叠的，不能延续 A 里"展开较旧分组"的状态
+    expect(screen.queryByText('B会话较旧一天')).toBeNull()
   })
 })

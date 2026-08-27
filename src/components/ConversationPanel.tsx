@@ -13,11 +13,21 @@ export function ConversationPanel() {
   const [conv, setConv] = useState<Conversation | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 时间线各日期分组的展开状态：不持久化，每次会话内容更新（切标签、手动刷新）都
+  // 重新播种为"只展开最新一天"，与 requestIdRef 的过期响应防护相互独立，互不影响。
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set())
   // 面板从不随标签切换重新挂载（App.tsx 里没有 key），所以必须自行区分"过期"响应：
   // 每次发起请求（无论来自下面的 effect 还是手动刷新按钮）都领取一个新的请求代，
   // 只有仍是当前最新代的响应才允许写入 state。这样切标签前触发的旧请求、或切走后
   // 才点的刷新，晚到时都会被静默丢弃，不会覆盖当前激活标签已经显示的内容。
   const requestIdRef = useRef(0)
+
+  // 与 setConv 在同一次状态更新里调用（React 会自动批处理），确保"分组数据到位"与
+  // "展开状态播种"在同一帧提交，不会出现分组已渲染、但仍显示折叠态的过渡帧。
+  const seedExpandedDates = useCallback((c: Conversation | null) => {
+    const groups = c ? groupUserTurnsByDate(c.turns) : []
+    setExpandedDates(groups.length > 0 ? new Set([groups[0].key]) : new Set())
+  }, [])
 
   const load = useCallback(() => {
     if (!dirName || !rootKey) return
@@ -26,7 +36,10 @@ export function ConversationPanel() {
     setError(null)
     readConversation(dirName, rootKey)
       .then((c) => {
-        if (requestIdRef.current === requestId) setConv(c)
+        if (requestIdRef.current === requestId) {
+          setConv(c)
+          seedExpandedDates(c)
+        }
       })
       .catch((e) => {
         if (requestIdRef.current === requestId) {
@@ -36,7 +49,7 @@ export function ConversationPanel() {
       .finally(() => {
         if (requestIdRef.current === requestId) setLoading(false)
       })
-  }, [dirName, rootKey])
+  }, [dirName, rootKey, seedExpandedDates])
 
   useEffect(() => {
     // 标签（因而 dirName/rootKey）发生变化时，立即让任何仍在飞行中的旧请求失效——
@@ -45,8 +58,18 @@ export function ConversationPanel() {
     requestIdRef.current++
     setConv(null)
     setError(null)
+    seedExpandedDates(null)
     if (dirName && rootKey) load()
-  }, [dirName, rootKey, load])
+  }, [dirName, rootKey, load, seedExpandedDates])
+
+  const toggleDateGroup = useCallback((key: string) => {
+    setExpandedDates((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
 
   if (!dirName || !rootKey) {
     return (
@@ -70,18 +93,30 @@ export function ConversationPanel() {
       {!loading && !error && conv && (
         <>
           <div className="conv-timeline">
-            {groups.map((g) => (
-              <div key={g.key} className="conv-date-group">
-                <div className="conv-date-label">{g.label}</div>
-                {g.turns.map((t) => (
-                  <div key={t.uuid} className="conv-timeline-item" onClick={() => scrollToTurn(t.uuid)}>
-                    <span className="dot">●</span>
-                    <span className="time">{formatTimeHM(t.tsMs)}</span>
-                    <span className="summary">{firstLineSummary(t.text)}</span>
-                  </div>
-                ))}
-              </div>
-            ))}
+            {groups.map((g) => {
+              const expanded = expandedDates.has(g.key)
+              return (
+                <div key={g.key} className="conv-date-group">
+                  <button
+                    type="button"
+                    className="conv-date-label"
+                    aria-expanded={expanded}
+                    onClick={() => toggleDateGroup(g.key)}
+                  >
+                    <span className="conv-date-disclosure">{expanded ? '▾' : '▸'}</span>
+                    {g.label}
+                    {!expanded && <span className="conv-date-count">({g.turns.length})</span>}
+                  </button>
+                  {expanded && g.turns.map((t) => (
+                    <div key={t.uuid} className="conv-timeline-item" onClick={() => scrollToTurn(t.uuid)}>
+                      <span className="dot">●</span>
+                      <span className="time">{formatTimeHM(t.tsMs)}</span>
+                      <span className="summary">{firstLineSummary(t.text)}</span>
+                    </div>
+                  ))}
+                </div>
+              )
+            })}
             {groups.length === 0 && <div className="conv-status">暂无用户发起的轮次</div>}
           </div>
           <div className="conv-body">
