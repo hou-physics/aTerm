@@ -6,7 +6,7 @@ export const resumeThread = (dirName: string, cwd: string, t: ThreadInfo) => {
   // 跨项目需以「项目:会话」复合键去重，避免误切到同名会话所在的其他项目终端。
   const threadKey = `${dirName}:${t.rootKey}`
   if (useTabs.getState().focusThread(threadKey)) return
-  return useTabs.getState().openTerminal({ title: t.title, cwd, inject: `claude --resume ${t.resumeSessionId}`, threadKey })
+  return useTabs.getState().openTerminal({ title: t.title, cwd, inject: `claude --resume ${t.resumeSessionId}`, threadKey, dirName, rootKey: t.rootKey })
 }
 
 export const newConversation = (cwd: string) =>

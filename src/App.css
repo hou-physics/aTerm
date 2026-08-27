@@ -49,6 +49,8 @@ body {
 .tab-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
 .tab-new { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .tab-new:hover { border-color: var(--color-accent); color: var(--color-text); }
+.panel-toggle { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.panel-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .home-wrap { position: absolute; inset: 0; overflow-y: auto; }
 .term-wrap { position: absolute; inset: 0; background: var(--color-term-bg); padding: 4px 6px 6px 6px; overscroll-behavior: contain; }
@@ -112,3 +114,33 @@ body {
   border-color: var(--color-accent);
   color: var(--color-text);
 }
+
+.conv-panel-dock { width: 400px; flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.conv-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.conv-header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
+.conv-title { font-size: 13px; font-weight: 600; }
+.conv-refresh { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.conv-refresh:hover { border-color: var(--color-accent); color: var(--color-text); }
+.conv-timeline { flex: none; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--color-border); padding: 6px 10px; }
+.conv-date-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .04em; margin: 10px 0 4px; }
+.conv-date-label:first-child { margin-top: 4px; }
+.conv-timeline-item { display: flex; align-items: baseline; gap: 6px; padding: 3px 4px; border-radius: 6px; font-size: 12.5px; cursor: default; overflow: hidden; }
+.conv-timeline-item:hover { background: var(--color-elevated); }
+.conv-timeline-item .dot { color: var(--color-accent-text); font-size: 8px; flex: none; }
+.conv-timeline-item .time { color: var(--color-text-faint); flex: none; }
+.conv-timeline-item .summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; }
+.conv-turn { border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.conv-turn-user { background: var(--color-elevated); }
+.conv-turn-assistant { background: transparent; color: var(--color-text); padding-left: 4px; }
+.conv-empty, .conv-status { padding: 16px 12px; color: var(--color-text-faint); font-size: 13px; }
+.conv-error { color: var(--color-text); }
+
+.conv-timeline::-webkit-scrollbar,
+.conv-body::-webkit-scrollbar { width: 8px; }
+.conv-timeline::-webkit-scrollbar-track,
+.conv-body::-webkit-scrollbar-track { background: transparent; }
+.conv-timeline::-webkit-scrollbar-thumb,
+.conv-body::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+.conv-timeline::-webkit-scrollbar-thumb:hover,
+.conv-body::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }

@@ -3,6 +3,8 @@ import { create } from 'zustand'
 type LayoutState = {
   sidebarCollapsed: boolean
   toggleSidebar(): void
+  panelCollapsed: boolean
+  togglePanel(): void
   fontSize: number
   setFontSize(n: number): void
   adjustFontSize(delta: number): void
@@ -10,6 +12,7 @@ type LayoutState = {
 }
 
 const SIDEBAR_KEY = 'aterm-sidebar-collapsed'
+const PANEL_KEY = 'aterm-panel-collapsed'
 const FONT_SIZE_KEY = 'aterm-font-size'
 const DEFAULT_FONT_SIZE = 13
 const MIN_FONT_SIZE = 8
@@ -24,6 +27,17 @@ function readPersistedSidebarCollapsed(): boolean {
 
 function persistSidebarCollapsed(v: boolean) {
   try { localStorage.setItem(SIDEBAR_KEY, v ? '1' : '0') } catch { /* 忽略持久化失败 */ }
+}
+
+function readPersistedPanelCollapsed(): boolean {
+  try {
+    return localStorage.getItem(PANEL_KEY) === '1'
+  } catch { /* localStorage 不可用（如隐私模式），忽略 */ }
+  return false
+}
+
+function persistPanelCollapsed(v: boolean) {
+  try { localStorage.setItem(PANEL_KEY, v ? '1' : '0') } catch { /* 忽略持久化失败 */ }
 }
 
 function clampFontSize(n: number): number {
@@ -51,6 +65,12 @@ export const useLayout = create<LayoutState>((set, get) => ({
     const next = !get().sidebarCollapsed
     persistSidebarCollapsed(next)
     set({ sidebarCollapsed: next })
+  },
+  panelCollapsed: readPersistedPanelCollapsed(),
+  togglePanel: () => {
+    const next = !get().panelCollapsed
+    persistPanelCollapsed(next)
+    set({ panelCollapsed: next })
   },
   fontSize: readPersistedFontSize(),
   setFontSize: (n) => {

@@ -2,6 +2,7 @@ import './ptyBuffer'
 import './App.css'
 import { useEffect } from 'react'
 import { newTerminal } from './actions'
+import { ConversationPanel } from './components/ConversationPanel'
 import { HomePage } from './components/HomePage'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
@@ -14,6 +15,7 @@ export default function App() {
   const { tabs, activeId } = useTabs()
   const refresh = useSessions((s) => s.refresh)
   const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed)
+  const panelCollapsed = useLayout((s) => s.panelCollapsed)
   useEffect(() => {
     refresh().catch(console.error)
     const onFocus = () => { refresh().catch(console.error) }
@@ -39,6 +41,9 @@ export default function App() {
       } else if (key === 't') {
         e.preventDefault()
         void newTerminal()
+      } else if (key === 'j') {
+        e.preventDefault()
+        useLayout.getState().togglePanel()
       } else if (key === 'w') {
         e.preventDefault()
         void useTabs.getState().closeTab(useTabs.getState().activeId)
@@ -63,6 +68,7 @@ export default function App() {
           ))}
         </div>
       </div>
+      {!panelCollapsed && <aside className="conv-panel-dock"><ConversationPanel /></aside>}
     </div>
   )
 }
