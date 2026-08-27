@@ -354,12 +354,17 @@ export const useTabs = create<TabsState>((set, get) => ({
   closePane: async (tabId, paneId, confirmFn = dialogConfirm) => {
     const tab = get().tabs.find((t) => t.id === tabId)
     if (!tab || tab.kind !== 'term') return
+    // 先确认 paneId 真的是这个标签自己的窗格，再决定"标签只剩一个窗格时委托给
+    // closeTab"这条分支——顺序调换过一次的话，一个陈旧/写错的 paneId（不属于该
+    // 标签、甚至压根不存在）会在标签恰好只剩一个窗格时被当成"关闭它唯一的窗格"，
+    // 从而误关整个标签、终止一个并未被请求关闭的 PTY。这里没有任何现有调用方会
+    // 传入这样的 paneId（收紧只是防御性的），但顺序本身值得钉住。
+    const pane = tab.panes.find((p) => p.id === paneId)
+    if (!pane) return
     if (tab.panes.length <= 1) {
       await get().closeTab(tabId, confirmFn)
       return
     }
-    const pane = tab.panes.find((p) => p.id === paneId)
-    if (!pane) return
     const ptyId = pane.ptyId
     if (ptyId && (await ptyIsAlive(ptyId))) {
       const ok = await confirmFn(buildPaneCloseConfirmMessage())

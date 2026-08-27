@@ -685,6 +685,73 @@ describe('useTabs — closePane：关窗格 vs 关标签', () => {
     expect(useTabs.getState().tabs.find((x) => x.id === tab.id)).toBeUndefined() // 整个标签被关闭
     expect(useTabs.getState().activeId).toBe('home')
   })
+
+  it('paneId 不属于该标签（陈旧/写错的 id）：即使标签只剩一个窗格，也不会误关整个标签', async () => {
+    const p1 = makePane()
+    const tab = makeTermTab({ panes: [p1], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
+    const confirmFn = vi.fn(async () => true)
+
+    await useTabs.getState().closePane(tab.id, 'pane-does-not-exist', confirmFn)
+
+    expect(confirmFn).not.toHaveBeenCalled()
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    const t = useTabs.getState().tabs.find((x) => x.id === tab.id)
+    expect(t).toBeTruthy() // 标签仍在，没有被误关
+    expect(t!.panes.map((p) => p.id)).toEqual([p1.id])
+  })
+})
+
+describe('useTabs — closeTab：多窗格标签的集成关闭流程（弹窗文案报数与精确 kill 目标）', () => {
+  it('3 窗格、2 个存活 PTY：确认文案报数为 2（不是 3 也不是 1），确认后只 kill 这 2 个 PTY', async () => {
+    vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
+    const p1 = makePane() // 有 ptyId，存活
+    const p2 = makePane() // 有 ptyId，存活
+    const p3 = makePane({ ptyId: undefined }) // 待选窗格，从未 spawn，天然不算存活
+    const tab = makeTermTab({ panes: [p1, p2, p3], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
+    const confirmFn = vi.fn(async () => true)
+
+    await useTabs.getState().closeTab(tab.id, confirmFn)
+
+    expect(confirmFn).toHaveBeenCalledTimes(1)
+    expect(confirmFn).toHaveBeenCalledWith(buildTabCloseConfirmMessage(2))
+    expect(ipc.ptyKill).toHaveBeenCalledTimes(2)
+    expect(ipc.ptyKill).toHaveBeenCalledWith(p1.ptyId)
+    expect(ipc.ptyKill).toHaveBeenCalledWith(p2.ptyId)
+    expect(useTabs.getState().tabs.find((x) => x.id === tab.id)).toBeUndefined() // 整个标签被移除
+  })
+
+  it('拒绝确认：不 kill 任何 PTY，标签与其全部窗格原样保留', async () => {
+    vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
+    const p1 = makePane()
+    const p2 = makePane()
+    const p3 = makePane({ ptyId: undefined })
+    const tab = makeTermTab({ panes: [p1, p2, p3], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
+
+    await useTabs.getState().closeTab(tab.id, async () => false)
+
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    const t = useTabs.getState().tabs.find((x) => x.id === tab.id)
+    expect(t).toBeTruthy()
+    expect(t!.panes.map((p) => p.id)).toEqual([p1.id, p2.id, p3.id])
+  })
+
+  it('全部窗格都没有存活 PTY：不弹确认，直接关闭', async () => {
+    const p1 = makePane({ ptyId: undefined })
+    const p2 = makePane({ ptyId: undefined })
+    const tab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
+    const confirmFn = vi.fn(async () => true)
+
+    await useTabs.getState().closeTab(tab.id, confirmFn)
+
+    expect(confirmFn).not.toHaveBeenCalled()
+    expect(ipc.ptyIsAlive).not.toHaveBeenCalled()
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.find((x) => x.id === tab.id)).toBeUndefined()
+  })
 })
 
 describe('useTabs — focusPane：直接设置某标签的焦点窗格', () => {
