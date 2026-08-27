@@ -204,7 +204,9 @@ export function ConversationPanel() {
     useLayout.getState().commitTimelineHeight()
   }, [])
 
-  const onTimelineDoubleClick = useCallback(() => {
+  // 折叠/展开时间线区的唯一落地逻辑：分隔条双击与头部的折叠按钮共用同一个函数——
+  // 一份状态、一份持久化调用，两个入口天然保持同步，不引入第二个标志位。
+  const toggleTimelineCollapsed = useCallback(() => {
     const next = !useLayout.getState().timelineCollapsed
     useLayout.getState().setTimelineCollapsed(next)
     useLayout.getState().commitTimelineCollapsed()
@@ -212,6 +214,27 @@ export function ConversationPanel() {
 
   const timelineHeight = useLayout((s) => s.timelineHeight)
   const timelineCollapsed = useLayout((s) => s.timelineCollapsed)
+
+  // 渲染安全网：拖拽/双击这些"主动改动"的时刻已经用 timelineHeightCap 现算过 60% 上限
+  // （见 onTimelineResizePointerMove），但 store 里的 timelineHeight 本身（持久化值或
+  // 默认值 220）从不经过这层现算——首次启动、内容区还没撑到默认高度，或窗口在保存了
+  // 较大高度之后被缩短过，都可能让已存的 timelineHeight 超过当前实际内容区高度的
+  // 60%。App.css 里 .conv-timeline 的 max-height:60% 兜住了视觉溢出（分隔条/正文不会
+  // 被推出裁剪区、变得连鼠标都够不到），但那只解决"看着不溢出"——store 里存的仍是
+  // 超出的旧值，下次挂载还是同样状态。这里在内容真正渲染出来后测一次实际高度，把
+  // 超出的存量纠正回去并落盘，不装 window resize 监听器——只在这个 effect 本来就会
+  // 重跑的几个时机（conv 到位、标签切换、时间线本身从折叠切回展开）顺带纠正一次，
+  // 与 windowCap/timelineHeightCap"只在主动变化的时刻现算"是同一克制原则。
+  useEffect(() => {
+    if (!dirName || !rootKey || !conv || timelineCollapsed) return
+    const containerHeight = contentRef.current?.clientHeight ?? 0
+    if (containerHeight <= 0) return
+    const capped = timelineHeightCap(timelineHeight, containerHeight)
+    if (capped < timelineHeight) {
+      useLayout.getState().setTimelineHeight(capped)
+      useLayout.getState().commitTimelineHeight()
+    }
+  }, [dirName, rootKey, conv, timelineCollapsed, timelineHeight])
 
   // 折叠态：面板完全不渲染、不占宽度，终端拿满剩余空间。唯一的开关入口是 TabBar
   // 右端的按钮（与 ⌘J 共享同一个 store 方法）；面板自身不再带折叠按钮，也不再
@@ -240,6 +263,14 @@ export function ConversationPanel() {
           <span className="conv-title">对话</span>
           {hasThread && (
             <div className="conv-header-actions">
+              <button
+                type="button"
+                className="conv-timeline-toggle"
+                onClick={toggleTimelineCollapsed}
+                title={timelineCollapsed ? '展开时间线' : '折叠时间线'}
+              >
+                {timelineCollapsed ? '⌃' : '⌄'}
+              </button>
               <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>
             </div>
           )}
@@ -286,7 +317,7 @@ export function ConversationPanel() {
               onPointerMove={onTimelineResizePointerMove}
               onPointerUp={onTimelineResizePointerUp}
               onPointerCancel={onTimelineResizePointerUp}
-              onDoubleClick={onTimelineDoubleClick}
+              onDoubleClick={toggleTimelineCollapsed}
             />
             <div className="conv-body">
               {conv.turns.map((t) => (

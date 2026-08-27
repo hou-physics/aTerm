@@ -337,6 +337,81 @@ describe('ConversationPanel — 时间线区域整体高度可拖拽 + 双击折
     fireEvent.pointerMove(divider, { clientY: 400, pointerId: 1 })
     expect(useLayout.getState().timelineHeight).toBe(before)
   })
+
+  it('头部的折叠按钮与分隔条双击驱动同一份 timelineCollapsed 状态，两个入口保持同步', async () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
+    render(<ConversationPanel />)
+    const divider = await screen.findByTitle('拖动调整时间线高度（双击折叠）')
+    // 初始未折叠：按钮应显示"折叠时间线"（⌄）。
+    const toggleButton = screen.getByTitle('折叠时间线')
+    expect(toggleButton.textContent).toBe('⌄')
+
+    fireEvent.click(toggleButton)
+    expect(useLayout.getState().timelineCollapsed).toBe(true)
+    expect(setItemSpy).toHaveBeenCalledWith('aterm-timeline-collapsed', '1') // 与双击一样会落盘
+    expect(document.querySelector('.conv-timeline')?.getAttribute('style')).toContain('height: 0px')
+    // 按钮翻转为"展开时间线"（⌃），与分隔条的折叠态保持一致。
+    expect(screen.getByTitle('展开时间线').textContent).toBe('⌃')
+    expect(screen.queryByTitle('折叠时间线')).toBeNull()
+
+    // 换成分隔条双击来展开——证明两个入口驱动的是同一份状态，不是各管一头。
+    fireEvent.doubleClick(divider)
+    expect(useLayout.getState().timelineCollapsed).toBe(false)
+    expect(setItemSpy).toHaveBeenCalledWith('aterm-timeline-collapsed', '0')
+    expect(screen.getByTitle('折叠时间线').textContent).toBe('⌄')
+
+    setItemSpy.mockRestore()
+  })
+})
+
+describe('ConversationPanel — 渲染时钳制时间线高度（不仅是拖拽时现算）', () => {
+  it('持久化的高度超过内容区 60% 时，挂载后被纠正（而非原样应用导致溢出）', async () => {
+    // 模拟"窗口在保存了较大高度之后被缩短过"：持久化值 1000 远超当前内容区能给的上限。
+    useLayout.setState({ timelineHeight: 1000, timelineCollapsed: false })
+    vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
+    useTabs.setState({
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      activeId: 'tab-1',
+    })
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, value: 500 })
+    try {
+      render(<ConversationPanel />)
+      await screen.findByText('第一句话') // 等内容真正渲染出来（这一刻内容区高度才可测）
+      // 60% of 500 = 300：既没有原样应用 1000，也不是只在视觉上裁一刀——store 里的值本身
+      // 被纠正了，并且落盘了（下次挂载不会又读回超量的旧值）。
+      await waitFor(() => expect(useLayout.getState().timelineHeight).toBe(300))
+      expect(setItemSpy).toHaveBeenCalledWith('aterm-timeline-height', '300')
+      const timelineEl = document.querySelector('.conv-timeline') as HTMLElement
+      expect(timelineEl.style.height).toBe('300px')
+    } finally {
+      if (original) Object.defineProperty(HTMLElement.prototype, 'clientHeight', original)
+      setItemSpy.mockRestore()
+    }
+  })
+
+  it('持久化的高度本就在 60% 以内时，挂载后保持原样、不触发多余的落盘', async () => {
+    useLayout.setState({ timelineHeight: 220, timelineCollapsed: false })
+    vi.mocked(ipc.readConversation).mockResolvedValue(CONV)
+    useTabs.setState({
+      tabs: [{ id: 'tab-1', kind: 'term', title: '会话', dirName: 'proj-a', rootKey: 'root-1' }],
+      activeId: 'tab-1',
+    })
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, value: 500 }) // 60% = 300 > 220
+    try {
+      render(<ConversationPanel />)
+      await screen.findByText('第一句话')
+      await Promise.resolve()
+      expect(useLayout.getState().timelineHeight).toBe(220)
+      expect(setItemSpy).not.toHaveBeenCalledWith('aterm-timeline-height', expect.anything())
+    } finally {
+      if (original) Object.defineProperty(HTMLElement.prototype, 'clientHeight', original)
+      setItemSpy.mockRestore()
+    }
+  })
 })
 
 describe('ConversationPanel — 折叠态完全消失，唯一开关在 TabBar', () => {

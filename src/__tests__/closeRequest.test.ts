@@ -100,6 +100,39 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     expect(ipc.confirmExit).not.toHaveBeenCalled()
   })
 
+  it('确认对话框仍在等待用户操作时，重复的关闭请求被丢弃（不堆叠出第二个对话框）', async () => {
+    await closeRequestReady
+    useTabs.setState({
+      tabs: [{ id: 'tab-a', kind: 'term', title: 'A', ptyId: 'pty-a' }],
+      activeId: 'tab-a',
+    })
+    vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
+    let resolveConfirm!: (v: boolean) => void
+    confirmMock.mockImplementation(() => new Promise<boolean>((res) => { resolveConfirm = res }))
+
+    // Rust 侧在 prevent_close/prevent_exit 之后每次都会重新 emit 同一个事件，所以
+    // "确认框还开着的时候用户又按了一次 ⌘Q / 又点了一次标题栏关闭按钮"完全可能发生：
+    // 这里同一时刻发起两次关闭请求，模拟这种重入。
+    const first = handleCloseRequested()
+    const second = handleCloseRequested()
+
+    // handleCloseRequested 在真正调用 confirm() 之前还要先 await countLiveTerminalTabs()
+    // 和一次动态 import，都要等真正跑到 confirm() 被调用（resolveConfirm 才会被赋值）
+    // 才能去 resolve 它，否则会在 resolveConfirm 还是 undefined 时就调用它。
+    await vi.waitFor(() => expect(confirmMock).toHaveBeenCalled())
+    resolveConfirm(true)
+    await Promise.all([first, second])
+
+    expect(confirmMock).toHaveBeenCalledTimes(1) // 没有堆出第二个对话框
+    expect(ipc.confirmExit).toHaveBeenCalledTimes(1)
+
+    // 这一轮确认已经跑完，guard 必须复位——下一次关闭请求要能重新触发一轮全新确认，
+    // 而不是被永久锁死。
+    confirmMock.mockResolvedValue(true)
+    await handleCloseRequested()
+    expect(confirmMock).toHaveBeenCalledTimes(2)
+  })
+
   it('单次 ptyIsAlive 查询失败时保守按"不存活"计数，不影响其余会话的统计', async () => {
     await closeRequestReady
     useTabs.setState({
