@@ -104,6 +104,40 @@ describe('TabBar — 小幅移动的点击仍然正常切换标签（不误判�
   })
 })
 
+// 上一轮回归的直接回归测试（见 .superpowers/tab-menu-reorder-report.md）：pointerdown
+// 上曾经无条件 e.preventDefault()，这会抑制随后本该正常触发的合成 click（右键菜单
+// 项就渲染在拖拽手柄的 DOM 子树里，点击它时 pointerdown 会先冒泡到这里）。jsdom 测不出
+// 这条链路本身（它的 click 从不依赖前面事件是否被 preventDefault），因此这里直接断言
+// preventDefault 有没有被调用——用 fireEvent 的返回值（cancelable 事件被 preventDefault
+// 后 dispatchEvent 返回 false）而不是拿 spy 去侵入合成事件对象。
+describe('TabBar — 只在真正开始拖拽后才 preventDefault（不在 pointerdown 上）', () => {
+  it('pointerdown 与低于 4px 阈值的 pointermove 都不 preventDefault；跨过阈值后才 preventDefault', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    const b = tabEl('B')
+
+    let downResult = false
+    let subThresholdResult = false
+    let crossResult = true
+    await act(async () => {
+      downResult = fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1, cancelable: true })
+    })
+    await act(async () => {
+      subThresholdResult = fireEvent.pointerMove(b, { clientX: 502, clientY: 10, pointerId: 1, cancelable: true }) // 2px，低于阈值
+    })
+    await act(async () => {
+      crossResult = fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1, cancelable: true }) // 跨过 4px 阈值
+    })
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(downResult).toBe(true) // 未被 preventDefault
+    expect(subThresholdResult).toBe(true) // 未跨过阈值，未被 preventDefault
+    expect(crossResult).toBe(false) // 真正开始拖拽的这一次 preventDefault 了
+  })
+})
+
 describe('TabBar — 拖已打开的标签进窗格区（设计文档 §5-B 场景 A）', () => {
   // 与 App.test.tsx 的 ⌘D 用例同一手法：这里默认给足够宽的内容区（decidePaneFit
   // 的第一步就看它），避免与本描述块无关的窄窗口降级分支意外接管——那条路径单独在

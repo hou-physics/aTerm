@@ -40,9 +40,11 @@ export function Sidebar() {
   const suppressClickRef = useRef(false)
 
   const onItemPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => {
-    // 屏蔽文本选择，与 TabBar.tsx 的 onTabPointerDown 同一理由/同一时机——不影响随后
-    // 仍会正常触发的合成 click，普通点击会话条目的行为不变。
-    e.preventDefault()
+    // 屏蔽文本选择，只加 body class，不调用 e.preventDefault()——与 TabBar.tsx 的
+    // onTabPointerDown 同一理由/同一时机（见 store/dragGhost.ts 的 blockSelect()
+    // 注释）：真正的默认动作抑制挪到了下面 onItemPointerMove 里，只在跨过阈值后才
+    // 调用，不影响随后仍会正常触发的合成 click，普通点击会话条目的行为不变。
+    useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
     dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false }
   }, [])
@@ -54,6 +56,9 @@ export function Sidebar() {
       if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
       drag.dragging = true
     }
+    // 真正开始拖拽了才抑制默认行为，与 TabBar.tsx 的 onTabPointerMove 同一理由/同一
+    // 时机——从不在 pointerdown 上调用，普通点击因此不受影响。
+    e.preventDefault()
     const { tabs, activeId } = useTabs.getState()
     const activeTab = tabs.find((x) => x.id === activeId)
     // 唯一可见的落点区域是激活标签的窗格区（home 标签没有窗格）；不是 term 标签时

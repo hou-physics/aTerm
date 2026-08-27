@@ -179,6 +179,36 @@ describe('Sidebar — 从「最近会话」拖入窗格区（设计文档 §5-B 
   })
 })
 
+// 与 TabBar.test.tsx 同一组回归断言（见该文件"只在真正开始拖拽后才 preventDefault"
+// 一节的注释）：验证 Sidebar.tsx 这一处拖拽源同样只在跨过阈值后才 preventDefault。
+describe('Sidebar — 只在真正开始拖拽后才 preventDefault（不在 pointerdown 上）', () => {
+  it('pointerdown 与低于 4px 阈值的 pointermove 都不 preventDefault；跨过阈值后才 preventDefault', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
+
+    let downResult = false
+    let subThresholdResult = false
+    let crossResult = true
+    await act(async () => {
+      downResult = fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1, cancelable: true })
+    })
+    await act(async () => {
+      subThresholdResult = fireEvent.pointerMove(item, { clientX: 12, clientY: 10, pointerId: 1, cancelable: true }) // 2px
+    })
+    await act(async () => {
+      crossResult = fireEvent.pointerMove(item, { clientX: 300, clientY: 50, pointerId: 1, cancelable: true })
+    })
+    await act(async () => {
+      fireEvent.pointerUp(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(downResult).toBe(true)
+    expect(subThresholdResult).toBe(true)
+    expect(crossResult).toBe(false)
+  })
+})
+
 // 与 TabBar.test.tsx 同一组断言，验证 Sidebar.tsx 这一处拖拽源接线正确；
 // store 本身的行为在 dragGhost.test.ts。
 describe('Sidebar — 拖拽期间屏蔽文本选择并显示跟随光标的拖拽指示', () => {

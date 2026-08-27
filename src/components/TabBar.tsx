@@ -53,10 +53,11 @@ function TabBarDropIndicator() {
 // 在 WKWebView 里表现不稳定、也难以自定义落点指示的样式（任务要求）。
 //
 // 与分隔条/面板手柄不同的是：这里必须让"没有拖动"的普通点击继续像以前一样调用
-// setActive——不能在 pointerdown 时就 preventDefault（那样在部分浏览器实现下会连带
-// 抑制随后的原生 click），而是让 click 照常触发，只在"确实发生过一次拖拽"时用
-// suppressClickRef 吞掉这一次 click（否则拖拽落地后浏览器补发的 click 会把 activeId
-// 设成刚刚被移出的、已经不存在的源标签 id）。
+// setActive——不能在 pointerdown 时就 preventDefault（那样会连带抑制随后本该正常
+// 触发的原生 click，见下方 onTabPointerDown 注释——这正是上一轮引入、这一轮修复的
+// 回归），而是让 click 照常触发，只在"确实发生过一次拖拽"时用 suppressClickRef 吞掉
+// 这一次 click（否则拖拽落地后浏览器补发的 click 会把 activeId 设成刚刚被移出的、
+// 已经不存在的源标签 id）。
 export function TabBar() {
   const { tabs, activeId, setActive, closeTab } = useTabs()
   const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed)
@@ -70,12 +71,13 @@ export function TabBar() {
   const onTabPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, tabId: string) => {
     // 关闭按钮自己的点击语义（stopPropagation + closeTab）不参与拖拽判定，原样放行。
     if ((e.target as HTMLElement).closest('.tab-close')) return
-    // 屏蔽文本选择（用户反馈"拖拽会顺带选中相邻文字"）：在发起这次手势的 pointerdown
-    // 上调用，不等到确认是拖拽才做——真正的 user-select:none 只在跨过 4px 阈值、
-    // 确认是拖拽而不是点击后才通过 store/dragGhost.ts 的 start() 生效（见下方
-    // onTabPointerMove），这里的 preventDefault 只是浏览器层面的默认动作抑制，不影响
-    // 随后仍会正常触发的合成 click（因此普通点击标签的行为不变）。
-    e.preventDefault()
+    // 屏蔽文本选择（用户反馈"拖拽会顺带选中相邻文字"）：只加 body class，不调用
+    // e.preventDefault()——上一轮在这里无条件 preventDefault 是回归的根源（见
+    // store/dragGhost.ts 的 blockSelect() 注释）：真正的默认动作抑制挪到了下面
+    // onTabPointerMove 里，只在确认跨过 4px 阈值、真的开始拖拽后才调用，一次普通
+    // 点击（pointerdown 后没有明显移动就 up）因此永远不会被 preventDefault 影响，
+    // 随后的原生 click 照常触发。
+    useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
     dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false }
   }, [])
@@ -87,6 +89,10 @@ export function TabBar() {
       if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
       drag.dragging = true
     }
+    // 真正开始拖拽了才抑制默认行为（例如原生的文字/图像拖拽手势）——只在跨过阈值之后
+    // 的每一次 move 上调用，从不在 pointerdown 上调用，这样普通点击的合成 click 永远
+    // 不会被这里波及（见 onTabPointerDown 注释）。
+    e.preventDefault()
     const { tabs, activeId } = useTabs.getState()
     const dragTab = tabs.find((t) => t.id === drag.tabId)
     // 主页标签没有窗格可移动；拖的正是当前激活标签本身时，那是"拖到自己标签的窗格

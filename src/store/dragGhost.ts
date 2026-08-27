@@ -20,6 +20,7 @@ type DragGhostState = {
   label: string
   x: number
   y: number
+  blockSelect(): void
   start(label: string, x: number, y: number): void
   move(x: number, y: number): void
   end(): void
@@ -44,6 +45,24 @@ export const useDragGhost = create<DragGhostState>((set) => ({
   label: '',
   x: 0,
   y: 0,
+  // 三个拖拽源在各自 pointerdown 里第一件事就调用它（见 TabBar.tsx/Sidebar.tsx/
+  // TabPanes.tsx）：这一刻还不知道这次按下最终会不会跨过 4px 阈值变成真正的拖拽，
+  // 但"屏蔽文本选择"这件事无论如何都该立刻生效（用户反馈"拖拽会顺带选中相邻文字"，
+  // 越早屏蔽越不会有选中的那一瞬间）——与是否真的开始拖拽无关，也不影响 visible/
+  // label（跟随光标的指示只在确认是拖拽、调用 start() 后才出现）。
+  //
+  // 关键的是它只碰 body class，绝不调用 event.preventDefault()：那是上一轮引入的
+  // 回归（见 .superpowers/tab-menu-reorder-report.md）——pointerdown 上无条件
+  // preventDefault 会抑制随后本该正常触发的合成 click，而右键菜单（PaneContextMenu
+  // 等）是作为拖拽手柄的 DOM 子节点渲染的（position:fixed 只改变视觉位置，不改变它在
+  // React 树/DOM 树里仍是拖拽手柄后代这一事实），点击菜单项时 pointerdown 会先冒泡
+  // 经过拖拽手柄——一旦手柄的 pointerdown 处理器无条件 preventDefault，菜单项自己的
+  // click 就再也发不出来。真正的默认动作抑制现在挪到了 pointermove 里、且只在确认
+  // 跨过阈值（drag.dragging 变 true）之后才调用，一次普通点击（含点在菜单项上）永远
+  // 不会跨过阈值，因此不受影响。
+  blockSelect: () => {
+    document.body.classList.add(DRAG_NO_SELECT_CLASS)
+  },
   start: (label, x, y) => {
     document.body.classList.add(DRAG_NO_SELECT_CLASS)
     set({ visible: true, label, x, y })

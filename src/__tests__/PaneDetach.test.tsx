@@ -130,6 +130,44 @@ describe('TabPanes — 拖出窗格标题栏成为独立标签（设计文档 §
   })
 })
 
+// 与 TabBar.test.tsx/Sidebar.test.tsx 同一组回归断言（见 TabBar.test.tsx"只在真正开始
+// 拖拽后才 preventDefault"一节注释）：这里格外关键——右键菜单（PaneContextMenu）就
+// 渲染在这个标题栏的 DOM 子树里，点击菜单项时 pointerdown 会先冒泡到这里，上一轮在
+// 这里无条件 preventDefault 正是"移出为独立标签"点不动这个回归的根源。
+describe('TabPanes — 只在真正开始拖拽后才 preventDefault（不在 pointerdown 上）', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+
+  it('pointerdown 与低于 4px 阈值的 pointermove 都不 preventDefault；跨过阈值后才 preventDefault', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    let downResult = false
+    let subThresholdResult = false
+    let crossResult = true
+    await act(async () => {
+      downResult = fireEvent.pointerDown(titlebar, { clientX: 300, clientY: 60, pointerId: 1, cancelable: true })
+    })
+    await act(async () => {
+      subThresholdResult = fireEvent.pointerMove(titlebar, { clientX: 301, clientY: 61, pointerId: 1, cancelable: true }) // ~1.4px
+    })
+    await act(async () => {
+      crossResult = fireEvent.pointerMove(titlebar, { clientX: 300, clientY: 200, pointerId: 1, cancelable: true })
+    })
+    await act(async () => {
+      fireEvent.pointerUp(titlebar, { clientX: 300, clientY: 200, pointerId: 1 })
+    })
+
+    expect(downResult).toBe(true)
+    expect(subThresholdResult).toBe(true)
+    expect(crossResult).toBe(false)
+  })
+})
+
 // 与 TabBar.test.tsx/Sidebar.test.tsx 同一组断言，验证窗格标题栏这一处拖拽源接线
 // 正确；store 本身的行为在 dragGhost.test.ts。
 describe('TabPanes — 拖拽窗格标题栏期间屏蔽文本选择并显示跟随光标的拖拽指示', () => {

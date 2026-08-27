@@ -60,10 +60,15 @@ function PaneTitleBar({
 
   const onPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).closest('.pane-titlebar-close')) return
-    // 屏蔽文本选择，与 TabBar.tsx/Sidebar.tsx 同一理由/同一时机——不影响随后仍会正常
-    // 触发的合成 click（标题栏本身没有绑定 click，但捕获阶段聚焦逻辑挂在祖先 `.pane`
-    // 上，不受这里的 preventDefault 影响，见 TabPanes.tsx 顶部 PaneItem 注释）。
-    e.preventDefault()
+    // 屏蔽文本选择，只加 body class，不调用 e.preventDefault()——与 TabBar.tsx/
+    // Sidebar.tsx 同一理由/同一时机（见 store/dragGhost.ts 的 blockSelect() 注释）。
+    // 这一点在这里格外关键：右键菜单（PaneContextMenu）就渲染在这个标题栏的 DOM 子树
+    // 里（position:fixed 只改视觉位置，不改它仍是这个 pointerdown 处理器的后代这一
+    // 事实），点击菜单项时 pointerdown 会先冒泡到这里——上一轮在这里无条件
+    // preventDefault 正是"移出为独立标签"点不动这个回归的根源：会抑制冒泡到这里的
+    // 那个 pointerdown 所对应的、菜单项自己随后应该正常触发的合成 click。真正的默认
+    // 动作抑制挪到了下面 onPointerMove 里，只在跨过阈值、确认是拖拽后才调用。
+    useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
     dragRef.current = { startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false }
   }, [])
@@ -76,6 +81,8 @@ function PaneTitleBar({
         if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
         drag.dragging = true
       }
+      // 真正开始拖拽了才抑制默认行为，与 TabBar.tsx/Sidebar.tsx 同一理由/同一时机。
+      e.preventDefault()
       if (!drag.ghostStarted) {
         drag.ghostStarted = true
         useDragGhost.getState().start(pane.title, e.clientX, e.clientY)
