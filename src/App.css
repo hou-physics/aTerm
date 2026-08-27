@@ -42,7 +42,21 @@ body {
    完全一致；只有多窗格时聚焦窗格才会真正描边。 */
 .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid transparent; border-radius: 4px; overflow: hidden; }
 .pane.pane-focused { border-color: var(--color-accent); }
+/* 持有 PTY 的窗格，这块本身不再有可见内容（不含 TerminalView）——它只是一个几何占位，
+   供 TerminalLayer.tsx 用 getBoundingClientRect() 量出 top/left/width/height，再把
+   绝对定位的 .terminal-wrapper（见下方）精确盖在它正上方。没有 PTY 的窗格仍在这里
+   原地渲染 PanePicker，与终端层无关。 */
 .pane-body { flex: 1; min-height: 0; min-width: 0; }
+
+/* 扁平终端层（TerminalLayer.tsx）：每个持有 PTY 的窗格一个包裹层，绝对定位覆盖在其
+   插槽（上面的 .pane-body[data-pane-slot]）正上方，top/left/width/height/borderRadius
+   由 TerminalLayer 按插槽实测矩形逐条内联写入（见 paneGeometry.ts 与该组件顶部注释）。
+   包含块是 .content（position:relative，见上）——TerminalLayer 与各标签的 TabPanes 是
+   它的同级子元素，共享同一个包含块，插槽矩形减去 .content 自身矩形就是这里要写的
+   坐标，不需要再乘任何缩放系数。overflow:hidden 配合内联的 borderRadius，复原原先
+   终端嵌在 .pane 内部时被其 border-radius+overflow:hidden 裁出的圆角（挪到扁平层后
+   不会再自动继承祖先的裁剪，需要显式补回，否则窗格四角会从"被裁去的圆角"变成方角）。 */
+.terminal-wrapper { position: absolute; overflow: hidden; }
 
 /* 相邻窗格间的拖拽分隔条：与 .conv-panel-resize-handle 同一处理——命中区（含左右
    4px 内边距，共 9px）比视觉细线（1px，background-clip: content-box）宽，方便抓取

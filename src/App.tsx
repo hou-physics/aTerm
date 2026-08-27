@@ -8,6 +8,7 @@ import { HomePage } from './components/HomePage'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
+import { TerminalLayer } from './components/TerminalLayer'
 import { fitsPanes, MAX_PANES, neighborPaneId } from './paneLayout'
 import { useLayout } from './store/layout'
 import { useSessions } from './store/sessions'
@@ -140,6 +141,15 @@ export default function App() {
           {tabs.filter((t) => t.kind === 'term').map((t) => (
             <TabPanes key={t.id} tab={t} isActiveTab={activeId === t.id} />
           ))}
+          {/* 扁平终端层：与上面各标签的 TabPanes 同级挂载，不嵌在任何一个标签自己的
+              子树里——持有 PTY 的窗格，其 <TerminalView> 实例只存在于这一层，按各自
+              插槽（.pane-body[data-pane-slot]，在上面的 TabPanes 树里）当前的实测矩形
+              绝对定位覆盖上去，标签切换/窗格增删都不会让它被卸载重挂（见
+              TerminalLayer.tsx 顶部注释）。渲染顺序在 TabPanes 列表之后、pane-hint 之前：
+              TabPanes 树里的插槽本身不可见（没有可见内容），谁先谁后不影响布局或点击，
+              这里选择"之后"只是让终端包裹层在默认层叠顺序里画在插槽之上，不依赖
+              z-index。 */}
+          <TerminalLayer containerRef={contentRef} />
           {hint && <div className="pane-hint">{hint}</div>}
         </div>
       </div>

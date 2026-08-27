@@ -2,7 +2,6 @@ import { useCallback, useRef, type PointerEvent as ReactPointerEvent, type React
 import { clampDividerDrag, equalPaneWidths } from '../paneLayout'
 import { type Pane, type Tab, useTabs } from '../store/tabs'
 import { PanePicker } from './PanePicker'
-import { TerminalView } from './TerminalView'
 
 // 窗格标题栏（设计文档 §4）：仅在标签持有多于一个窗格时渲染（单窗格与现状保持一致，
 // 不占高度）。左侧标题过长用 CSS 省略号截断；右侧 × 关闭该窗格。聚焦窗格用强调色
@@ -76,13 +75,11 @@ function PaneItem({
   pane,
   width,
   showTitlebar,
-  isActiveTab,
 }: {
   tab: Tab
   pane: Pane
   width: number
   showTitlebar: boolean
-  isActiveTab: boolean
 }) {
   const focused = tab.activePaneId === pane.id
 
@@ -104,12 +101,14 @@ function PaneItem({
       onPointerDownCapture={onPointerDownCapture}
     >
       {showTitlebar && <PaneTitleBar title={pane.title} focused={focused} onClose={onClose} />}
-      <div className="pane-body">
-        {pane.ptyId ? (
-          <TerminalView ptyId={pane.ptyId} active={isActiveTab && focused} />
-        ) : (
-          <PanePicker tab={tab} paneId={pane.id} />
-        )}
+      {/* 只是几何占位：真正的 <TerminalView> 现在渲染在 TerminalLayer.tsx（App.tsx 里
+          与本组件同级挂载的扁平终端层），不再嵌在这棵随标签切换/窗格增删而反复变化的
+          子树里——这正是本次重构要解决的问题（终端不该因为布局变化而卸载重挂）。
+          data-pane-slot 是 TerminalLayer 反查这块区域实测矩形的唯一线索，不能删；
+          没有 ptyId 的窗格（还没选定会话）不挂这个属性，继续在原地渲染 PanePicker，
+          与终端层无关。 */}
+      <div className="pane-body" data-pane-slot={pane.ptyId ? pane.id : undefined}>
+        {!pane.ptyId && <PanePicker tab={tab} paneId={pane.id} />}
       </div>
     </div>
   )
@@ -117,9 +116,13 @@ function PaneItem({
 
 // 一个终端标签的窗格行：横向排列该标签的全部 panes（1~3 个），相邻窗格间插入可拖拽
 // 分隔条。整行本身沿用原先 .term-wrap 的"始终挂载、用 display 控制显隐"策略——不管
-// 标签是否当前激活，它的窗格（以及内部的 TerminalView/xterm 实例）都保持挂载，只是
-// 非激活标签整行 display:none（设计文档 §10 风险表里"多个 xterm 实例同时存在"就是
-// 这个既有代价，分屏并未加剧机制本身，只是同一标签内可能同时有多个）。
+// 标签是否当前激活，它的窗格（标题栏、分隔条、以及持有 PTY 的窗格那个几何占位插槽，
+// 见 PaneItem 里的 data-pane-slot）都保持挂载，只是非激活标签整行 display:none
+// （设计文档 §10 风险表里"多个 xterm 实例同时存在"就是这个既有代价，分屏并未加剧
+// 机制本身，只是同一标签内可能同时有多个）。真正的 TerminalView/xterm 实例不再嵌在
+// 这棵子树里，而是扁平挂载在 TerminalLayer.tsx（与本组件同级，见该文件顶部注释），
+// 按上面这些插槽的实测矩形绝对定位覆盖上去——这样"标签是否激活"只影响布局与显隐，
+// 不再影响 xterm 实例本身是否存在，为将来"把窗格拖进另一个标签"铺路。
 export function TabPanes({ tab, isActiveTab }: { tab: Tab; isActiveTab: boolean }) {
   const rowRef = useRef<HTMLDivElement>(null)
   const widths = tab.paneWidths ?? equalPaneWidths(tab.panes.length)
@@ -134,7 +137,6 @@ export function TabPanes({ tab, isActiveTab }: { tab: Tab; isActiveTab: boolean 
         pane={pane}
         width={widths[i] ?? 1 / tab.panes.length}
         showTitlebar={showTitlebar}
-        isActiveTab={isActiveTab}
       />,
     )
     if (i < tab.panes.length - 1) {
