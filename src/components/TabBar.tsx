@@ -21,6 +21,11 @@ import { ContextMenu } from './ContextMenu'
 
 type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
 
+// 临时诊断开关：定位"拖标签进窗格区无反应"这个 bug 用的现场读数，问题定位后整块
+// DRAG_DEBUG 相关代码（本常量、dragDebug 状态、onTabPointerMove 里的读数计算、
+// endDrag 里的清空、以及 JSX 里的读数框）都应删除，不是长期功能。
+const DRAG_DEBUG = true
+
 // 把窗格拖出成独立标签、松手时落在标签栏上（设计文档 §5-C，TabPanes.tsx 的
 // PaneTitleBar 是拖拽源）应插入的位置指示：一条竖线，与 DropIndicator.tsx 的
 // 半透明色块同一套"拖拽源实时写 store/dnd.ts、指示条只读"模式，只是这里落点所在的
@@ -77,6 +82,9 @@ export function TabBar() {
   // 兜底监听器里读 dragRef.current 的 isDragActive() 就会先一步看到 null。
   const netCleanupRef = useRef<(() => void) | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
+  // DRAG_DEBUG 现场读数，见上方常量注释；每行是一条已格式化好的文本，null 表示当前
+  // 没有读数可显示（未在拖拽，或 DRAG_DEBUG 为 false）。
+  const [dragDebug, setDragDebug] = useState<string[] | null>(null)
 
   // 拖拽清理的唯一入口：pointerup/pointercancel（同一个 onTabPointerUp）、
   // lostpointercapture（指针捕获被浏览器隐式释放——例如被拖的标签因为其它原因中途
@@ -96,6 +104,7 @@ export function TabBar() {
     useDnd.getState().setTarget(null)
     useDnd.getState().setTabBarIndex(null)
     useDragGhost.getState().end()
+    if (DRAG_DEBUG) setDragDebug(null)
   }, [])
 
   // 组件卸载时若仍有一次拖拽正在进行，同样要清理，否则 body.dragging-no-select/
@@ -152,6 +161,28 @@ export function TabBar() {
     // 组件——这两者本是上一轮为"窗格拖出成独立标签、落在标签栏上"这条路径建的，两种
     // 拖拽源共用同一份落点状态与同一条指示线，互不冲突（同一时刻只有一个 drag 在跑）。
     const tabBarRect = getTabBarRect()
+    // DRAG_DEBUG 现场读数：独立算一遍下面分支要用到的同类值（不复用/不改写下面分支
+    // 写入的 useDnd 状态），纯读取 DOM/store，不影响下面任何一条既有逻辑分支。
+    if (DRAG_DEBUG) {
+      const activeTabForDebug = tabs.find((t) => t.id === activeId)
+      const paneSlotsForDebug = getPaneSlotRects(activeTabForDebug)
+      const targetForDebug = resolveDropTarget(paneSlotsForDebug, e.clientX, e.clientY)
+      const inTabBarForDebug = tabBarRect ? pointInRect(e.clientX, e.clientY, tabBarRect) : false
+      setDragDebug([
+        `cursor: x=${e.clientX.toFixed(0)} y=${e.clientY.toFixed(0)}`,
+        `activeId=${activeId}  dragTab=${dragTab.id}  equal=${dragTab.id === activeId}`,
+        tabBarRect
+          ? `tabbar: t=${tabBarRect.top.toFixed(0)} l=${tabBarRect.left.toFixed(0)} w=${tabBarRect.width.toFixed(0)} h=${tabBarRect.height.toFixed(0)}  inRect=${inTabBarForDebug}`
+          : `tabbar: null  inRect=${inTabBarForDebug}`,
+        `paneSlots: ${paneSlotsForDebug.length}`,
+        ...paneSlotsForDebug.map(
+          (s) =>
+            `  ${s.paneId}: t=${s.rect.top.toFixed(0)} l=${s.rect.left.toFixed(0)} w=${s.rect.width.toFixed(0)} h=${s.rect.height.toFixed(0)}`,
+        ),
+        `target: ${targetForDebug ? `${targetForDebug.paneId}/${targetForDebug.side}` : 'null'}`,
+        `[data-pane-id] in doc: ${document.querySelectorAll('[data-pane-id]').length}`,
+      ])
+    }
     if (tabBarRect && pointInRect(e.clientX, e.clientY, tabBarRect)) {
       const rawIndex = resolveTabBarInsertIndex(getTabRects(), e.clientX)
       useDnd.getState().setTabBarIndex(Math.max(1, rawIndex)) // 不能插到主页标签前面
@@ -313,6 +344,34 @@ export function TabBar() {
           TabBarDropIndicator 注释。渲染顺序放最后，画在其它标签栏元素之上，
           不依赖 z-index（与 .pane-drop-indicator 在 App.tsx 里的取舍一致）。 */}
       <TabBarDropIndicator />
+      {/* DRAG_DEBUG 现场读数框：临时诊断用，定位到 bug 后随 DRAG_DEBUG 一并删除。
+          position:fixed 固定在视口右上角、标签栏下方——不随 .tabbar 滚动，也不会被
+          光标或标签栏遮住；pointer-events:none 与 .pane-hint/.pane-drop-indicator
+          同理，不拦截拖拽过程中的指针事件。只用既有 CSS 变量（--color-elevated/
+          --color-text/--color-border），不新增调色板条目。 */}
+      {DRAG_DEBUG && dragDebug && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 56,
+            right: 12,
+            zIndex: 9999,
+            maxWidth: 460,
+            padding: '8px 10px',
+            background: 'var(--color-elevated)',
+            color: 'var(--color-text)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 8,
+            fontFamily: "'SF Mono', Menlo, monospace",
+            fontSize: 11,
+            lineHeight: 1.5,
+            whiteSpace: 'pre',
+            pointerEvents: 'none',
+          }}
+        >
+          {dragDebug.join('\n')}
+        </div>
+      )}
       {/* 标签右键菜单：复用 TabPanes.tsx 窗格标题栏那一份 ContextMenu 组件，不写
           第二份。「拆分为独立标签」只在该标签持有多于一个窗格时才出现（单窗格标签
           没有什么可拆的，splitTabPanes 对它是 no-op，这里直接不渲染这一项，不依赖
