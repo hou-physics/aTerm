@@ -99,6 +99,7 @@ type TabsState = {
   addPane(tabId: string, afterPaneId: string): boolean
   insertPaneAt(tabId: string, index: number): string | null
   movePanesToTab(sourceTabId: string, targetTabId: string, target: DropTarget): boolean
+  fillEmptyPane(sourceTabId: string, targetTabId: string, targetPaneId: string): boolean
   detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
   splitTabPanes(tabId: string): string[] | null
   reorderTab(tabId: string, rawTargetIndex: number): boolean
@@ -237,6 +238,50 @@ export const useTabs = create<TabsState>((set, get) => ({
       // §5-B——目标标签因此恒为激活标签，源标签不可能是激活标签，这条分支实际上
       // 总是假；保留它只是不假设调用方一定遵守这条前提，防止 activeId 指向一个
       // 已经被移除的标签）。
+      const activeId = s.activeId === sourceTabId ? targetTabId : s.activeId
+      return { tabs: nextTabs, activeId }
+    })
+    return true
+  },
+  // 把源标签的全部窗格"填进"目标标签某个空槽窗格（本次修复的设计间隙：目标窗格没有
+  // ptyId——⌘D 新建后还没选定会话、正在渲染 PanePicker 的那种占位——本身就是"等待
+  // 被填入内容的槽位"，拖拽落在它上面应该取代它的位置，而不是像 movePanesToTab 那样
+  // 在旁边插一个、把总窗格数推高到撞上 320px 最小宽度的上限。目标窗格被整个丢弃：
+  // 它从来没有 ptyId，没有 PTY 需要终止，不经过 closePane 那套确认逻辑，与
+  // insertPaneAtIndex 对"待选窗格"的处理一致——它本来就什么都没有。
+  //
+  // 结果窗格数 = 目标标签原有数 - 1（丢弃空槽） + 源标签窗格数，与 movePanesToTab
+  // "+ 源标签窗格数"（不减）不同——调用方（TabBar.tsx）必须用 paneLayout.ts 的
+  // previewPaneDrop 按 'fill' 语义算这个数字喂给宽度/上限判断，否则会把"填充"误判成
+  // "插入"从而错误拒绝。
+  //
+  // 与 movePanesToTab 共享的不变量：源标签的每个 Pane 对象原样保留、绝不重新创建
+  // （id/ptyId 都不变，TerminalLayer.tsx 按 pane.id 做 key，xterm 实例与其回滚缓冲
+  // 因此不受影响），源标签因此整体移除，不经过 closeTab 的确认流程（没有任何 PTY
+  // 被终止）。以下情况返回 false 且不做任何状态变更：源/目标标签之一不存在或非 term
+  // 标签；源标签就是目标标签；目标窗格不属于目标标签，或目标窗格并非空槽（有
+  // ptyId——那种落点应该走 movePanesToTab，这里只处理"空槽"这一种）；结果窗格数会
+  // 超过上限（防御性兜底，正常流程调用方已经用 previewPaneDrop 挡在前面）。
+  fillEmptyPane: (sourceTabId, targetTabId, targetPaneId) => {
+    if (sourceTabId === targetTabId) return false
+    const { tabs } = get()
+    const sourceTab = tabs.find((t) => t.id === sourceTabId)
+    const targetTab = tabs.find((t) => t.id === targetTabId)
+    if (!sourceTab || sourceTab.kind !== 'term' || !targetTab || targetTab.kind !== 'term') return false
+    const movedPanes = sourceTab.panes
+    if (movedPanes.length === 0) return false
+    const targetIdx = targetTab.panes.findIndex((p) => p.id === targetPaneId)
+    if (targetIdx === -1) return false
+    if (targetTab.panes[targetIdx].ptyId) return false
+    if (targetTab.panes.length - 1 + movedPanes.length > MAX_PANES) return false
+    const focusPaneId = sourceTab.activePaneId ?? movedPanes[0].id
+    set((s) => {
+      const withoutSource = s.tabs.filter((t) => t.id !== sourceTabId)
+      const nextTabs = withoutSource.map((t) => {
+        if (t.id !== targetTabId) return t
+        const panes = [...t.panes.slice(0, targetIdx), ...movedPanes, ...t.panes.slice(targetIdx + 1)]
+        return { ...t, panes, activePaneId: focusPaneId, paneWidths: equalPaneWidths(panes.length), title: deriveTabTitle(panes, t.title) }
+      })
       const activeId = s.activeId === sourceTabId ? targetTabId : s.activeId
       return { tabs: nextTabs, activeId }
     })

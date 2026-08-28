@@ -36,7 +36,7 @@ const TAB_B = { id: 'tab-b', kind: 'term' as const, title: 'B', panes: [{ id: 'p
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
   useHint.setState({ message: null })
-  useDnd.setState({ target: null, tabBarIndex: null })
+  useDnd.setState({ target: null, dropMode: null, refusal: null, tabBarIndex: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
   document.body.classList.remove('dragging-no-select')
   document.body.classList.remove('dragging-grab')

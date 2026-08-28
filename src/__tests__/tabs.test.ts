@@ -362,6 +362,115 @@ describe('useTabs — movePanesToTab：跨标签移动窗格（拖拽落点）',
   })
 })
 
+// 拖到空槽窗格（本次修复的设计间隙）：目标窗格没有 ptyId 时，拖放应该"填充"这个
+// 槽位（源标签全部窗格取代它的位置，总数不增）而不是像 movePanesToTab 那样在旁边
+// "插入"（总数 +N）。核心不变量与 movePanesToTab 相同——被移动的 Pane 对象原样保留，
+// 源标签整体移除；DOM 节点身份在 TerminalLayer.test.tsx 里单独验证，这里只测 store
+// 状态本身。
+describe('useTabs — fillEmptyPane：把源标签的全部窗格填进目标标签的空槽窗格', () => {
+  it('目标窗格没有 ptyId：源窗格取代它的位置，结果窗格数等于目标原数（不增），pane id/ptyId 原样不变', () => {
+    const sourcePane = makePane({ title: '源窗格' })
+    const sourceTab = makeTermTab({ panes: [sourcePane], activePaneId: sourcePane.id })
+    const keptPane = makePane({ title: '已有窗格' })
+    const emptyPane = makePane({ ptyId: undefined, title: '新窗格' })
+    const targetTab = makeTermTab({ panes: [keptPane, emptyPane], activePaneId: keptPane.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, targetTab], activeId: targetTab.id })
+    const originalId = sourcePane.id
+    const originalPtyId = sourcePane.ptyId
+
+    const ok = useTabs.getState().fillEmptyPane(sourceTab.id, targetTab.id, emptyPane.id)
+
+    expect(ok).toBe(true)
+    expect(useTabs.getState().tabs.find((t) => t.id === sourceTab.id)).toBeUndefined() // 源标签整体移除
+    const t = useTabs.getState().tabs.find((x) => x.id === targetTab.id)!
+    expect(t.panes.map((p) => p.id)).toEqual([keptPane.id, sourcePane.id]) // 空槽被取代，位置不变
+    expect(t.panes).toHaveLength(2) // 结果数 = 目标原数（2），不是 2-1+1=2 也不是 2+1=3 的巧合——见下一条用例
+    const moved = t.panes.find((p) => p.id === originalId)!
+    expect(moved.id).toBe(originalId)
+    expect(moved.ptyId).toBe(originalPtyId) // ptyId 原样不变，未重新 spawn
+    expect(moved.title).toBe('源窗格') // 整个 pane 对象原样保留
+    expect(t.activePaneId).toBe(sourcePane.id) // 移入的窗格成为新焦点
+    expect(t.paneWidths).toEqual([0.5, 0.5])
+  })
+
+  it('目标标签已有 2 个窗格（其中一个空槽），源标签 1 个窗格：结果数是 2，不是 3——填充不增加总数', () => {
+    const sourcePane = makePane()
+    const sourceTab = makeTermTab({ panes: [sourcePane], activePaneId: sourcePane.id })
+    const keptPane = makePane()
+    const emptyPane = makePane({ ptyId: undefined })
+    const targetTab = makeTermTab({ panes: [keptPane, emptyPane], activePaneId: keptPane.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, targetTab], activeId: targetTab.id })
+
+    const ok = useTabs.getState().fillEmptyPane(sourceTab.id, targetTab.id, emptyPane.id)
+
+    expect(ok).toBe(true)
+    expect(useTabs.getState().tabs.find((x) => x.id === targetTab.id)!.panes).toHaveLength(2)
+  })
+
+  it('多窗格标签整体填入：全部窗格一起取代空槽的位置，顺序保持不变', () => {
+    const s1 = makePane({ title: 'S1' })
+    const s2 = makePane({ title: 'S2' })
+    const sourceTab = makeTermTab({ panes: [s1, s2], activePaneId: s2.id })
+    const emptyPane = makePane({ ptyId: undefined })
+    const targetTab = makeTermTab({ panes: [emptyPane], activePaneId: emptyPane.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, targetTab], activeId: targetTab.id })
+
+    const ok = useTabs.getState().fillEmptyPane(sourceTab.id, targetTab.id, emptyPane.id)
+
+    expect(ok).toBe(true)
+    const t = useTabs.getState().tabs.find((x) => x.id === targetTab.id)!
+    expect(t.panes.map((p) => p.id)).toEqual([s1.id, s2.id]) // s1/s2 顺序不变，空槽被整个替换掉
+    expect(t.activePaneId).toBe(s2.id) // 源标签原焦点成为新焦点
+  })
+
+  it('目标窗格已有 ptyId（不是空槽）：拒绝，返回 false，不做任何状态变更', () => {
+    const sourcePane = makePane()
+    const sourceTab = makeTermTab({ panes: [sourcePane], activePaneId: sourcePane.id })
+    const targetPane = makePane() // 有 ptyId
+    const targetTab = makeTermTab({ panes: [targetPane], activePaneId: targetPane.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, targetTab], activeId: targetTab.id })
+    const before = useTabs.getState().tabs
+
+    const ok = useTabs.getState().fillEmptyPane(sourceTab.id, targetTab.id, targetPane.id)
+
+    expect(ok).toBe(false)
+    expect(useTabs.getState().tabs).toBe(before)
+  })
+
+  it('目标窗格不属于目标标签、源/目标标签之一不存在或非 term、源即目标：拒绝，返回 false', () => {
+    const sourcePane = makePane()
+    const sourceTab = makeTermTab({ panes: [sourcePane], activePaneId: sourcePane.id })
+    const emptyPane = makePane({ ptyId: undefined })
+    const targetTab = makeTermTab({ panes: [emptyPane], activePaneId: emptyPane.id })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, targetTab], activeId: targetTab.id })
+
+    expect(useTabs.getState().fillEmptyPane(sourceTab.id, targetTab.id, 'not-a-real-pane')).toBe(false)
+    expect(useTabs.getState().fillEmptyPane('does-not-exist', targetTab.id, emptyPane.id)).toBe(false)
+    expect(useTabs.getState().fillEmptyPane(sourceTab.id, 'does-not-exist', emptyPane.id)).toBe(false)
+    expect(useTabs.getState().fillEmptyPane('home', targetTab.id, emptyPane.id)).toBe(false)
+    expect(useTabs.getState().fillEmptyPane(sourceTab.id, sourceTab.id, sourcePane.id)).toBe(false)
+  })
+
+  it('结果窗格数会超过上限（防御性兜底，正常流程调用方已用 previewPaneDrop 挡住）：拒绝，不做任何状态变更', () => {
+    const s1 = makePane()
+    const s2 = makePane()
+    const s3 = makePane()
+    const sourceTab = makeTermTab({ panes: [s1, s2, s3], activePaneId: s1.id }) // 3 个
+    const emptyPane = makePane({ ptyId: undefined })
+    const kept1 = makePane()
+    const kept2 = makePane()
+    const targetTab = makeTermTab({ panes: [kept1, kept2, emptyPane], activePaneId: kept1.id }) // 目标原本已是 3 个
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab, targetTab], activeId: targetTab.id })
+    const before = useTabs.getState().tabs
+
+    // 结果数 = 3(目标) - 1(丢弃空槽) + 3(源) = 5 > MAX_PANES
+    const ok = useTabs.getState().fillEmptyPane(sourceTab.id, targetTab.id, emptyPane.id)
+
+    expect(ok).toBe(false)
+    expect(useTabs.getState().tabs).toBe(before)
+  })
+})
+
 // 把窗格拖出成独立标签（设计文档 §5-C"拖出去/右键菜单"）：movePanesToTab 的反方向。
 // 核心不变量同样是 pane 对象的 id/ptyId 原样保留——TerminalLayer.test.tsx 用真实渲染
 // 的 <App> 单独验证 DOM 节点身份；这里只测 store 状态本身。
