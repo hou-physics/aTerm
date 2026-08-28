@@ -537,6 +537,9 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    自己身上，不是外层容器）。 */
 .session-block-head { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
 .session-block-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
+/* 改名态（Task 9）：与 .session-block-title 同字号/字重，尽量不因切换成 input 而跳动
+   版面；颜色沿用 .cmd-input 同一套变量（边框/底色/文字全部来自主题变量，不写死）。 */
+.session-block-title-input { flex: 1; min-width: 0; padding: 1px 4px; border-radius: 4px; border: 1px solid var(--color-accent); background: var(--color-panel); color: var(--color-text); font: inherit; font-weight: 600; font-size: 13px; outline: none; }
 .session-block-preview { margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-dim); font-size: 12px; }
 .session-block-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
 .badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 11px; line-height: 1.6; white-space: nowrap; }

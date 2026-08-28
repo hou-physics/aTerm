@@ -1,6 +1,8 @@
 import { render, screen, fireEvent } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionBlock } from '../components/SessionBlock'
+import { blockKey, useOverviewStore } from '../store/overview'
 import { threadStatusKey, useStatusStore } from '../store/status'
 
 // SessionBlock 内部会调 useThreadStatus，其所在模块 store/status.ts 在 import 时就会
@@ -84,5 +86,88 @@ describe('SessionBlock —— 双击分工（标题 vs 空白区，为 Task 9 �
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={onOpen} />)
     fireEvent.doubleClick(screen.getByText('重构解析器'))
     expect(onOpen).not.toHaveBeenCalled()
+  })
+})
+
+describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期以双击标题实现）', () => {
+  beforeEach(() => {
+    useOverviewStore.setState({ order: {}, positions: {}, names: {} })
+  })
+
+  it('双击标题进入编辑态', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('重构解析器')
+  })
+
+  it('Enter 提交重命名并持久化', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.clear(screen.getByRole('textbox'))
+    await userEvent.type(screen.getByRole('textbox'), '我的重构任务{Enter}')
+    expect(screen.getByText('我的重构任务')).toBeTruthy()
+    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('我的重构任务')
+  })
+
+  it('Esc 取消，保留原标题且不写入 store', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.type(screen.getByRole('textbox'), '不该被保存{Escape}')
+    expect(screen.getByText('重构解析器')).toBeTruthy()
+    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
+  })
+
+  it('失焦视为提交', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.clear(screen.getByRole('textbox'))
+    await userEvent.type(screen.getByRole('textbox'), '失焦提交')
+    await userEvent.tab()
+    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('失焦提交')
+  })
+
+  it('输入全空白视为清除自定义名，回退到默认标题', async () => {
+    useOverviewStore.getState().rename(blockKey('proj', 'r1'), '旧名字')
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('旧名字'))
+    await userEvent.clear(screen.getByRole('textbox'))
+    await userEvent.type(screen.getByRole('textbox'), '   {Enter}')
+    expect(screen.getByText('重构解析器')).toBeTruthy()
+    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
+  })
+
+  it('重命名后徽章与状态点仍在，不因进出编辑态而丢失', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={3} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.type(screen.getByRole('textbox'), '{Enter}')
+    expect(screen.getByText('⑂ 3')).toBeTruthy()
+    expect(screen.getByText('Opus 5')).toBeTruthy()
+  })
+})
+
+// 拖拽手柄风险（本任务说明书专项要求）：OverviewPage.tsx 的 DraggableBlock 把
+// SessionBlock 整个包在一个装了 onPointerDown 的 div 里（真实拖拽手柄，见
+// OverviewPage.tsx 顶部注释——阈值前不 setPointerCapture，但 pointerdown 本身仍会
+// 冒泡到手柄）。这里在测试里搭一个同构的最小包装（外层 div + onPointerDown 探针），
+// 模拟 OverviewPage.tsx 的真实结构，而不是直接断言组件内部实现细节。编辑态下在
+// input 上点按（放置光标）或拖选文字都会先触发一次 pointerdown——如果这次
+// pointerdown 冒泡到外层手柄，手柄会记录起始坐标、后续的 pointermove 一旦超过 4px
+// 阈值就会误判成"开始拖拽方块"。断言：input 上的 pointerdown 不应该冒泡到外层手柄。
+describe('SessionBlock —— 编辑态下 input 的 pointerdown 不冒泡到拖拽手柄', () => {
+  it('点击/拖选 input 内文字不会触发外层拖拽手柄的 pointerdown', async () => {
+    const handlePointerDown = vi.fn()
+    render(
+      <div onPointerDown={handlePointerDown}>
+        <SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />
+      </div>
+    )
+    // 进入编辑态本身就要靠双击标题触发（title 视图态仍是拖拽手柄的一部分，双击本身
+    // 冒泡到手柄是预期行为，不是本用例要断言的对象），所以先清空这两次调用记录，只
+    // 断言"进入编辑态之后、在 input 上按下"这一次不会冒泡。
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    handlePointerDown.mockClear()
+    const input = screen.getByRole('textbox')
+    fireEvent.pointerDown(input)
+    expect(handlePointerDown).not.toHaveBeenCalled()
   })
 })
