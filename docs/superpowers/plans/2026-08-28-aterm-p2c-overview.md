@@ -858,58 +858,289 @@ git commit -m "feat(ui): 总览方块网格与自由拖拽排布"
 ### Task 8: overview 标签种类接入
 
 **Files:**
-- Modify: `src/store/tabs.ts`（`Tab.kind` 加 `'overview'`）、`src/components/TabBar.tsx`、`src/App.tsx`
+- Modify: `src/store/tabs.ts`（`Tab.kind` 加 `'overview'`、新增 `hasPanes` 与 `openOverview`）、`src/components/TabBar.tsx`、`src/App.tsx`
 - Test: `src/__tests__/tabs.test.ts`（扩充）
 
 **Interfaces:**
-- Produces: `Tab.kind: 'home' | 'term' | 'overview'`；`openOverview(dirName: string, projectName: string)`
+- Produces:
+  - `Tab.kind: 'home' | 'term' | 'overview'`
+  - `export function hasPanes(tab: Tab): boolean` —— `'term'` 为 `true`，`'home'` 与 `'overview'` 为 `false`
+  - `openOverview(dirName: string, projectName: string): void` —— 已存在则聚焦，不新建
+
+> **本任务最大的风险**：`tabs.ts` 目前有多处以 `kind === 'home'` 作为「这个标签没有窗格」的判断（例如第 152 行 `if (!tab || tab.kind === 'home') return`）。新增第三种 kind 后，凡是这个语义的分支都必须改用 `hasPanes(tab)`，否则总览标签会被当成终端标签参与 split view，产生空窗格。**实现前先执行 `grep -n "kind === 'home'\|kind !== 'home'" src/store/tabs.ts src/components/*.tsx` 把所有出现处列全，逐一判断该处问的是「是不是主页」还是「有没有窗格」**——只有后者改成 `hasPanes`。把这份清单写进你的报告。
 
 - [ ] **Step 1: 写失败测试**
 
+追加到 `src/__tests__/tabs.test.ts`：
+
 ```ts
-it('打开总览页创建 kind=overview 的标签，标题为「▦ 项目名·总览」', () => { /* ... */ })
-it('同一项目重复打开只聚焦已有总览标签，不新建', () => { /* ... */ })
-it('总览标签没有窗格，不参与 split view 拖拽', () => { /* ... */ })
+describe('overview 标签种类（spec §5.2）', () => {
+  it('打开总览页创建 kind=overview 的标签，标题为「▦ 项目名·总览」，且无窗格', () => {
+    useTabs.getState().openOverview('-Users-hou-astro-aTerm', 'aTerm')
+    const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')!
+    expect(ov).toBeDefined()
+    expect(ov.title).toBe('▦ aTerm·总览')
+    expect(ov.panes).toEqual([])
+    expect(useTabs.getState().activeId).toBe(ov.id)
+  })
+
+  it('同一项目重复打开只聚焦已有总览标签，不新建', () => {
+    useTabs.getState().openOverview('-dir-a', 'A')
+    const firstId = useTabs.getState().tabs.find((t) => t.kind === 'overview')!.id
+    useTabs.setState({ activeId: 'home' })
+    useTabs.getState().openOverview('-dir-a', 'A')
+    expect(useTabs.getState().tabs.filter((t) => t.kind === 'overview')).toHaveLength(1)
+    expect(useTabs.getState().activeId).toBe(firstId)
+  })
+
+  it('不同项目各有自己的总览标签', () => {
+    useTabs.getState().openOverview('-dir-a', 'A')
+    useTabs.getState().openOverview('-dir-b', 'B')
+    expect(useTabs.getState().tabs.filter((t) => t.kind === 'overview')).toHaveLength(2)
+  })
+})
+
+describe('hasPanes —— 取代散落各处的 kind === "home" 判断', () => {
+  it('终端标签有窗格', () => {
+    expect(hasPanes(makeTermTab('t1', [makePane('p1')]))).toBe(true)
+  })
+
+  it('主页标签没有窗格', () => {
+    expect(hasPanes(HOME_TAB)).toBe(false)
+  })
+
+  it('总览标签没有窗格——这是本任务的核心不变量', () => {
+    useTabs.getState().openOverview('-dir-a', 'A')
+    const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')!
+    expect(hasPanes(ov)).toBe(false)
+  })
+})
 ```
 
-> 第三条很重要：`tabs.ts` 里多处以 `kind === 'home'` 作为「无窗格」的判断（如第 152 行 `if (!tab || tab.kind === 'home') return`）。新增 `'overview'` 后**必须逐一复查这些分支**，否则总览标签会被当成终端标签参与拆分，产生空窗格。
+同时把 import 行补上 `hasPanes`：
 
-- [ ] **Step 2–5:** 跑测试确认失败 → 实现（含复查所有 `kind === 'home'` 分支）→ 确认通过 → 提交
+```ts
+import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, hasPanes, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `npx vitest run src/__tests__/tabs.test.ts`
+Expected: FAIL —— `openOverview is not a function` / `hasPanes` 未导出
+
+- [ ] **Step 3: 实现**
+
+```ts
+export type Tab = {
+  id: string
+  kind: 'home' | 'term' | 'overview'
+  title: string
+  panes: Pane[]
+  activePaneId?: string
+  paneWidths?: number[]
+  dirName?: string // overview 标签记住自己是哪个项目的
+}
+
+/** 该标签是否承载窗格。主页与总览页都不承载——凡是问「有没有窗格」的分支都该用它，
+ *  而不是继续拿 kind === 'home' 当代理判断。 */
+export function hasPanes(tab: Tab): boolean {
+  return tab.kind === 'term'
+}
+```
+
+`openOverview` 先按 `kind === 'overview' && dirName === dirName` 查找；找到则只设 `activeId`，否则追加一个新标签并激活。
+
+`TabBar.tsx` 渲染总览标签时复用既有标签样式；`App.tsx` 在 `kind === 'overview'` 时渲染 `<OverviewPage dirName={tab.dirName!} />`。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `npx vitest run` （全套——本任务动了 split view 的核心 store，必须跑全）
+Expected: PASS，既有 split view 测试全部不受影响。
+
+- [ ] **Step 5: 提交**
 
 ```bash
-git commit -m "feat(ui): 新增 overview 标签种类并接入标签栏"
+git add src/store/tabs.ts src/components/TabBar.tsx src/App.tsx src/__tests__/tabs.test.ts
+git commit -m "feat(ui): 新增 overview 标签种类，并以 hasPanes 取代 kind==='home' 的窗格判断"
 ```
 
 ---
 
 ### Task 9: 方块重命名
 
-**Files:** Modify `src/components/SessionBlock.tsx`、`src/components/OverviewPage.tsx`；Test 扩充 `SessionBlock.test.tsx`
+**Files:**
+- Modify: `src/components/SessionBlock.tsx`
+- Test: `src/__tests__/SessionBlock.test.tsx`（扩充）
 
-- [ ] 双击标题进入编辑态 → `Enter` 提交调 `rename`、`Esc` 取消、失焦提交；空白输入调 `clearName` 回退默认标题
-- [ ] 测试覆盖：提交、取消、空白清除、重命名后仍显示状态与徽章
-- [ ] 提交：`feat(ui): 总览方块支持重命名（空白则回退默认标题）`
+**Interfaces:**
+- Consumes: Task 4 的 `rename(key, name)` / `clearName(key)`、`blockKey(dirName, rootKey)`
+
+- [ ] **Step 1: 写失败测试**
+
+```tsx
+describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期以双击标题实现）', () => {
+  beforeEach(() => {
+    useOverviewStore.setState({ order: {}, positions: {}, names: {} })
+  })
+
+  it('双击标题进入编辑态', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    expect(screen.getByRole('textbox')).toHaveValue('重构解析器')
+  })
+
+  it('Enter 提交重命名并持久化', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.clear(screen.getByRole('textbox'))
+    await userEvent.type(screen.getByRole('textbox'), '我的重构任务{Enter}')
+    expect(screen.getByText('我的重构任务')).toBeInTheDocument()
+    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('我的重构任务')
+  })
+
+  it('Esc 取消，保留原标题且不写入 store', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.type(screen.getByRole('textbox'), '不该被保存{Escape}')
+    expect(screen.getByText('重构解析器')).toBeInTheDocument()
+    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
+  })
+
+  it('失焦视为提交', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.clear(screen.getByRole('textbox'))
+    await userEvent.type(screen.getByRole('textbox'), '失焦提交')
+    await userEvent.tab()
+    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('失焦提交')
+  })
+
+  it('输入全空白视为清除自定义名，回退到默认标题', async () => {
+    useOverviewStore.getState().rename(blockKey('proj', 'r1'), '旧名字')
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('旧名字'))
+    await userEvent.clear(screen.getByRole('textbox'))
+    await userEvent.type(screen.getByRole('textbox'), '   {Enter}')
+    expect(screen.getByText('重构解析器')).toBeInTheDocument()
+    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
+  })
+
+  it('重命名后徽章与状态点仍在，不因进出编辑态而丢失', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={3} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.type(screen.getByRole('textbox'), '{Enter}')
+    expect(screen.getByText('⑂ 3')).toBeInTheDocument()
+    expect(screen.getByText('Opus 5')).toBeInTheDocument()
+  })
+})
+```
+
+> ⚠️ 双击标题既是「进入编辑态」也是 Task 6 里 `onDoubleClick` 的「打开会话」。**两者冲突**：实现时把打开动作移到方块空白区域的双击，标题的双击只进入编辑态，并在标题元素上 `stopPropagation`。为此需在 Task 6 的测试里补一条「双击标题不触发 onOpen」。
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `npx vitest run src/__tests__/SessionBlock.test.tsx`
+Expected: FAIL —— 双击后没有 textbox
+
+- [ ] **Step 3: 实现**
+
+组件内 `const [editing, setEditing] = useState(false)`；编辑态渲染受控 `<input>`，`onKeyDown` 分派 Enter/Escape，`onBlur` 提交。提交时 `value.trim()` 为空则调 `clearName`，否则调 `rename`。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `npx vitest run src/__tests__/SessionBlock.test.tsx`
+Expected: PASS
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add src/components/SessionBlock.tsx src/__tests__/SessionBlock.test.tsx
+git commit -m "feat(ui): 总览方块支持重命名（空白则回退默认标题）"
+```
 
 ---
 
 ### Task 10: 底部常驻状态栏
 
-**Files:** Create `src/components/StatusBar.tsx`；Modify `src/App.tsx`、`src/App.css`；Test `src/__tests__/StatusBar.test.tsx`
+**Files:**
+- Create: `src/components/StatusBar.tsx`
+- Modify: `src/App.tsx`、`src/App.css`
+- Test: `src/__tests__/StatusBar.test.tsx`
 
-**Interfaces:** `<StatusBar />` 自行按当前活动标签取内容。
+**Interfaces:**
+- Consumes: `useTabs`（当前活动标签）、Task 2 的 `ThreadInfo.{model, effort, permissionMode}`、`useStatusStore`
+- Produces: `<StatusBar />`；`export function buildSessionStatusText(t: {model?, effort?, permissionMode?}): string`；`export function buildOverviewStatusText(counts: {total: number; running: number; awaiting: number}): string`
+
+> 把两段文案抽成纯函数，是因为「缺失字段不留空段」这条最容易出错，而它在纯函数上一目了然、也测得干净。
 
 - [ ] **Step 1: 写失败测试**
 
-```tsx
-it('会话标签显示「模型 · effort · 权限模式」', () => { /* 断言三段都在 */ })
-it('总览标签显示「n 个会话 · n 运行中 · n 等待回答」', () => { /* ... */ })
-it('主页标签同样显示会话统计', () => { /* ... */ })
-it('字段缺失时该段不显示，不出现「· ·」这样的空段', () => { /* ... */ })
+```ts
+import { describe, expect, it } from 'vitest'
+import { buildOverviewStatusText, buildSessionStatusText } from '../components/StatusBar'
+
+describe('buildSessionStatusText（spec §5.2：会话标签显示模型 · effort · 权限模式）', () => {
+  it('三项齐全时以 · 连接', () => {
+    expect(buildSessionStatusText({ model: 'claude-opus-5', effort: 'xhigh', permissionMode: 'acceptEdits' }))
+      .toBe('Opus 5 · xhigh · acceptEdits')
+  })
+
+  it('缺失的段直接略去，不留下「· ·」这样的空段', () => {
+    expect(buildSessionStatusText({ model: 'claude-opus-5', effort: null, permissionMode: 'plan' }))
+      .toBe('Opus 5 · plan')
+  })
+
+  it('三项全缺时返回空串，由调用方决定不渲染', () => {
+    expect(buildSessionStatusText({})).toBe('')
+  })
+})
+
+describe('buildOverviewStatusText（总览/主页显示会话统计）', () => {
+  it('统计三个数字', () => {
+    expect(buildOverviewStatusText({ total: 12, running: 2, awaiting: 1 }))
+      .toBe('12 个会话 · 2 运行中 · 1 等待回答')
+  })
+
+  it('运行中与等待均为 0 时只显示总数，不堆砌 0', () => {
+    expect(buildOverviewStatusText({ total: 5, running: 0, awaiting: 0 })).toBe('5 个会话')
+  })
+})
 ```
 
-- [ ] **Step 2–5:** 确认失败 → 实现（effort/权限模式来自 Task 2 的 `ThreadInfo`；统计来自 `useStatusStore`）→ 确认通过 → 提交
+组件层：
+
+```tsx
+describe('StatusBar 随标签切换而变化', () => {
+  it('活动标签是会话时显示该会话的模型与 effort', () => {
+    // 构造一个 term 标签，其活动窗格指向某 thread；断言文案出现
+  })
+
+  it('活动标签是总览页时显示会话统计', () => {
+    // 打桩 useStatusStore 的 statuses；断言「n 个会话 · n 运行中」出现
+  })
+
+  it('活动标签是主页时同样显示会话统计', () => { /* 同上 */ })
+})
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `npx vitest run src/__tests__/StatusBar.test.tsx`
+Expected: FAIL —— 模块不存在
+
+- [ ] **Step 3: 实现**
+
+纯函数用「收集非空段再 `join(' · ')`」实现，天然满足「不留空段」。组件按 `useTabs` 的活动标签 `kind` 分派。样式在 `App.css` 里以主题变量着色，高度固定，不参与终端测量容器（**切勿把状态栏放进 FitAddon 测量的元素内**——本项目曾因把间距放进测量容器而裁掉终端底部一行）。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `npx vitest run src/__tests__/StatusBar.test.tsx`
+Expected: PASS
+
+- [ ] **Step 5: 提交**
 
 ```bash
+git add src/components/StatusBar.tsx src/App.tsx src/App.css src/__tests__/StatusBar.test.tsx
 git commit -m "feat(ui): 底部常驻状态栏（会话显示模型·effort·权限模式，总览显示统计）"
 ```
 
@@ -917,21 +1148,73 @@ git commit -m "feat(ui): 底部常驻状态栏（会话显示模型·effort·权
 
 ### Task 11: sub-agent 徽章异步补齐
 
-**Files:** Modify `src/components/OverviewPage.tsx`、`src/ipc.ts`；Test 扩充 `OverviewPage.test.tsx`
+**Files:**
+- Modify: `src/components/OverviewPage.tsx`、`src/ipc.ts`
+- Test: `src/__tests__/OverviewPage.test.tsx`（扩充）
+
+**Interfaces:**
+- Consumes: Task 3 的 `count_subagents` 命令
+- Produces: `src/ipc.ts` 中 `countSubagents(dirName: string, rootKey: string): Promise<number>`
 
 - [ ] **Step 1: 写失败测试**
 
 ```tsx
-it('首屏不阻塞：方块先渲染，⑂ 徽章随后出现', async () => { /* 先断言方块在、⑂ 不在；resolve 后断言 ⑂ 出现 */ })
-it('计数失败时静默略过该徽章，不影响其它方块', async () => { /* invoke reject */ })
-it('组件卸载后到达的响应不写 state（避免 React 警告与错位）', async () => { /* ... */ })
+describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
+  it('方块先渲染，⑂ 徽章随后出现', async () => {
+    let resolveCount: (n: number) => void = () => {}
+    vi.mocked(ipc.countSubagents).mockReturnValue(new Promise((r) => { resolveCount = r }))
+    render(<OverviewPage dirName="proj" />)
+    // 首屏：方块已在，徽章未到
+    expect(await screen.findByText('重构解析器')).toBeInTheDocument()
+    expect(screen.queryByText(/⑂/)).not.toBeInTheDocument()
+    // 计数返回后徽章出现
+    resolveCount(7)
+    expect(await screen.findByText('⑂ 7')).toBeInTheDocument()
+  })
+
+  it('计数失败时静默略过该徽章，其它方块不受影响', async () => {
+    vi.mocked(ipc.countSubagents).mockRejectedValue(new Error('读文件失败'))
+    render(<OverviewPage dirName="proj" />)
+    expect(await screen.findByText('重构解析器')).toBeInTheDocument()
+    expect(screen.queryByText(/⑂/)).not.toBeInTheDocument()
+  })
+
+  it('组件卸载后到达的响应不写 state（沿用 ConversationPanel 的陈旧响应守卫）', async () => {
+    let resolveCount: (n: number) => void = () => {}
+    vi.mocked(ipc.countSubagents).mockReturnValue(new Promise((r) => { resolveCount = r }))
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { unmount } = render(<OverviewPage dirName="proj" />)
+    unmount()
+    resolveCount(3)
+    await Promise.resolve()
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('并发受限：会话很多时不一次性发起全部请求', async () => {
+    // 构造 20 个 thread；断言首轮同时在飞的调用数不超过 4
+  })
+})
 ```
 
-> 第三条沿用 `ConversationPanel.tsx` 里既有的 `requestIdRef` 陈旧响应守卫写法。
+- [ ] **Step 2: 跑测试确认失败**
 
-- [ ] **Step 2–5:** 确认失败 → 实现（方块渲染完成后逐个 `count_subagents`，并发上限 4，结果进本地 state）→ 确认通过 → 提交
+Run: `npx vitest run src/__tests__/OverviewPage.test.tsx`
+Expected: FAIL
+
+- [ ] **Step 3: 实现**
+
+方块渲染完成后，用一个并发上限为 4 的简单队列逐个调 `countSubagents`，结果写入 `Map<blockKey, number>` 本地 state。用 `requestIdRef`（照搬 `ConversationPanel.tsx` 的写法）丢弃卸载后或 `dirName` 已切换时到达的响应。失败的单个请求 `catch` 后略过，不影响其它。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `npx vitest run src/__tests__/OverviewPage.test.tsx`
+Expected: PASS
+
+- [ ] **Step 5: 提交**
 
 ```bash
+git add src/components/OverviewPage.tsx src/ipc.ts src/__tests__/OverviewPage.test.tsx
 git commit -m "feat(ui): 总览页异步补齐 sub-agent 徽章，不阻塞首屏"
 ```
 
