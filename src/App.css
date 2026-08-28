@@ -267,6 +267,14 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .thread-row .time { color: var(--color-text-faint); flex: none; }
 .new-conv { color: var(--color-accent-text); }
 
+/* 主页搜索结果（HomePage.tsx 输入框改为过往对话搜索后新增）：按项目分组，组标题
+   复用既有的 .section-label（"最近项目"同一样式），行本身复用既有的 .thread-row/
+   .thread-row-main（与 ThreadRow 视觉上是同一种行），只多一个内联的项目名标签；
+   无匹配时的"运行命令"兜底行复用 .new-conv 的强调色，与"＋ 新对话"同一基调（都是
+   "创建新东西"的行为，用同一种视觉提示）。 */
+.search-results { margin-top: 12px; }
+.search-result-project { flex: none; color: var(--color-text-faint); font-size: 11px; }
+
 /* 状态点（StatusDot.tsx）：Sidebar 会话行、主页项目卡片聚合/展开会话行共用，见设计
    文档 §7。.status-dot-slot 恒渲染、固定尺寸——状态未知（aggregateStatus 的 'unknown'，
    或干脆是 undefined）时内部什么都不画，但这块占位始终都在，相邻标题文字不会因为
