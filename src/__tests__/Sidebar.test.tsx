@@ -462,10 +462,16 @@ describe('Sidebar — 窗口级兜底：被拖会话项在拖拽中途从 DOM �
       fireEvent.pointerUp(item, { clientX: 300, clientY: 50, pointerId: 1 }) // 正常路径收尾，走 endDrag()
     })
 
+    // pointerup/pointercancel 依旧走捕获阶段——这两处没有改动（见 dragSafetyNet.ts）。
     const removedCaptureTypes = removeSpy.mock.calls
       .filter(([, , opts]) => typeof opts === 'object' && opts !== null && opts.capture === true)
       .map(([type]) => type)
-    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel', 'blur']))
+    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel']))
+    // blur 改成非捕获阶段监听（见 dragSafetyNet.ts 顶部注释），摘除时不带 capture:true。
+    const blurRemovedWithoutCapture = removeSpy.mock.calls.some(
+      ([type, , opts]) => type === 'blur' && !(typeof opts === 'object' && opts !== null && opts.capture === true),
+    )
+    expect(blurRemovedWithoutCapture).toBe(true)
 
     // 监听器确实摘掉了：清理之后再有一次原生 pointerup 落在 window 上，不会再产生任何
     // 可观察效果（body class 早已是干净状态，不会被重新弄脏，也不会误触发任何动作）。

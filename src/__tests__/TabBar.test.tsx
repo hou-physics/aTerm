@@ -758,10 +758,18 @@ describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失
       fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 正常路径收尾，走 endDrag()
     })
 
+    // pointerup/pointercancel 依旧走捕获阶段——这两处没有改动（见 dragSafetyNet.ts）。
     const removedCaptureTypes = removeSpy.mock.calls
       .filter(([, , opts]) => typeof opts === 'object' && opts !== null && opts.capture === true)
       .map(([type]) => type)
-    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel', 'blur']))
+    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel']))
+    // blur 改成非捕获阶段监听（见 dragSafetyNet.ts 顶部注释：捕获阶段对不冒泡的事件
+    // 同样会看到文档树里任意元素的失焦，只有非捕获阶段的 window 监听器才只在 window
+    // 自己是事件目标时才会被命中）——因此这里摘除时不带 capture:true，单独断言一次。
+    const blurRemovedWithoutCapture = removeSpy.mock.calls.some(
+      ([type, , opts]) => type === 'blur' && !(typeof opts === 'object' && opts !== null && opts.capture === true),
+    )
+    expect(blurRemovedWithoutCapture).toBe(true)
 
     // 监听器确实摘掉了：清理之后再有一次原生 pointerup 落在 window 上，不会再产生任何
     // 可观察效果（body class 早已是干净状态，不会被重新弄脏，也不会误触发任何动作）。
@@ -771,6 +779,59 @@ describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失
     })
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+})
+
+// 上一轮回归（本轮修复，见 .superpowers/drag-blur-fix-report.md）：dragSafetyNet.ts 的
+// blur 兜底曾经用 capture:true 挂在 window 上。捕获阶段对不冒泡的事件同样会先经过
+// window——这意味着文档树里任意元素的 blur（不只是窗口整体失焦）都会被这张网误判成
+// "应当中止拖拽"。pointerdown 上一轮移除了 preventDefault()（见 onTabPointerDown
+// 注释）之后，焦点会正常从此前聚焦的元素（例如 xterm 的隐藏 textarea）移开，产生一次
+// 元素级 blur——这张网在 pointerdown 刚挂上、第一次 pointermove 还没发生之前就先把
+// dragRef 清空了，导致 onTabPointerMove 读到 null 直接 return，拖拽从未真正开始。
+// 三处拖拽源（TabBar/Sidebar/TabPanes）共用同一张网，症状是"所有拖拽都失效"。
+describe('TabBar — 回归：pointerdown 之后任意元素失焦不应中止正在进行的拖拽', () => {
+  it('pointerdown → 文档内某元素 blur（不是 window 失焦）→ pointermove 越过阈值：拖拽仍正常开始并能完成排序', async () => {
+    const TAB_C = { id: 'tab-c', kind: 'term' as const, title: 'C', panes: [{ id: 'pane-c', ptyId: 'pty-c', title: 'C' }], activePaneId: 'pane-c' }
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B, TAB_C], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },
+      'tab:tab-a': { left: 50, width: 100 },
+      'tab:tab-b': { left: 150, width: 100 },
+      'tab:tab-c': { left: 250, width: 100 }, // 中点 300
+    })
+    const c = tabEl('C')
+
+    // 模拟真实场景里 xterm 的隐藏 textarea：pointerdown 之后浏览器把焦点从它上面移开，
+    // 触发一次纯粹的元素级 blur（不冒泡，target 是这个元素，不是 window）。
+    const fakeXtermTextarea = document.createElement('textarea')
+    document.body.appendChild(fakeXtermTextarea)
+    fakeXtermTextarea.focus()
+
+    await act(async () => {
+      fireEvent.pointerDown(c, { clientX: 300, clientY: 10, pointerId: 1 })
+    })
+    await act(async () => {
+      fakeXtermTextarea.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false }))
+      await Promise.resolve() // 安全网内部用 queueMicrotask 延后判断，见 dragSafetyNet.ts
+    })
+    await act(async () => {
+      fireEvent.pointerMove(c, { clientX: 150, clientY: 10, pointerId: 1 }) // 跨过 4px 阈值
+    })
+
+    // 用户可见症状的直接反证：如果安全网被元素 blur 误触发，dragRef 已经被清空，
+    // onTabPointerMove 开头 `if (!drag) return` 会让指示线永远不出现。
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.pointerUp(c, { clientX: 150, clientY: 10, pointerId: 1 })
+    })
+
+    // 断言真实 store 状态（不是 mock 调用记录）：排序确实落地了。
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-c', 'tab-b'])
+    document.body.removeChild(fakeXtermTextarea)
   })
 })
 

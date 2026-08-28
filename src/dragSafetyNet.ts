@@ -30,8 +30,34 @@
 // pointerId 一致时才触发兜底——避免多点触控等场景下，一次与本次拖拽无关的指针抬起
 // 提前打断仍在进行中的合法拖拽（同样是"网把合法拖拽提前打断"的风险，只是触发方式不同）。
 // blur 没有 pointerId 的概念，窗口整体失焦（例如 ⌘Tab 切到另一个 App）本身就是一个
-// 足够明确的"应当中止拖拽"信号，不需要过滤、也不存在与"正常收尾"竞争的问题，但为了
-// 三个事件走同一套简单心智模型，同样经 queueMicrotask 延后判断，不做特殊处理。
+// 足够明确的"应当中止拖拽"信号，不需要按 pointerId 过滤、也不存在与"正常收尾"竞争的
+// 问题，但同样经 queueMicrotask 延后判断（三个事件共用同一套简单心智模型）。
+//
+// 【重要】blur 绝不能像上面两个事件那样用 capture:true——这不是风格问题，是曾经真实
+// 导致"所有拖拽都失效"的一次回归的根因。pointerup/pointercancel 是会冒泡的事件，
+// capture:true 只是让这张网在冒泡阶段之前先看到它们，不改变"谁能看到"这件事本身
+// （不管捕不捕获，pointerup/pointercancel 最终都会经过 window）。blur 不一样：blur
+// 不冒泡，但"不冒泡"只挡住了冒泡阶段，挡不住捕获阶段——捕获阶段是从 window 往下走到
+// 事件目标的，不管目标是谁、目标的事件冒不冒泡，捕获阶段都必然先经过 window。于是
+// capture:true 的 window blur 监听器实际收到的是"文档树里任意元素的 blur"，不是
+// "窗口整体失焦"：pointerdown 之后，浏览器把焦点从此前聚焦的元素（例如 xterm 的隐藏
+// textarea）移开是完全正常的一步，这一步产生的普通元素 blur 会被这张网误判成"应当
+// 中止拖拽"，在第一次 pointermove 发生之前就把 dragRef 清空——拖拽因此从未真正开始。
+// 三处拖拽源（TabBar/Sidebar/TabPanes）共用这一张网，症状是全局性的"所有拖拽都失效"。
+//
+// 正确写法是不传 capture（等价于 capture:false，冒泡阶段/目标阶段监听）：blur 不冒泡，
+// 因此一个非捕获阶段的 window 监听器只会在 window 自己就是事件目标时才被调用——这正是
+// "窗口整体失焦"的准确定义，不多不少。再加一层显式的目标判定（见 onBlur）纯粹是为了
+// "写在代码里、不依赖别人记住这段注释"：万一将来有人把这个监听器改挂到 document 上，
+// 或者不小心又给它加回 capture:true，这层判定依然能挡住"目标不是 window"的调用，
+// 不会重演这次回归。判定没有直接写 `e.target === window`：这个模块作用域里能拿到的
+// `window` 引用，和事件分发算法内部用来生成 target 的 window 对象，未必是同一个引用
+// ——例如本仓库的 vitest+jsdom 单测环境就是这样，`window.dispatchEvent(...)` 内部
+// 派发时使用的 window 对象与测试/源码里 `window` 这个全局变量并不是同一个对象引用
+// （语义上是同一个"窗口"，但 `===` 比较为 false）。因此改用一条对任何 Window 对象都
+// 成立、对任何 DOM 节点都不成立的不变式：Window 对象的 `.window` getter 恒等于自身，
+// DOM 节点根本没有这个属性（读出来是 undefined）。两条判据（字面比较 + 自指不变式）
+// 任一成立就够，字面比较留着是因为它是最直接、最不需要解释的第一直觉。
 export function attachDragSafetyNet(pointerId: number, isDragActive: () => boolean, endDrag: () => void): () => void {
   const trigger = () => {
     queueMicrotask(() => {
@@ -44,15 +70,21 @@ export function attachDragSafetyNet(pointerId: number, isDragActive: () => boole
   const onPointerCancel = (e: PointerEvent) => {
     if (e.pointerId === pointerId) trigger()
   }
-  const onBlur = () => trigger()
+  const onBlur = (e: FocusEvent) => {
+    const target = e.target as (EventTarget & { window?: unknown }) | null
+    const isWindowItself = target === (window as unknown as EventTarget) || (!!target && target.window === target)
+    if (!isWindowItself) return
+    trigger()
+  }
 
   window.addEventListener('pointerup', onPointerUp, { capture: true })
   window.addEventListener('pointercancel', onPointerCancel, { capture: true })
-  window.addEventListener('blur', onBlur, { capture: true })
+  // 不传 capture——原因见上方大段注释，这是这次修复的关键一行。
+  window.addEventListener('blur', onBlur)
 
   return () => {
     window.removeEventListener('pointerup', onPointerUp, { capture: true })
     window.removeEventListener('pointercancel', onPointerCancel, { capture: true })
-    window.removeEventListener('blur', onBlur, { capture: true })
+    window.removeEventListener('blur', onBlur)
   }
 }
