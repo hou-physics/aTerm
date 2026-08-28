@@ -13,6 +13,7 @@ import { useSessions } from '../store/sessions'
 import { useThreadStatus } from '../store/status'
 import { useTabs } from '../store/tabs'
 import { basename, formatRelative } from '../time'
+import { HooksControl } from './HooksInstall'
 import { StatusDot } from './StatusDot'
 import { ThemeSwitcher } from './ThemeSwitcher'
 
@@ -191,6 +192,7 @@ export function Sidebar() {
           />
         ))}
       </div>
+      <HooksControl />
       <ThemeSwitcher />
     </>
   )

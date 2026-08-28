@@ -246,6 +246,75 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   to { transform: rotate(360deg); }
 }
 
+/* hooks 安装器设置区手动入口（spec §6）：与 .theme-switcher 同一处"底部设置角"，
+   同一套 margin-top/padding-top/border-top 分隔条写法，视觉上两者依次堆叠、观感统一。 */
+.hooks-control {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+.hooks-control-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--color-text-dim); }
+.hooks-control-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hooks-control-action {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-elevated);
+  color: var(--color-text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: default;
+}
+.hooks-control-action:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
+.hooks-control-action:disabled { opacity: .6; }
+.hooks-control-error { margin-top: 6px; font-size: 11px; color: var(--color-text); word-break: break-word; }
+
+/* hooks 安装提示条（spec §6）：主页顶部，边框而非阴影的既有扁平风格，与 .card 同一基调。
+   flex-wrap 让失败时的错误信息独占一行，不挤压说明文字/按钮。 */
+.hooks-prompt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-elevated);
+  color: var(--color-text);
+  font-size: 12.5px;
+}
+.hooks-prompt-text { flex: 1; min-width: 200px; }
+.hooks-prompt-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.hooks-prompt-install {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+.hooks-prompt-install:hover:not(:disabled) { opacity: .9; }
+.hooks-prompt-install:disabled { opacity: .6; }
+.hooks-prompt-dismiss {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-panel);
+  color: var(--color-text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: default;
+}
+.hooks-prompt-dismiss:hover { border-color: var(--color-accent); color: var(--color-text); }
+.hooks-prompt-error { flex: 0 0 100%; font-size: 11.5px; color: var(--color-text); }
+
 .theme-switcher {
   position: relative;
   margin-top: 10px;

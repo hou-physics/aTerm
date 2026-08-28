@@ -12,6 +12,13 @@ vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: v
 // 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
 // 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。
 vi.mock('../store/status', () => ({ statusEventsReady: Promise.resolve(), useThreadStatus: () => undefined, useProjectStatus: () => 'unknown' as const }))
+// 与上面 store/status 同一理由：这批测试不关心 hooks 安装状态，整个模块换成不触碰真实
+// ipc 调用的空实现（真实行为由 HooksInstall.test.tsx / hooksInstall.test.ts 单独覆盖）。
+vi.mock('../store/hooksInstall', () => ({
+  hooksInstallReady: Promise.resolve(),
+  hooksPhase: () => null,
+  useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
+}))
 vi.mock('../closeRequest', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 

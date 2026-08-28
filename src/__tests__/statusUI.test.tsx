@@ -28,6 +28,14 @@ vi.mock('../ipc', () => ({
 // 的空实现（真实的 session-status 合并行为由上面的 listenMock/getSessionStatusesMock
 // 覆盖，二者是两条独立的事件流）。
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// 这批测试关心的是 session-status 的合并/聚合渲染，不关心 hooks 安装状态：换成不触碰
+// 真实 ipc 调用的空实现（真实行为由 HooksInstall.test.tsx / hooksInstall.test.ts 单独
+// 覆盖），避免 hooksStatus 缺席于上面的 ipc mock 时打印无关的 console.error 噪音。
+vi.mock('../store/hooksInstall', () => ({
+  hooksInstallReady: Promise.resolve(),
+  hooksPhase: () => null,
+  useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
+}))
 
 function entry(over: Partial<SessionStatusPayload> = {}): SessionStatusPayload {
   return {

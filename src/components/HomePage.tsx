@@ -4,6 +4,7 @@ import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { useSessions } from '../store/sessions'
 import { useProjectStatus, useThreadStatus } from '../store/status'
 import { basename, formatRelative } from '../time'
+import { HooksPromptBar } from './HooksInstall'
 import { StatusDot } from './StatusDot'
 
 export function HomePage() {
@@ -12,6 +13,7 @@ export function HomePage() {
   const [expanded, setExpanded] = useState<string | null>(null)
   return (
     <div className="home">
+      <HooksPromptBar />
       <input
         className="cmd-input"
         placeholder="输入命令，回车在新标签页运行…（留空回车 = 新终端）"
