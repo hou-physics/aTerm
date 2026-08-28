@@ -21,12 +21,14 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { resumeThread } from '../actions'
+import { attachDragSafetyNet } from '../dragSafetyNet'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
 import {
   BLOCK_WIDTH_PX, canvasHeight, clampPosition, columnsForWidth, gridSlot,
 } from '../overviewLayout'
 import { DRAG_THRESHOLD_PX } from '../paneDrop'
 import { blockKey, useOverviewStore, type Position } from '../store/overview'
+import { useDragGhost } from '../store/dragGhost'
 import { useSessions } from '../store/sessions'
 import { SessionBlock } from './SessionBlock'
 
@@ -58,15 +60,30 @@ export function OverviewPage({ dirName }: { dirName: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [containerWidth, setContainerWidth] = useState(0)
 
+  // 宽度为 0 时不写入 state（只保留上一次量到的好值）：Task 8 接入后，未激活的总览
+  // 标签会和 TabPanes.tsx 的既有做法一样常驻挂载、只是 display:none 隐藏（不会真的
+  // 卸载重挂）——被隐藏期间这个元素的盒子会整体塌缩成 0×0，如果照单全收，
+  // containerWidth 会被写成 0 → columnsForWidth(0) === 1 → 每个持久化位置都被
+  // clampPosition 钳到 x:0，切回来的一瞬间所有方块会先在原点闪一下，直到
+  // ResizeObserver 补上下一次真实测量为止。commit 086f80c 就是这个项目修过一次同一类
+  // bug（终端可见性判定），这里直接从一开始就不落入同一个坑：宽度只在真的量到非零值
+  // 时才更新，隐藏期间的 containerWidth 保持上一次的好值不变，可见性恢复后
+  // ResizeObserver 自然会送来一次新的真实宽度。
   const measure = useCallback(() => {
     const el = containerRef.current
-    if (el) setContainerWidth(el.getBoundingClientRect().width)
+    if (!el) return
+    const w = el.getBoundingClientRect().width
+    if (w > 0) setContainerWidth(w)
   }, [])
 
-  // 结构性变化（进入这个标签、order 变化导致方块数变化）：同步测一次，赶在浏览器
-  // 上屏前算好列数，避免"先按 0 宽度画一帧、下一帧才补上正确列数"的闪烁——与下面
-  // ResizeObserver 驱动的连续几何变化（窗口缩放、侧边栏收起展开）刻意分成两条路径，
-  // 同 TerminalLayer.tsx 的既有拆分。
+  // 这个 effect 只处理"容器与本组件在同一帧首次挂载"这一种边界情况（同步测一次，
+  // 赶在浏览器上屏前算好列数，避免第一帧按 0 宽度画、下一帧才补上正确列数的闪烁）
+  // ——它的依赖数组是恒定不变的 measure（本身 deps 为 []），因此这个 effect 只会在
+  // 挂载时跑一次，此后永远不会重新执行；这是有意为之，不是遗漏依赖。真正处理"此后
+  // 尺寸怎么变化"（标签重新变为可见、窗口缩放、侧边栏收起展开）的是下面那个
+  // ResizeObserver——它在整个组件生命周期内持续观察，包括 display:none → block 这一
+  // 类尺寸变化，不需要这里的同步 effect 跟着重跑。与 TerminalLayer.tsx 的既有拆分
+  // 同一个理由。
   useLayoutEffect(() => {
     measure()
   }, [measure])
@@ -147,8 +164,35 @@ type DragState = { startX: number; startY: number; startPos: Position; dragging:
 // onDoubleClick 全部收不到事件。这里的做法是把 setPointerCapture 推迟到确认真的
 // 越过 4px 阈值、已经判定为拖拽之后才调用（和"只在越过阈值后才 preventDefault"
 // 同一时机）：轻点/双击全程不会越过阈值，指针从未被捕获，SessionBlock 自己的双击
-// 逻辑不受任何影响；真正开始拖拽后再捕获，才需要保证指针跑出这层包装 div 的边界时
-// move/up 仍能送达同一个元素。
+// 逻辑不受任何影响。
+//
+// 但这个"推迟捕获"的决定本身留了一个洞（首轮实现遗漏、复审发现）：React 的
+// onPointerMove/onPointerUp props 只在事件的传播路径经过这个包装 div 时才会触发；
+// 越过阈值之前既没有 setPointerCapture、鼠标指针也没有触屏那种隐式捕获，如果一次
+// pointermove 的位移直接越过了方块的边界（约 260×116px，浏览器按帧节奏派发
+// pointermove，靠近边缘起手的快速拖拽很容易一帧走 16–50px），事件会落在别的元素
+// 上，这个组件收不到——dragging 永远不会置 true，方块不会动；随后 pointerup 也落
+// 在别处，本组件的 onPointerUp 同样收不到，dragRef.current 就此变成一条不会被清理
+// 的陈旧记录。鼠标的 pointerId 在整个会话期间不变，下次哪怕只是把光标悬停到同一个
+// 方块上（完全没有按键），onPointerMove 又会命中、读到这条陈旧记录、算出的位移轻易
+// 超过 4px 阈值，于是在没有任何按键按下的情况下开始"拖拽"、setPointerCapture、
+// 方块跟着光标跑，直到某次点击才会歪打正着地释放捕获。
+//
+// 解法：不再依赖 React 的事件委托来接住阈值前后的 move/up，而是在 pointerdown 里
+// 用原生 window 级监听器接管这次手势从头到尾的 move/up/cancel（挂在 window 上，不
+// 依赖指针当前具体落在哪个元素之上，因此无论越过阈值前后，事件都保证能送达）；手势
+// 结束（正常落手、取消、或安全网兜底）时统一摘除。setPointerCapture 仍然保留、仍然
+// 推迟到越过阈值后才调用——window 监听器解决的是"事件送不送得到这个组件"，
+// setPointerCapture 解决的是浏览器原生的 hover/文本选择等副作用，两者不是同一件事，
+// 不能相互替代。
+//
+// 同时接入本项目共用的窗口级拖拽安全网（dragSafetyNet.ts，TabBar.tsx/Sidebar.tsx/
+// TabPanes.tsx 三处既有拖拽源都在用）：它的头部注释明确写了 lostpointercapture 经
+// React 合成事件委托投递并不可靠（元素在浏览器派发这个事件之前就已经从 DOM 移除时，
+// 冒泡路径里可能根本不包含 React 挂载的根节点）。这个手柄一样会遇到——例如拖拽中途
+// ⌘Tab 切到别的 App（window blur），此时指针捕获仍握着、也不会有 pointerup，如果
+// 没有这张网，dragRef.current 会永远停在 {dragging:true}，切回来后方块还会跟着光标
+// 漂移。
 function DraggableBlock({
   blockKey: key,
   thread,
@@ -165,66 +209,126 @@ function DraggableBlock({
   onOpen: (t: ThreadInfo) => void
 }) {
   const dragRef = useRef<DragState | null>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  // 摘除这次手势挂在 window 上的原生 move/up/cancel 监听器；与下面的 netCleanupRef
+  // 是两件独立的事——前者是这个手柄自己的事件接管，后者是共用的窗口级安全网，各自
+  // 独立挂、独立摘，互不代替（同 TabBar.tsx 的 netCleanupRef 注释）。
+  const gestureCleanupRef = useRef<(() => void) | null>(null)
+  const netCleanupRef = useRef<(() => void) | null>(null)
   const setPosition = useOverviewStore((s) => s.setPosition)
   const commitPosition = useOverviewStore((s) => s.commitPosition)
+
+  // 拖拽清理的唯一入口：正常落手、pointercancel、安全网兜底、组件卸载兜底都走这里，
+  // 与三处既有拖拽源同一个 idiom。对"根本没有拖拽在进行"是安全的空操作，被调用多次
+  // 也无害。
+  const endDrag = useCallback(() => {
+    gestureCleanupRef.current?.()
+    gestureCleanupRef.current = null
+    netCleanupRef.current?.()
+    netCleanupRef.current = null
+    dragRef.current = null
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (dragRef.current) endDrag()
+    }
+  }, [endDrag])
 
   const onPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     // 不在这里 preventDefault——本项目踩过的坑：pointerdown 上无条件 preventDefault
     // 会吞掉后续合成的 click，方块的双击打开/右键菜单都会点不动（见 TabPanes.tsx/
     // TabBar.tsx/Sidebar.tsx 同一处注释与 PaneDetach.test.tsx 的回归测试）。真正的
-    // 抑制挪到下面 onPointerMove 里，只在确认越过阈值、真的开始拖拽后才调用。
-    dragRef.current = { startX: e.clientX, startY: e.clientY, startPos: pos, dragging: false, pointerId: e.pointerId }
-  }, [pos])
+    // 抑制挪到下面 handleMove 里，只在确认越过阈值、真的开始拖拽后才调用。
+    //
+    // 屏蔽文本选择（SessionBlock 里标题/预览行全是可选中文本）：与三处既有拖拽源
+    // 同一时机——按下就生效，与是否真的越过阈值无关，只碰 body class，不调用
+    // preventDefault。
+    useDragGhost.getState().blockSelect()
 
-  const onPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current
-    if (!drag || drag.pointerId !== e.pointerId) return
-    if (!drag.dragging) {
-      if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
-      drag.dragging = true
-      // 见上方组件注释：越过阈值、确认是拖拽之后才捕获指针，避免吞掉 SessionBlock
-      // 自己的双击。
-      e.currentTarget.setPointerCapture?.(e.pointerId)
-    }
-    e.preventDefault()
-    const next = {
-      x: drag.startPos.x + (e.clientX - drag.startX),
-      y: drag.startPos.y + (e.clientY - drag.startY),
-    }
-    // 两动作范式：拖拽过程中只改内存（setPosition），不落盘——pointerup 才
-    // commitPosition。经 clampPosition 钳制，拖拽途中也不会被拖出可见区。
-    setPosition(key, clampPosition(next, containerWidth))
-  }, [key, containerWidth, setPosition])
+    const pointerId = e.pointerId
+    const startPos = pos
+    dragRef.current = { startX: e.clientX, startY: e.clientY, startPos, dragging: false, pointerId }
 
-  const onPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current
-    if (!drag || drag.pointerId !== e.pointerId) return
-    e.currentTarget.releasePointerCapture?.(e.pointerId)
-    if (drag.dragging) {
-      const next = {
-        x: drag.startPos.x + (e.clientX - drag.startX),
-        y: drag.startPos.y + (e.clientY - drag.startY),
+    const handleMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      const drag = dragRef.current
+      if (!drag) return
+      // e.buttons === 0 表示这次 move 到达时按键其实已经松开（正常路径下 pointerup
+      // 会先摘掉这个监听器，这里理论上不该发生；留着是防御——万一某个平台/时序下
+      // move 抢在 up 之前的清理完成，也不会把一次没有按键的悬停误判成拖拽在继续）。
+      // 只能消掉"误判成拖拽"这一个症状，救不回已经错过的那次真实拖拽，所以不能只
+      // 靠它——真正的修复是上面这一整套 window 级监听器本身。
+      if (ev.buttons === 0) { endDrag(); return }
+      if (!drag.dragging) {
+        if (Math.hypot(ev.clientX - drag.startX, ev.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
+        drag.dragging = true
+        // 见上方组件注释：越过阈值、确认是拖拽之后才捕获指针，避免吞掉 SessionBlock
+        // 自己的双击。
+        wrapRef.current?.setPointerCapture?.(pointerId)
       }
-      commitPosition(key, clampPosition(next, containerWidth))
+      ev.preventDefault()
+      const next = {
+        x: drag.startPos.x + (ev.clientX - drag.startX),
+        y: drag.startPos.y + (ev.clientY - drag.startY),
+      }
+      // 两动作范式：拖拽过程中只改内存（setPosition），不落盘——pointerup 才
+      // commitPosition。经 clampPosition 钳制，拖拽途中也不会被拖出可见区。
+      setPosition(key, clampPosition(next, containerWidth))
     }
-    dragRef.current = null
-  }, [key, containerWidth, commitPosition])
 
-  // 指针捕获被浏览器隐式释放、或该指针被取消时：只清理拖拽状态，不识别落点/不
-  // 持久化——与 TabBar.tsx/Sidebar.tsx/TabPanes.tsx 同一套"只清理"约定。
+    // pointerup 与 pointercancel 共用同一个收尾逻辑（与 TabPanes.tsx 的
+    // onPointerCancel={onPointerUp} 同一约定）：只有真的越过阈值（drag.dragging）
+    // 才落盘，纯点击/取消都不产生任何持久化。
+    const handleEnd = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      const drag = dragRef.current
+      wrapRef.current?.releasePointerCapture?.(pointerId)
+      if (drag?.dragging) {
+        const next = {
+          x: drag.startPos.x + (ev.clientX - drag.startX),
+          y: drag.startPos.y + (ev.clientY - drag.startY),
+        }
+        commitPosition(key, clampPosition(next, containerWidth))
+      }
+      endDrag()
+    }
+
+    // 挂新的手势监听器前先摘掉任何仍然挂着的旧的（与下面 netCleanupRef 同一套保险，
+    // 理论上不该发生——每次手势结束都会经 endDrag() 摘掉自己的，这里是防万一）。
+    gestureCleanupRef.current?.()
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleEnd)
+    window.addEventListener('pointercancel', handleEnd)
+    gestureCleanupRef.current = () => {
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleEnd)
+      window.removeEventListener('pointercancel', handleEnd)
+    }
+
+    // 挂新网前先摘掉任何仍然挂着的旧网——见 TabBar.tsx onTabPointerDown 同名注释，
+    // 三处既有拖拽源同一套保险。
+    netCleanupRef.current?.()
+    netCleanupRef.current = attachDragSafetyNet(
+      pointerId,
+      () => dragRef.current !== null && dragRef.current.pointerId === pointerId,
+      endDrag,
+    )
+  }, [pos, key, containerWidth, setPosition, commitPosition, endDrag])
+
+  // 指针捕获被浏览器隐式释放时补发的退出路径——与 TabBar.tsx/Sidebar.tsx/
+  // TabPanes.tsx 同一理由。这里只做清理，不识别落点/不持久化，与"取消"同一处理。
   const onLostPointerCapture = useCallback(() => {
-    dragRef.current = null
-  }, [])
+    endDrag()
+  }, [endDrag])
 
   return (
     <div
       className="overview-block-wrap"
       data-block-key={key}
+      ref={wrapRef}
       style={{ position: 'absolute', left: pos.x, top: pos.y, width: BLOCK_WIDTH_PX }}
       onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
       onLostPointerCapture={onLostPointerCapture}
     >
       <SessionBlock thread={thread} dirName={dirName} subagentCount={0} onOpen={() => onOpen(thread)} />
