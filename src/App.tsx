@@ -82,6 +82,14 @@ export default function App() {
         const tab = tabs.find((t) => t.id === activeId)
         if (tab?.kind === 'term' && tab.activePaneId) {
           void useTabs.getState().closePane(activeId, tab.activePaneId)
+        } else if (tab && tab.kind !== 'home') {
+          // 没有窗格可关、但标签本身可关：总览标签（Task 8 新增的第三种 kind）就是
+          // 这一类。这里的条件与 TabBar.tsx 里 × 按钮的显示条件（`t.kind !== 'home'`）
+          // 逐字相同，是有意为之——"关闭当前标签"这件事有 ⌘W 和 × 两个入口，两者必须
+          // 对"哪些标签可关"给出同一个答案。此前只写了 term 分支，总览标签按 × 能关、
+          // 按 ⌘W 却静默无事发生，两个入口互相矛盾。closeTab 自己对 home 也是空操作
+          // （见 tabs.ts），这里写出 kind !== 'home' 只是把意图显式化。
+          void useTabs.getState().closeTab(tab.id)
         }
       } else if (key === 'd') {
         e.preventDefault()

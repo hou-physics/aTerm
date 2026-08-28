@@ -9,7 +9,7 @@ vi.mock('../ipc', () => ({
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 import * as ipc from '../ipc'
 import { resumeThread } from '../actions'
-import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, hasPanes, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
+import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
 import type { ThreadInfo } from '../ipc'
 import { HOME_TAB, makePane, makeTermTab } from './factories'
 import { MAX_PANES } from '../paneLayout'
@@ -1060,30 +1060,14 @@ describe('overview 标签种类（spec §5.2）', () => {
     expect(useTabs.getState().tabs.filter((t) => t.kind === 'overview')).toHaveLength(2)
   })
 
-  // tabs.ts:152 的 kind === 'home' 守卫问的是"是不是主页"，不是"有没有窗格"；若误改成
-  // !hasPanes(tab)，总览标签会和主页一起被这里挡住，点击 × 按钮不会有任何效果——这条
-  // 测试直接钉住正确行为。
+  // closeTab 的 kind === 'home' 守卫问的是"是不是主页"，不是"有没有窗格"：总览标签
+  // 同样没有窗格，但它必须可关闭。若把那一行误写成"没有窗格就不给关"，总览标签会和
+  // 主页一起被挡住，点 × 不会有任何效果——这条测试直接钉住正确行为。
   it('总览标签可以被关闭——closeTab 对它不是空操作', async () => {
     useTabs.getState().openOverview('-dir-a', 'A')
     const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')!
     await useTabs.getState().closeTab(ov.id)
     expect(useTabs.getState().tabs.find((t) => t.id === ov.id)).toBeUndefined()
-  })
-})
-
-describe('hasPanes —— 取代散落各处的 kind === "home" 判断', () => {
-  it('终端标签有窗格', () => {
-    expect(hasPanes(makeTermTab({ panes: [makePane()] }))).toBe(true)
-  })
-
-  it('主页标签没有窗格', () => {
-    expect(hasPanes(HOME_TAB)).toBe(false)
-  })
-
-  it('总览标签没有窗格——这是本任务的核心不变量', () => {
-    useTabs.getState().openOverview('-dir-a', 'A')
-    const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')!
-    expect(hasPanes(ov)).toBe(false)
   })
 })
 

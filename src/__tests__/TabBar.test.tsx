@@ -7,6 +7,10 @@ vi.mock('../ipc', () => ({
   ptyKill: vi.fn(async () => {}),
   listProjects: vi.fn(async () => []),
   readConversation: vi.fn(),
+  // 下面「总览标签可以在标签栏里排序」那组测试会让 App 渲染出一个 overview 标签，
+  // App.tsx 因此挂载 OverviewPage，后者会异步补 sub-agent 徽章。给一个永不 resolve 的
+  // promise：本文件不关心徽章，也不希望它在断言体跑完之后才落地的 setState 冒出 act 警告。
+  countSubagents: vi.fn(() => new Promise<number>(() => {})),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 // 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
@@ -42,6 +46,8 @@ import { useTabs } from '../store/tabs'
 const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
 const TAB_A = { id: 'tab-a', kind: 'term' as const, title: 'A', panes: [{ id: 'pane-a', ptyId: 'pty-a', title: 'A' }], activePaneId: 'pane-a' }
 const TAB_B = { id: 'tab-b', kind: 'term' as const, title: 'B', panes: [{ id: 'pane-b', ptyId: 'pty-b', title: 'B' }], activePaneId: 'pane-b' }
+// 总览标签（Task 8 的第三种 kind）：没有窗格，但排在可滚动的标签列表里，可关闭、可排序。
+const OVERVIEW_TAB = { id: 'tab-ov', kind: 'overview' as const, title: '总览页', panes: [], dirName: '-tmp-demo' }
 
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
@@ -429,6 +435,84 @@ describe('TabBar — 标签页拖拽排序（光标在标签栏上时，同一�
     })
 
     expect(useTabs.getState().tabs).toBe(before) // 连数组引用都没变
+  })
+
+  // 终审发现：onTabPointerMove 起手那条守卫此前写的是 `dragTab.kind !== 'term'`，把
+  // 总览标签（Task 8 新增的第三种 kind）连同主页一起判成"无效拖拽源"。但两者的处境
+  // 完全不同：主页恒钉在 .tabbar-pinned 里、设计要求它不可移动，而总览标签就排在可
+  // 滚动的标签列表里，reorderTab（tabs.ts）也只认下标、不认 kind——拖它本该能排序，
+  // 实际却什么都不发生，而且没有任何反馈。守卫改成 `kind === 'home'` 之后，两条落点
+  // 分支各自把关，下面两条测试分别钉住这两半。
+  it('总览标签可以在标签栏里排序（它不是主页，没有理由被整个手势拒绝）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, OVERVIEW_TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },   // 中点 25
+      'tab:tab-a': { left: 50, width: 100 },  // 中点 100
+      'tab:tab-ov': { left: 150, width: 100 }, // 中点 200
+    })
+    const ov = tabEl('总览页')
+
+    await act(async () => {
+      fireEvent.pointerDown(ov, { clientX: 200, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(ov, { clientX: 60, clientY: 10, pointerId: 1 }) // 落在 A 之前
+    })
+    // 与 term 标签同样的反馈：插入指示条 + 跟随光标的 ghost。旧实现两者都不会出现。
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeTruthy()
+    expect(useDragGhost.getState().visible).toBe(true)
+    expect(useDnd.getState().target).toBeNull() // 但绝不是"合并"落点
+
+    await act(async () => {
+      fireEvent.pointerUp(ov, { clientX: 60, clientY: 10, pointerId: 1 })
+    })
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-ov', 'tab-a'])
+  })
+
+  it('总览标签拖进窗格区：不产生合并落点，窗格与顺序都不变（ghost 仍跟手）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, OVERVIEW_TAB], activeId: 'tab-a' })
+    await renderApp()
+    // 标签栏矩形与窗格矩形一起伪造（两份 mock 都 spy 同一个 prototype 方法，只能合成
+    // 一份）：光标必须真的落进某个窗格的矩形里，"没有产生合并落点"才是实现主动拒绝
+    // 的结果，而不是几何上压根没命中任何窗格。
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      let r = { left: 0, top: 0, width: 0, height: 0 }
+      const tabId = this.getAttribute('data-tab-id')
+      if (this.classList.contains('tabbar')) r = { left: 0, top: 0, width: 800, height: 30 }
+      else if (tabId === 'home') r = { left: 0, top: 0, width: 50, height: 26 }
+      else if (tabId === 'tab-a') r = { left: 50, top: 0, width: 100, height: 26 }
+      else if (tabId === 'tab-ov') r = { left: 150, top: 0, width: 100, height: 26 }
+      else if (this.hasAttribute('data-pane-id')) r = { left: 0, top: 100, width: 800, height: 400 }
+      return {
+        ...r, right: r.left + r.width, bottom: r.top + r.height, x: r.left, y: r.top,
+        toJSON() { return {} },
+      } as DOMRect
+    })
+    const ov = tabEl('总览页')
+    const before = useTabs.getState().tabs
+
+    await act(async () => {
+      fireEvent.pointerDown(ov, { clientX: 200, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(ov, { clientX: 240, clientY: 10, pointerId: 1 })  // 先在标签栏上：ghost 起来
+      fireEvent.pointerMove(ov, { clientX: 400, clientY: 300, pointerId: 1 }) // 再移进窗格矩形正中
+    })
+
+    expect(useDnd.getState().target).toBeNull()      // 没有合并落点
+    expect(useDnd.getState().dropMode).toBeNull()
+    expect(document.querySelector('.pane-drop-indicator')).toBeNull()
+    // ghost 已经在标签栏上起来了，进窗格区后必须继续跟手——冻在原地看着像卡死。
+    // dragGhost.move() 是 rAF 节流的（见 store/dragGhost.ts），所以先放一帧再断言。
+    expect(useDragGhost.getState().visible).toBe(true)
+    await act(async () => { await new Promise<void>((r) => { requestAnimationFrame(() => r()) }) })
+    expect(useDragGhost.getState().x).toBe(400)
+
+    await act(async () => {
+      fireEvent.pointerUp(ov, { clientX: 400, clientY: 300, pointerId: 1 })
+    })
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1) // 没被塞进窗格
+    expect(useTabs.getState().tabs).toBe(before) // 顺序也没变（连数组引用都没换）
   })
 
   it('其它标签不能被拖到主页标签前面：插入下标被钳在 1', async () => {

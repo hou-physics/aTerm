@@ -21,16 +21,17 @@ export type Tab = {
   dirName?: string
 }
 
-// 该标签是否承载窗格：目前只有 term 标签真的持有窗格、参与分屏。home 与 overview
-// 都恒为空数组，也都不该被新建/合并/拆分窗格等操作误当成 term 标签处理——但下面这些
-// 操作原本就已经写成"kind !== 'term'"的白名单，新增 overview 这第三种 kind 会被自动
-// 排除，不需要逐一替换成这个函数（批量替换反而是在 split view 核心代码上制造一次
-// 零行为变化的大 diff，见 progress.md Task 8 的 ruling）。这个函数目前只在 tabs.ts
-// 自身真正问"有没有窗格"这一处语义的地方（下面 closeTab 的注释）以及测试里使用，
-// 供以后新代码优先复用，避免继续拿 kind === 'home' 当"没有窗格"的代理判断。
-export function hasPanes(tab: Tab): boolean {
-  return tab.kind === 'term'
-}
+// 三种 kind 的窗格语义，写在这里备查（终审删掉了一个曾经把它包成谓词的
+// `hasPanes(tab)` 辅助函数：它没有任何生产调用方，而终审排查两处遗漏的 kind 判断时
+// 又确认，那两处真正需要的谓词是"可关闭/可排序"，不是"有没有窗格"——一个差点被用错
+// 地方的、`kind === 'term'` 的第二个名字，只会误导，不会澄清）：
+//   - term：真正持有窗格、参与分屏；
+//   - home / overview：panes 恒为空数组，都不该被新建/合并/拆分窗格等操作当成 term
+//     处理——这些操作本来就写成 `kind !== 'term'` 的白名单，新增 overview 这第三种
+//     kind 会被自动排除，不需要额外的谓词。
+// 反过来，"可关闭""可在标签栏里排序"这两条语义与"有没有窗格"并不重合：overview 两者
+// 皆可，只有 home 不可——那些地方问的是 `kind === 'home'`，见 closeTab 与 TabBar.tsx
+// 的 onTabPointerMove。
 
 let nextTab = 1
 let nextPane = 1
@@ -92,7 +93,7 @@ function insertPaneAtIndex(tabs: Tab[], tabId: string, insertAt: number): { tabs
 // 把这个几何下标换算成"从 order 里移除拖拽源之后，它该插入的下标"：目标下标若大于
 // 源下标，说明移除源标签后，同一个视觉缝隙对应的下标要向前挪一格。minIndex 钳住不能
 // 把任何标签排到主页标签前面——主页恒为下标 0，设计要求它既不能被顶替、自己也不可被
-// 拖动（后者由调用方在识别到 dragTab.kind !== 'term' 时整个手势直接判定无效来保证，
+// 拖动（后者由调用方在识别到 dragTab.kind === 'home' 时整个手势直接判定无效来保证，
 // 这里只负责钳住"别人"不能插到它前面）。
 export function reorderInsertIndex(order: string[], sourceId: string, rawTargetIndex: number, minIndex = 1): number {
   const srcIdx = order.indexOf(sourceId)
@@ -151,8 +152,8 @@ export const useTabs = create<TabsState>((set, get) => ({
   // 已有同一 dirName 的总览标签时只聚焦、不新建，也不清排序快照——切走再切回来，
   // 方块顺序应该保持稳定，不能因为标签重新变为激活标签就重排。只有真正新建时才调用
   // clearOrder：这样"新开总览标签→按最后活动时间重排""切走再切回→顺序不变"两条
-  // spec §5.2 的要求同时成立。标题固定用「▦ 项目名·总览」，无窗格（不参与分屏，见
-  // hasPanes）。
+  // spec §5.2 的要求同时成立。标题固定用「▦ 项目名·总览」，panes 恒为空数组（不参与
+  // 分屏，见文件顶部关于三种 kind 的说明）。
   openOverview: (dirName, projectName) => {
     const existing = get().tabs.find((t) => t.kind === 'overview' && t.dirName === dirName)
     if (existing) {
@@ -195,11 +196,9 @@ export const useTabs = create<TabsState>((set, get) => ({
     const tab = get().tabs.find((t) => t.id === id)
     // 这里问的是"是不是主页标签"（唯一恒不可关闭的标签），不是"有没有窗格"——总览
     // 标签同样没有窗格，但设计要求它必须可关闭（TabBar.tsx 的 × 按钮对非 home 标签
-    // 常显，包含 overview）。不能把这一行改成 `!hasPanes(tab)`：hasPanes(home) 与
-    // hasPanes(overview) 都是 false，那样会把两者一并挡在这里，总览标签的 × 按钮点了
-    // 会什么都不发生。Task 8 审计过 tabs.ts 全部 kind 判断，这是唯一一处"名字长得像
-    // hasPanes、实际语义却不是"的分支，特意保留原判断，见 tabs.test.ts「总览标签可以
-    // 被关闭」一测。
+    // 常显，包含 overview；App.tsx 的 ⌘W 用的是逐字相同的条件，两个入口必须一致）。
+    // 换成任何形式的"没有窗格就不给关"都会把总览标签和主页一起挡在这里，× 按钮点了
+    // 会什么都不发生——见 tabs.test.ts「总览标签可以被关闭」一测。
     if (!tab || tab.kind === 'home') return
     // 只收集"确实有 ptyId 且确认存活"的窗格——待选会话的窗格（ptyId 缺省）从未
     // spawn 过 PTY，天然算不存活，不需要也不能查询。

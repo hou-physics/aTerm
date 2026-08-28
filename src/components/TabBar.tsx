@@ -166,7 +166,14 @@ export function TabBar() {
     // 主页标签既没有窗格可合并、自己也不可被拖动排序（设计要求恒排第一）——整个手势
     // 在这里就判定为无效目标，索性连落点都不解析、指示条/ghost 也不出现（"no visual
     // churn"），而不是等到 pointerup 才悄悄拒绝。
-    if (!dragTab || dragTab.kind !== 'term') {
+    //
+    // 这里问的必须是"是不是主页标签"，不能是"是不是 term 标签"：总览标签（Task 8 新增
+    // 的第三种 kind）没有窗格，但它和普通标签一样排在可滚动的标签列表里，reorderTab
+    // （tabs.ts）对它完全适用——它只认下标、不认 kind。此前这一行写成
+    // `kind !== 'term'`，整个手势在起步就被判无效，拖动总览标签什么都不会发生，也没有
+    // 任何反馈。两条落点分支现在分别把关：标签栏排序对总览开放（下面），拖进窗格区
+    // 合并仍然只对 term 开放（再下面）。
+    if (!dragTab || dragTab.kind === 'home') {
       useDnd.getState().setTarget(null)
       useDnd.getState().setDropMode(null)
       useDnd.getState().setRefusal(null)
@@ -196,9 +203,24 @@ export function TabBar() {
       return
     }
     useDnd.getState().setTabBarIndex(null)
-    // 光标落在窗格区：还原成既有的"合并进当前激活标签的窗格区"这条行为。拖的正是
-    // 当前激活标签本身时（"拖到自己标签的窗格区"）依旧是设计文档明确要求的空操作
-    // ——这条判定只在这个分支里生效，不影响上面标签栏排序那条分支。
+    // 光标落在窗格区：这条分支是"把拖拽源的窗格合并进当前激活标签"，只有 term 标签
+    // 有窗格可搬——总览标签在上面那条标签栏分支里是可以排序的，但拖到窗格区上没有
+    // 任何可落的语义（movePanesToTab/fillEmptyPane 对它都是空操作，见 tabs.ts 里
+    // 那两处 `sourceTab.kind !== 'term'` 的判定）。在这里清掉落点状态、不出 ghost、
+    // 不出指示条，与主页标签在整个手势上的"no visual churn"是同一种处理，只是范围
+    // 限于这一条分支。松手路径（onTabPointerUp）里既有的同一条判定继续兜底。
+    if (dragTab.kind !== 'term') {
+      useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
+      // 但 ghost 一旦已经在标签栏上起来了就得继续跟手（不是冻在原地——那看着像卡
+      // 死）。它只在拖拽源是总览标签、且用户从标签栏一路拖进窗格区时才会走到这里；
+      // 主页标签根本不会起 ghost，所以那条路径不受影响。
+      if (drag.ghostStarted) useDragGhost.getState().move(e.clientX, e.clientY)
+      return
+    }
+    // 拖的正是当前激活标签本身时（"拖到自己标签的窗格区"）依旧是设计文档明确要求的
+    // 空操作——这条判定只在这个分支里生效，不影响上面标签栏排序那条分支。
     if (dragTab.id === activeId) {
       useDnd.getState().setTarget(null)
       useDnd.getState().setDropMode(null)
@@ -303,9 +325,14 @@ export function TabBar() {
     [setActive],
   )
 
-  // 标签右键菜单：主页标签没有可拆的窗格、也不可关闭（closeTab 本身对 home 是
-  // 空操作），因此不弹出菜单——不是"弹出一个空菜单"，是右键在主页标签上和右键在
-  // 已被 contextMenu.ts 全局拦截、终端区域之外的其它空白处一样，什么都不出现。
+  // 标签右键菜单（「拆分为独立标签」/「关闭标签」）只对 term 标签弹出。两种被排除的
+  // 标签理由不同，各自成立：
+  // - 主页：两项都不适用（没有窗格可拆；closeTab 对 home 本就是空操作）；
+  // - 总览：「拆分为独立标签」不适用（panes 恒为空数组），「关闭标签」其实适用——但
+  //   关闭它已经有 × 按钮和 ⌘W 两个入口，为它单独弹一个只剩一项、且与 × 完全重复的
+  //   菜单没有增益。终审复核过这一处，判定保持现状；这不是遗漏。
+  // 排除的表现是"什么都不出现"，不是"弹出一个空菜单"——右键在这些标签上，和右键在
+  // 已被 contextMenu.ts 全局拦截、终端区域之外的其它空白处一样。
   const onTabContextMenu = useCallback((e: ReactMouseEvent<HTMLDivElement>, tab: Tab) => {
     if (tab.kind !== 'term') return
     e.preventDefault()
