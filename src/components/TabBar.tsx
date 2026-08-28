@@ -118,6 +118,12 @@ export function TabBar() {
   const onTabPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, tabId: string) => {
     // 关闭按钮自己的点击语义（stopPropagation + closeTab）不参与拖拽判定，原样放行。
     if ((e.target as HTMLElement).closest('.tab-close')) return
+    // 纵深防御，与 TabPanes.tsx 的 PaneTitleBar 同一理由：标签右键菜单本身已经
+    // portal 到 document.body（见 ContextMenu.tsx），本就不是这个 `.tab` 元素的
+    // DOM 后代，这条分支目前不会被真的命中（本文件的菜单原本渲染在 `.tabbar` 下，
+    // 与各 `.tab` 是兄弟节点，不是嵌套关系——见 .superpowers/context-menu-portal-
+    // report.md 的排查记录）；保留它是防止将来这层关系改变时同一类问题重演。
+    if ((e.target as HTMLElement).closest('.context-menu')) return
     // 屏蔽文本选择（用户反馈"拖拽会顺带选中相邻文字"）：只加 body class，不调用
     // e.preventDefault()——上一轮在这里无条件 preventDefault 是回归的根源（见
     // store/dragGhost.ts 的 blockSelect() 注释）：真正的默认动作抑制挪到了下面

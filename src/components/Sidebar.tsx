@@ -78,6 +78,11 @@ export function Sidebar() {
   }, [endDrag])
 
   const onItemPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => {
+    // 纵深防御，与 TabPanes.tsx/TabBar.tsx 同一理由：这个组件目前没有右键菜单
+    // （「最近会话」条目不挂 onContextMenu），这条分支现在恒不命中；保留它是为了不让
+    // 三处拖拽源的这层防御出现"漏了一处"的不对称，也不给将来在这里加菜单的人埋雷
+    // （见 .superpowers/context-menu-portal-report.md）。
+    if ((e.target as HTMLElement).closest('.context-menu')) return
     // 屏蔽文本选择，只加 body class，不调用 e.preventDefault()——与 TabBar.tsx 的
     // onTabPointerDown 同一理由/同一时机（见 store/dragGhost.ts 的 blockSelect()
     // 注释）：真正的默认动作抑制挪到了下面 onItemPointerMove 里，只在跨过阈值后才
