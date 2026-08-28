@@ -1,3 +1,5 @@
+import { debugLog } from './dragDebugLog'
+
 // 拖拽清理的窗口级兜底：TabBar.tsx（拖标签）、Sidebar.tsx（拖「最近会话」）、
 // TabPanes.tsx（拖窗格标题栏）三处拖拽源共用。
 //
@@ -58,23 +60,39 @@
 // 成立、对任何 DOM 节点都不成立的不变式：Window 对象的 `.window` getter 恒等于自身，
 // DOM 节点根本没有这个属性（读出来是 undefined）。两条判据（字面比较 + 自指不变式）
 // 任一成立就够，字面比较留着是因为它是最直接、最不需要解释的第一直觉。
-export function attachDragSafetyNet(pointerId: number, isDragActive: () => boolean, endDrag: () => void): () => void {
-  const trigger = () => {
+//
+// endDrag 的类型从 `() => void` 放宽成 `(reason: string) => void`——纯粹为了本轮临时诊断
+// 日志：三处调用方（TabBar.tsx/Sidebar.tsx/TabPanes.tsx）里只有 TabBar.tsx 的 endDrag
+// 实际读这个参数去打日志，另外两处的 `() => void` 原样按"参数个数更少的函数可以赋给参数
+// 更多的函数类型"这条 TS 规则继续赋值成功，不需要跟着改。定位后随本次改动整体 revert。
+export function attachDragSafetyNet(
+  pointerId: number,
+  isDragActive: () => boolean,
+  endDrag: (reason: string) => void,
+): () => void {
+  // reason：见 debugLog 调用点的字符串字面量，与 TabBar.tsx endDrag() 内部打印的
+  // "reason=..." 一一对应，方便在同一份日志里按 reason 过滤出这一条链路。
+  const trigger = (reason: string, e: Event) => {
     queueMicrotask(() => {
-      if (isDragActive()) endDrag()
+      const active = isDragActive()
+      const t = e.target as (Element & { className?: unknown }) | null
+      debugLog(
+        `dragSafetyNet trigger reason=${reason} eventTag=${t?.tagName ?? 'null'} eventClass=${typeof t?.className === 'string' ? t.className : ''} isDragActive=${active}`,
+      )
+      if (active) endDrag(reason)
     })
   }
   const onPointerUp = (e: PointerEvent) => {
-    if (e.pointerId === pointerId) trigger()
+    if (e.pointerId === pointerId) trigger('safety-net-pointerup', e)
   }
   const onPointerCancel = (e: PointerEvent) => {
-    if (e.pointerId === pointerId) trigger()
+    if (e.pointerId === pointerId) trigger('safety-net-pointercancel', e)
   }
   const onBlur = (e: FocusEvent) => {
     const target = e.target as (EventTarget & { window?: unknown }) | null
     const isWindowItself = target === (window as unknown as EventTarget) || (!!target && target.window === target)
     if (!isWindowItself) return
-    trigger()
+    trigger('safety-net-blur', e)
   }
 
   window.addEventListener('pointerup', onPointerUp, { capture: true })

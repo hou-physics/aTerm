@@ -33,6 +33,29 @@ fn confirm_exit(app_handle: AppHandle) {
     app_handle.exit(0);
 }
 
+/// 临时诊断命令（定位拖放 bug 用，定位后随本次改动整体 revert 移除）：把一行日志追加到
+/// `~/Library/Application Support/aTerm/drag-debug.log`。唯一调用方是前端
+/// `src/dragDebugLog.ts`。刻意做到"trivial and defensive"——目录/文件不存在就创建，任何
+/// 一步失败都直接放弃、绝不 panic：诊断日志本身绝不能成为让应用崩溃的新故障点。
+#[tauri::command]
+fn debug_log(line: String) {
+    let Some(dir) = dirs::data_dir().map(|d| d.join("aTerm")) else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("drag-debug.log"))
+    else {
+        return;
+    };
+    use std::io::Write;
+    let _ = writeln!(file, "{line}");
+}
+
 /// 窗口 `CloseRequested`、应用级 `ExitRequested`、（macOS 上替换掉默认 Quit 项后的）自定义
 /// Quit 菜单项，三条路径共用的"通知前端弹确认"逻辑，避免各自维护一份重复代码。用
 /// `AppHandle::emit` 而不是某个具体窗口的 `emit`：与被替换前的窗口路径（`window.emit`）
@@ -136,7 +159,8 @@ pub fn run() {
             status::installer::hooks_status,
             status::installer::install_hooks,
             status::installer::uninstall_hooks,
-            confirm_exit
+            confirm_exit,
+            debug_log
         ])
         .setup(|app| {
             // 状态引擎（P2b）：起文件监听 + 后台刷新线程，注册管理状态。返回的句柄
