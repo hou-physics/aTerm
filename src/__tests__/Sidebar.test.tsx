@@ -190,6 +190,70 @@ describe('Sidebar — 从「最近会话」拖入窗格区（设计文档 §5-B 
   })
 })
 
+// 拖到空槽窗格（本次修复的主要设计间隙，与 TabBar.test.tsx 同一组背景）：目标窗格
+// 没有 ptyId 时，应该直接在原地用这条会话启动它——"exactly as if it had been chosen
+// through the ⌘D picker"——不新建窗格，不让总窗格数意外增加。
+describe('Sidebar — 拖到空槽窗格：原地启动会话，不新建窗格', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('落在空槽窗格上：该窗格原地启动这条会话，窗格总数不变，不是新建的窗格', async () => {
+    const EMPTY_A = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, EMPTY_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const item = screen.getAllByText('修复登录').map((el) => el.closest('.side-item')).find(Boolean) as HTMLElement
+
+    await drag(item, { x: 10, y: 10 }, { x: 450, y: 50 }) // 落在 a2（空槽）矩形 [300,700) 内
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(2) // 数量不变——不是 insertPaneAt 会给出的 3
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'a2']) // a2 原地被填充，不是被替换成别的 id
+
+    await act(async () => { await Promise.resolve() }) // startPaneTerminal 是 async，flush 一次
+    const filled = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes.find((p) => p.id === 'a2')!
+    expect(filled).toMatchObject({
+      ptyId: 'pty-picked',
+      title: '修复登录',
+      threadKey: 'proj-a:root-a',
+      dirName: 'proj-a',
+      rootKey: 'root-a',
+    })
+    expect(t.activePaneId).toBe('a2')
+  })
+
+  it('宽度只够当前数量、不够 +1：填充仍然成功（按结果数判断，不误判成插入而拒绝）', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 700 })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    const EMPTY_A = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, EMPTY_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const item = screen.getAllByText('修复登录').map((el) => el.closest('.side-item')).find(Boolean) as HTMLElement
+
+    await drag(item, { x: 10, y: 10 }, { x: 450, y: 50 })
+    await act(async () => { await Promise.resolve() }) // startPaneTerminal 是 async，flush 一次
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(2) // 成功填充，不是被拒绝后原样保留的 2
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'a2']) // a2 原地被填充，不是新建的窗格
+    expect(t.panes.find((p) => p.id === 'a2')!.ptyId).toBe('pty-picked') // 真的启动了会话，不是被拒绝
+  })
+})
+
 // 与 TabBar.test.tsx 同一组回归断言（见该文件"只在真正开始拖拽后才 preventDefault"
 // 一节的注释）：验证 Sidebar.tsx 这一处拖拽源同样只在跨过阈值后才 preventDefault。
 describe('Sidebar — 只在真正开始拖拽后才 preventDefault（不在 pointerdown 上）', () => {

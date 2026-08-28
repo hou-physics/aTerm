@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent 
 import { resumeThread } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
-import { DRAG_THRESHOLD_PX, dropInsertionIndex, resolveDropTarget } from '../paneDrop'
+import { DRAG_THRESHOLD_PX, dropInsertionIndex, resolveDropMode, resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
-import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
+import { previewPaneDrop } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
@@ -58,6 +58,8 @@ export function Sidebar() {
     netCleanupRef.current = null
     dragRef.current = null
     useDnd.getState().setTarget(null)
+    useDnd.getState().setDropMode(null)
+    useDnd.getState().setRefusal(null)
     useDragGhost.getState().end()
   }, [])
 
@@ -98,6 +100,8 @@ export function Sidebar() {
     // 落点恒为 null，指示条也不出现，这种情况下也不显示拖拽指示（没有地方可以放）。
     if (!activeTab || activeTab.kind !== 'term') {
       useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
       return
     }
     if (!drag.ghostStarted) {
@@ -106,7 +110,22 @@ export function Sidebar() {
     } else {
       useDragGhost.getState().move(e.clientX, e.clientY)
     }
-    useDnd.getState().setTarget(resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY))
+    const target = resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY)
+    useDnd.getState().setTarget(target)
+    // 实时预览这次拖放会不会被接受（Fix 3），与 TabBar.tsx 同一理由：与
+    // onItemPointerUp 真正执行时共用同一份 previewPaneDrop，指示与实际落点行为
+    // 永远一致。拖入永远是"新开一个窗格"，draggedCount 恒为 1。
+    if (!target) {
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
+      return
+    }
+    const targetPane = activeTab.panes.find((p) => p.id === target.paneId)
+    const mode = resolveDropMode(targetPane)
+    useDnd.getState().setDropMode(mode)
+    const layout = useLayout.getState()
+    const preview = previewPaneDrop(mode, activeTab.panes.length, 1, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    useDnd.getState().setRefusal(preview.refused ? { reason: preview.reason! } : null)
   }, [])
 
   const onItemPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -126,38 +145,44 @@ export function Sidebar() {
     const { tabs, activeId } = useTabs.getState()
     const activeTab = tabs.find((x) => x.id === activeId)
     if (!activeTab || activeTab.kind !== 'term') return
-    const nextCount = activeTab.panes.length + 1
-    if (nextCount > MAX_PANES) {
-      useHint.getState().show('最多支持 3 个窗格')
-      return
-    }
+    // 目标窗格没有 ptyId（空槽）：直接在原地用这条会话启动它——恰好就是它自己的
+    // PanePicker 会做的事（"exactly as if it had been chosen through the ⌘D
+    // picker"），不新建窗格；否则是既有的"插入新窗格"行为。与 onItemPointerMove 的
+    // 实时预览共用同一份 resolveDropMode/previewPaneDrop，判断保持一致。
+    const targetPane = activeTab.panes.find((p) => p.id === target.paneId)
+    const mode = resolveDropMode(targetPane)
     const layout = useLayout.getState()
-    // 与 TabBar.tsx 的合并落点同一处修复：getContentWidth() 的原始测量值先经
-    // usablePaneAreaWidth 换算成真正分给 nextCount 个窗格内容区的可用宽度，
-    // 再喂给 decidePaneFit——与 ⌘D（App.tsx）保持同一套判定，不会互相矛盾。
-    const decision = decidePaneFit(
-      nextCount,
-      usablePaneAreaWidth(getContentWidth(), nextCount),
-      layout.panelCollapsed,
-      layout.panelWidth,
-    )
-    if (decision === 'refuse') {
-      useHint.getState().show('窗口太窄，放不下新窗格')
+    // 与 TabBar.tsx 的合并落点同一处修复：getContentWidth() 的原始测量值由
+    // previewPaneDrop 内部按结果窗格数换算成真正可用宽度——与 ⌘D（App.tsx）保持
+    // 同一套判定，不会互相矛盾。
+    const preview = previewPaneDrop(mode, activeTab.panes.length, 1, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    if (preview.refused) {
+      useHint.getState().show(preview.refusalKind === 'max-panes' ? '最多支持 3 个窗格' : '窗口太窄，放不下新窗格')
       return
     }
-    if (decision === 'collapse-panel') layout.togglePanel()
-    const insertAt = dropInsertionIndex(activeTab.panes.map((x) => x.id), target)
-    const paneId = useTabs.getState().insertPaneAt(activeTab.id, insertAt)
-    if (!paneId) return // 上面已经校验过上限，这里只是防御性兜底，理论上不会命中
+    if (preview.decision === 'collapse-panel') layout.togglePanel()
     const { p, t } = drag
-    void useTabs.getState().startPaneTerminal(activeTab.id, paneId, {
+    const sessionArgs = {
       title: t.title,
       cwd: p.cwd,
       inject: `claude --resume ${t.resumeSessionId}`,
       threadKey: `${p.dirName}:${t.rootKey}`,
       dirName: p.dirName,
       rootKey: t.rootKey,
-    })
+    }
+    if (mode === 'fill' && targetPane) {
+      // startPaneTerminal 只补 ptyId/title 等字段，不touch activePaneId（PanePicker
+      // 自己调用它时那块窗格通常已经是焦点）——这里的落点未必是当前焦点窗格，显式
+      // 聚焦一次，与"插入"分支（insertPaneAt 内部已经把新窗格设为焦点）保持同一个
+      // "新内容进来的窗格立即成为焦点"的直觉。
+      useTabs.getState().focusPane(activeTab.id, targetPane.id)
+      void useTabs.getState().startPaneTerminal(activeTab.id, targetPane.id, sessionArgs)
+      return
+    }
+    const insertAt = dropInsertionIndex(activeTab.panes.map((x) => x.id), target)
+    const paneId = useTabs.getState().insertPaneAt(activeTab.id, insertAt)
+    if (!paneId) return // 上面已经校验过上限，这里只是防御性兜底，理论上不会命中
+    void useTabs.getState().startPaneTerminal(activeTab.id, paneId, sessionArgs)
   }, [endDrag])
 
   // 指针捕获被浏览器隐式释放时补发的退出路径——见上方 endDrag 注释描述的真实触发

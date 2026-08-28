@@ -9,9 +9,9 @@ import {
 } from 'react'
 import { newTerminal } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
-import { DRAG_THRESHOLD_PX, pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
+import { DRAG_THRESHOLD_PX, pointInRect, resolveDropMode, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
-import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
+import { previewPaneDrop } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
@@ -94,6 +94,8 @@ export function TabBar() {
     netCleanupRef.current = null
     dragRef.current = null
     useDnd.getState().setTarget(null)
+    useDnd.getState().setDropMode(null)
+    useDnd.getState().setRefusal(null)
     useDnd.getState().setTabBarIndex(null)
     useDragGhost.getState().end()
   }, [])
@@ -142,6 +144,8 @@ export function TabBar() {
     // churn"），而不是等到 pointerup 才悄悄拒绝。
     if (!dragTab || dragTab.kind !== 'term') {
       useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
       useDnd.getState().setTabBarIndex(null)
       return
     }
@@ -156,6 +160,8 @@ export function TabBar() {
       const rawIndex = resolveTabBarInsertIndex(getTabRects(), e.clientX)
       useDnd.getState().setTabBarIndex(Math.max(1, rawIndex)) // 不能插到主页标签前面
       useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
       if (!drag.ghostStarted) {
         drag.ghostStarted = true
         useDragGhost.getState().start(dragTab.title, e.clientX, e.clientY)
@@ -170,6 +176,8 @@ export function TabBar() {
     // ——这条判定只在这个分支里生效，不影响上面标签栏排序那条分支。
     if (dragTab.id === activeId) {
       useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
       return
     }
     if (!drag.ghostStarted) {
@@ -179,7 +187,23 @@ export function TabBar() {
       useDragGhost.getState().move(e.clientX, e.clientY)
     }
     const activeTab = tabs.find((t) => t.id === activeId)
-    useDnd.getState().setTarget(resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY))
+    const target = resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY)
+    useDnd.getState().setTarget(target)
+    // 实时预览这次拖放会不会被接受（Fix 3：不能等到 pointerup 才让用户知道）——按
+    // 落点语义（目标窗格是否是空槽，见 paneDrop.ts 的 resolveDropMode）算出真正的
+    // 结果窗格数，与 onTabPointerUp 真正执行时共用同一份 previewPaneDrop，保证"指示
+    // 说能放"与"松手确实能放"永远一致。
+    if (!target || !activeTab) {
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
+      return
+    }
+    const targetPane = activeTab.panes.find((p) => p.id === target.paneId)
+    const mode = resolveDropMode(targetPane)
+    useDnd.getState().setDropMode(mode)
+    const layout = useLayout.getState()
+    const preview = previewPaneDrop(mode, activeTab.panes.length, dragTab.panes.length, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    useDnd.getState().setRefusal(preview.refused ? { reason: preview.reason! } : null)
   }, [])
 
   const onTabPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -208,28 +232,29 @@ export function TabBar() {
     const sourceTab = tabs.find((t) => t.id === drag.tabId)
     const targetTab = tabs.find((t) => t.id === activeId)
     if (!sourceTab || sourceTab.kind !== 'term' || !targetTab || targetTab.kind !== 'term') return
-    const nextCount = targetTab.panes.length + sourceTab.panes.length
-    if (nextCount > MAX_PANES) {
-      useHint.getState().show('最多支持 3 个窗格')
-      return
-    }
+    // 目标窗格没有 ptyId（空槽，⌘D 新建后还没选定会话）：这次拖放是"填充"，取代它的
+    // 位置，结果窗格数不变；否则是既有的"插入"行为。与 onTabPointerMove 的实时预览
+    // 共用同一份 resolveDropMode/previewPaneDrop，保证判断一致（见那边的注释）。
+    const targetPane = targetTab.panes.find((p) => p.id === target.paneId)
+    const mode = resolveDropMode(targetPane)
     const layout = useLayout.getState()
-    // getContentWidth() 量出的是包含内边距/分隔条/窗格边框开销的原始宽度，与 ⌘D
-    // （App.tsx）同一份 usablePaneAreaWidth 换算成真正分给 nextCount 个窗格内容区的
-    // 可用宽度之后再喂给 decidePaneFit——否则这条拖放路径会比 ⌘D 更容易"误判装得下"
+    // getContentWidth() 量出的是包含内边距/分隔条/窗格边框开销的原始宽度，previewPaneDrop
+    // 内部按结果窗格数换算成真正可用宽度——否则这条拖放路径会比 ⌘D 更容易"误判装得下"
     // （见本次修复说明）。
-    const decision = decidePaneFit(
-      nextCount,
-      usablePaneAreaWidth(getContentWidth(), nextCount),
-      layout.panelCollapsed,
-      layout.panelWidth,
-    )
-    if (decision === 'refuse') {
-      useHint.getState().show('窗口太窄，放不下新窗格')
+    const preview = previewPaneDrop(mode, targetTab.panes.length, sourceTab.panes.length, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    if (preview.refused) {
+      // 轻提示文案沿用既有两句固定文案（不是 preview.reason 里带具体差额的那句实时
+      // 提示——那句已经在拖拽过程中持续显示过了，这里的一次性轻提示只是复盘同一个
+      // 结论，保持与 ⌘D/既有拖放行为一致的措辞）。
+      useHint.getState().show(preview.refusalKind === 'max-panes' ? '最多支持 3 个窗格' : '窗口太窄，放不下新窗格')
       return
     }
-    if (decision === 'collapse-panel') layout.togglePanel()
-    useTabs.getState().movePanesToTab(drag.tabId, activeId, target)
+    if (preview.decision === 'collapse-panel') layout.togglePanel()
+    if (mode === 'fill' && targetPane) {
+      useTabs.getState().fillEmptyPane(drag.tabId, activeId, targetPane.id)
+    } else {
+      useTabs.getState().movePanesToTab(drag.tabId, activeId, target)
+    }
   }, [endDrag])
 
   // 指针捕获被浏览器隐式释放时补发的退出路径（例如被拖的标签因为其它原因中途移出

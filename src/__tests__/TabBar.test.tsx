@@ -886,3 +886,211 @@ describe('TabBar — 拖放创建窗格也按修正后的可用宽度判定，�
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2)
   })
 })
+
+// 拖到空槽窗格（本次修复的主要设计间隙）：目标窗格没有 ptyId（⌘D 新建后还没选定
+// 会话，正在渲染 PanePicker）时，拖放应该"填充"取代它的位置而不是像既有行为那样
+// 在旁边"插入"——插入会让总窗格数意外增加，撞上 320px 最小宽度的上限而被拒绝，这
+// 正是诊断（a10a46f）暴露出的问题本身。
+describe('TabBar — 拖已打开的标签落在空槽窗格上：填充而不是插入', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('落在空槽窗格上：整个标签取代空槽的位置，窗格总数不变，pane id/ptyId 原样不变', async () => {
+    const EMPTY_A = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, EMPTY_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await drag(b, { x: 500, y: 10 }, { x: 450, y: 50 }) // 落在 a2（空槽）矩形 [300,700) 内
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(2) // 数量不变——不是 movePanesToTab 会给出的 3
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'pane-b']) // a2 被取代掉，位置不变
+    const moved = t.panes.find((p) => p.id === 'pane-b')!
+    expect(moved.ptyId).toBe('pty-b') // ptyId 原样不变，不是重新 spawn 的
+    expect(t.activePaneId).toBe('pane-b')
+    expect(useTabs.getState().tabs.find((x) => x.id === 'tab-b')).toBeUndefined() // 源标签整体移除
+  })
+
+  it('同一目标标签内：落在实体窗格上仍是插入（数量+1），落在空槽窗格上则是填充（数量不变）', async () => {
+    const MIXED = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, MIXED, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    // 落在 a1（有 ptyId）的右半侧（中点 150）
+    await drag(b, { x: 500, y: 10 }, { x: 250, y: 50 })
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(3) // 插入，数量真的增加了
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'pane-b', 'a2'])
+  })
+
+  it('宽度只够当前数量、不够 +1：填充仍然成功（按结果数判断，不误判成插入而拒绝）', async () => {
+    // 复现诊断记录的场景（.superpowers/pane-fill-report.md）：目标标签已有 2 个窗格
+    // （其一是空槽），原始测量值 700px 够 2 个窗格（usable=675>=640）但不够 3 个
+    // （usable=664<960）——填充按"结果数=2（不变）"判断应该装得下；若被误当成
+    // "插入"（当成 2+1=3）就会被错误拒绝，这正是本次要修的间隙。
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 700 })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    const EMPTY_A = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, EMPTY_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await drag(b, { x: 500, y: 10 }, { x: 450, y: 50 }) // 落在 a2（空槽）
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(2) // 成功填充，不是被拒绝后原样保留的 2
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'pane-b'])
+    expect(useTabs.getState().tabs.find((x) => x.id === 'tab-b')).toBeUndefined()
+  })
+})
+
+// 落点指示条按语义切换覆盖范围（Fix 2）：'fill' 覆盖整个窗格，'insert' 沿用既有的
+// 半侧覆盖——container（.content）在 jsdom 里矩形恒为 0，因此指示条的内联 top/left
+// 直接等于目标窗格矩形本身（未经任何偏移），据此断言 width 是否是"整窗格"还是"半
+// 窗格"最直接。
+describe('TabBar — 落点指示条按语义切换覆盖范围（整窗格 / 半窗格）', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  const EMPTY_A = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+    activePaneId: 'a1',
+  }
+
+  it('悬停空槽窗格：指示条覆盖整个窗格宽度（不是切半后的一半）', async () => {
+    useTabs.setState({ tabs: [HOME, EMPTY_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 450, clientY: 50, pointerId: 1 }) // 落在 a2 内
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator).toBeTruthy()
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(false)
+    expect(indicator.style.width).toBe('400px') // a2 的整个宽度
+    expect(indicator.style.left).toBe('300px')
+  })
+
+  it('悬停已有 ptyId 的窗格：指示条只覆盖半个窗格宽度', async () => {
+    useTabs.setState({ tabs: [HOME, EMPTY_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 250, clientY: 50, pointerId: 1 }) // 落在 a1 右半侧（中点 150）
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator).toBeTruthy()
+    expect(indicator.style.width).toBe('150px') // a1 宽度 300 的一半
+    expect(indicator.style.left).toBe('150px')
+  })
+})
+
+// 拖拽过程中实时预览"松手会不会被拒绝"（Fix 3）：此前只有松手后一闪而过 2.2s 的
+// 轻提示，用户反馈"完全没看到就消失了，以为功能坏了"。现在应该在悬停期间就能看出
+// 拒绝状态，且理由持续显示直到光标移开或松手。
+describe('TabBar — 会被拒绝的落点：拖拽过程中即可见，持续显示具体理由（Fix 3）', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('宽度不够：指示条带 refused 样式，理由携带具体差额（与 paneFitShortfall 对应），松手后仍不做任何事', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 640 })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 640, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 630, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 500, clientY: 50, pointerId: 1 }) // pane-a 右半侧
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator).toBeTruthy()
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(true)
+    expect(document.querySelector('.pane-drop-reason')?.textContent).toBe('窗口太窄，还差 25px')
+
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 500, clientY: 50, pointerId: 1 })
+    })
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy() // 没有被合并
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1)
+    expect(screen.getByText('窗口太窄，放不下新窗格')).toBeTruthy() // 松手后仍有既有的一次性轻提示复盘
+  })
+
+  it('数量超过上限：指示条带 refused 样式，理由是固定文案「最多支持 3 个窗格」', async () => {
+    const TWO_A = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', ptyId: 'p-a2', title: 'A2' }], activePaneId: 'a1' }
+    const TWO_B = { id: 'tab-b', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'b1', ptyId: 'p-b1', title: 'B1' }, { id: 'b2', ptyId: 'p-b2', title: 'B2' }], activePaneId: 'b1' }
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+    useTabs.setState({ tabs: [HOME, TWO_A, TWO_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 300, height: 100 } })
+    const b = screen.getAllByText('2 个对话')[1].closest('.tab') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 900, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 100, clientY: 50, pointerId: 1 })
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(true)
+    expect(document.querySelector('.pane-drop-reason')?.textContent).toBe('最多支持 3 个窗格')
+  })
+
+  it('会成功的落点：不带 refused 样式，也没有理由文案（与拒绝态视觉上不含糊）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(false)
+    expect(document.querySelector('.pane-drop-reason')).toBeNull()
+  })
+})

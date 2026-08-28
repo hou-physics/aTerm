@@ -152,12 +152,53 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    定时自行消失（见 store/hint.ts 的 useHint），不是弹窗。 */
 .pane-hint { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px; background: var(--color-elevated); color: var(--color-text); border: 1px solid var(--color-border); font-size: 12.5px; z-index: 5; pointer-events: none; }
 
-/* 拖放落点指示（设计文档 §5-B）：半透明色块覆盖目标窗格的左半或右半，位置/尺寸由
-   DropIndicator.tsx 按目标窗格实测矩形现算写入内联样式（与 .terminal-wrapper 同一套
-   坐标换算）。用既有强调色变量叠加透明度，不引入新的调色板条目；pointer-events:none
-   确保它绝不拦截拖拽过程中持续发生的指针事件（拖拽源用 setPointerCapture 接管，
-   指示条只是纯视觉浮层）。 */
-.pane-drop-indicator { position: absolute; background: var(--color-accent); opacity: .18; border-radius: 4px; z-index: 4; pointer-events: none; }
+/* 拖放落点指示（设计文档 §5-B，本次修复 Fix 2/3 加强可见度 + 区分"拒绝"状态）：
+   半透明色块覆盖目标窗格（整个或左/右半，取决于落点语义——见 paneDrop.ts 的
+   dropIndicatorPreviewRect），位置/尺寸由 DropIndicator.tsx 按目标窗格实测矩形现算
+   写入内联样式（与 .terminal-wrapper 同一套坐标换算）。
+   opacity 曾经是 .18——真实窗口里被反馈"完全看不出来"，这里改用 ::before 承载底色
+   （opacity 提到 .32 并叠加一圈实色边框），让 .pane-drop-reason 这个兄弟节点不受
+   父级 opacity 拖累、能以完全不透明呈现具体文案。用既有强调色变量，不引入新的调色板
+   条目；pointer-events:none 确保它绝不拦截拖拽过程中持续发生的指针事件（拖拽源用
+   setPointerCapture 接管，指示条只是纯视觉浮层）。 */
+.pane-drop-indicator {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  z-index: 4;
+  pointer-events: none;
+}
+.pane-drop-indicator::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--color-accent);
+  opacity: .32;
+  border: 2px solid var(--color-accent);
+  border-radius: 4px;
+}
+/* "拒绝"状态（Fix 3）：此刻松手会被拒绝——换成既有的"等待中"状态色（既非强调色的
+   "会成功"含义，也不需要新增调色板条目），透明度略低，与正常状态一眼可辨。 */
+.pane-drop-indicator-refused::before {
+  background: var(--color-status-awaiting);
+  border-color: var(--color-status-awaiting);
+  opacity: .26;
+}
+.pane-drop-reason {
+  position: relative;
+  max-width: calc(100% - 16px);
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--color-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .sidebar-list::-webkit-scrollbar,
 .home-wrap::-webkit-scrollbar,
