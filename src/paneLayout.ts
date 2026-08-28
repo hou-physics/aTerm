@@ -70,6 +70,63 @@ export function decidePaneFit(
   return 'refuse'
 }
 
+// 装不下时具体差多少像素——配合"窗口太窄，还差 Npx"这条拖拽过程中持续显示的提示
+// （本次修复 Fix 3：不能再让用户等到松手才知道会被拒绝，见 paneDrop.ts 顶部 DropMode
+// 注释同一份背景）。装得下时返回 0，只是避免调用方在这种状态下误用出现负数文案——
+// 正常流程只应该在真的装不下时才读这个值。paneCount<=0 时没有意义，同 fitsPanes 一样
+// 视为"没有要放的东西"，返回 0。
+export function paneFitShortfall(paneCount: number, widthPx: number): number {
+  if (paneCount <= 0) return 0
+  return Math.max(0, paneCount * MIN_PANE_WIDTH_PX - widthPx)
+}
+
+// 拖放会不会被接受的完整判断：先按落点语义（paneDrop.ts 的 DropMode）算出真正的
+// "结果窗格数"——'fill'（落在空槽窗格上）总数不变，'insert'（既有行为）总数变为
+// currentCount + draggedCount，这正是本次修复要补上的设计间隙：此前一律按 insert
+// 计数，会把"填充"误判成"插入"从而错误拒绝（见 .superpowers/pane-fill-report.md 的
+// 诊断记录）——再依次检查数量上限（MAX_PANES）与像素宽度（decidePaneFit）。
+//
+// 供 TabBar.tsx/Sidebar.tsx 在 pointermove（拖拽过程中的实时预览，Fix 3）与
+// pointerup（真正执行这次落点）两个时机共用同一份判断：两处如果各自实现一遍，稍有
+// 出入就会出现"指示说能放、松手却被拒绝"这种自相矛盾的体验，这正是本次要修的问题
+// 之一。rawContentWidthPx 是未经 usablePaneAreaWidth 换算的原始测量值（调用方直接
+// 传 getContentWidth() 的返回值，换算交给这里按算出来的 resultingCount 现算——
+// 换算所需的窗格数只有在这里才知道，调用方不能先算好再传进来）。
+//
+// decision 为 'refuse' 时才计算 shortfall：achievable 是"最多能腾出多少可用宽度"——
+// 面板已收起就是 usable 本身，未收起则是收起它之后的 usable + panelWidthPx（与
+// decidePaneFit 内部 collapse-panel 分支判断的是同一个假设宽度，这里只是在已经确定
+// "即使收起也不够"时，反过来算出具体差多少）。
+export type DropFitPreview = {
+  resultingCount: number
+  decision: PaneFitDecision
+  refused: boolean
+  refusalKind: 'max-panes' | 'too-narrow' | null
+  reason: string | null
+}
+
+export function previewPaneDrop(
+  mode: 'fill' | 'insert',
+  currentCount: number,
+  draggedCount: number,
+  rawContentWidthPx: number,
+  panelCollapsed: boolean,
+  panelWidthPx: number,
+): DropFitPreview {
+  const resultingCount = mode === 'fill' ? currentCount : currentCount + draggedCount
+  if (resultingCount > MAX_PANES) {
+    return { resultingCount, decision: 'refuse', refused: true, refusalKind: 'max-panes', reason: '最多支持 3 个窗格' }
+  }
+  const usable = usablePaneAreaWidth(rawContentWidthPx, resultingCount)
+  const decision = decidePaneFit(resultingCount, usable, panelCollapsed, panelWidthPx)
+  if (decision !== 'refuse') {
+    return { resultingCount, decision, refused: false, refusalKind: null, reason: null }
+  }
+  const achievable = panelCollapsed ? usable : usable + panelWidthPx
+  const shortfall = paneFitShortfall(resultingCount, achievable)
+  return { resultingCount, decision: 'refuse', refused: true, refusalKind: 'too-narrow', reason: `窗口太窄，还差 ${shortfall}px` }
+}
+
 // 拖拽分隔条：只调整 index 与 index+1 这两个相邻窗格的占比，其余窗格占比原样保留
 // （设计文档 §3"拖动改变两侧占比，其余窗格不受影响"）。deltaPx 为指针在容器坐标系
 // 下的水平位移（正值＝右移＝左侧窗格变宽）。两侧窗格的像素宽度之和（pairPx）不变，
