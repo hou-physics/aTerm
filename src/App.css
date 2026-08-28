@@ -263,8 +263,13 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; }
 .card { border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-panel); padding: 12px; cursor: default; }
 .card:hover { border-color: var(--color-accent); }
-.card .name { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; }
+.card .name { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; min-width: 0; overflow: hidden; }
 .card .sub { color: var(--color-text-faint); font-size: 12px; margin-top: 4px; }
+/* 卡片头部：项目名与「总览」入口按钮同一行两端对齐（Task 12）。按钮尺寸/配色沿用
+   .conv-refresh 同一套惯例（边框按钮，hover 变主题强调色），不单独发明一套。 */
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-overview-btn { flex: none; padding: 3px 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 11px; line-height: 1.4; cursor: default; }
+.card-overview-btn:hover { border-color: var(--color-accent); color: var(--color-text); }
 .thread-list { margin-top: 8px; border-top: 1px solid var(--color-border); padding-top: 6px; }
 .thread-row { display: flex; justify-content: space-between; gap: 8px; padding: 5px 6px; border-radius: 6px; font-size: 12.5px; }
 .thread-row:hover { background: var(--color-elevated); }

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 
 vi.mock('../ipc', () => ({
   ptySpawn: vi.fn(async () => 'pty-1'),
@@ -221,5 +222,43 @@ describe('HomePage — 搜索无匹配时的「运行命令」兜底行（不悄
     await vi.waitFor(() => {
       expect(ipc.ptySpawn).toHaveBeenCalledWith(expect.objectContaining({ inject: undefined }))
     })
+  })
+})
+
+// Task 12：总览页在 Task 1–11 里已经建好全部能力，但没有任何一处 UI 调用
+// openOverview——功能存在却无法抵达。这里在项目卡片头部补一个「总览」入口。
+describe('HomePage — 项目卡片上的「总览」入口（Task 12）', () => {
+  it('点击「总览」按钮：打开该项目的总览标签（聚焦/新建，dirName 对应被点的那张卡片）', async () => {
+    render(<HomePage />)
+    const card = screen.getByText(/phineuro/).closest('.card') as HTMLElement
+    const btn = within(card).getByRole('button', { name: /总览/ })
+
+    await userEvent.click(btn)
+
+    const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')
+    expect(ov).toBeTruthy()
+    expect(ov?.dirName).toBe('-Users-x-phineuro')
+  })
+
+  it('点击「总览」按钮不会同时触发展开卡片（事件不冒泡到卡片头）', async () => {
+    render(<HomePage />)
+    const card = screen.getByText(/phineuro/).closest('.card') as HTMLElement
+    const btn = within(card).getByRole('button', { name: /总览/ })
+
+    await userEvent.click(btn)
+
+    // 卡片仍处于收起状态：其会话列表未出现（若事件冒泡到 .card 的 onToggle，
+    // 这张卡片会展开，'修复登录流程' 就会出现）。
+    expect(screen.queryByText('修复登录流程')).toBeNull()
+  })
+
+  it('两张卡片各自有一个「总览」按钮，且不同卡片点出的 dirName 各不相同', async () => {
+    render(<HomePage />)
+    const buttons = screen.getAllByRole('button', { name: /总览/ })
+    expect(buttons.length).toBe(2)
+
+    await userEvent.click(buttons[1])
+    const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')
+    expect(ov?.dirName).toBe('-Users-x-aterm')
   })
 })

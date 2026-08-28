@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useState, type KeyboardEvent } from 'react'
-import { newConversation, resumeThread, runCommand } from '../actions'
+import { Fragment, useMemo, useState, type KeyboardEvent, type MouseEvent } from 'react'
+import { newConversation, openProjectOverview, resumeThread, runCommand } from '../actions'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { filterProjectsByQuery, type ProjectSearchMatch } from '../sessionSearch'
 import { useSessions } from '../store/sessions'
@@ -108,9 +108,20 @@ export function HomePage() {
 // 数组长度是运行时可变的）。
 function ProjectCard({ project: p, expanded, onToggle }: { project: ProjectInfo; expanded: boolean; onToggle: () => void }) {
   const aggregate = useProjectStatus(p.dirName, p.threads.map((t) => t.rootKey))
+  // 卡片头部整体是展开/收起的点击目标（外层 .card 的 onClick={onToggle}）——「总览」
+  // 按钮嵌在这个更大的点击目标内部，是本项目反复吃过亏的"大目标里嵌套可交互元素"
+  // 场景（滚动条、拖拽方块等），必须显式 stopPropagation，否则点按钮会把卡片一并
+  // 展开/收起（见 task-12-brief.md 的专项回归测试）。
+  const onOpenOverview = (e: MouseEvent) => {
+    e.stopPropagation()
+    openProjectOverview(p.dirName, basename(p.cwd))
+  }
   return (
     <div className="card" onClick={onToggle}>
-      <div className="name"><StatusDot status={aggregate} /> 📁 {basename(p.cwd)}</div>
+      <div className="card-head">
+        <div className="name"><StatusDot status={aggregate} /> 📁 {basename(p.cwd)}</div>
+        <button type="button" className="card-overview-btn" onClick={onOpenOverview}>▦ 总览</button>
+      </div>
       <div className="sub">{p.threads.length} 个会话 · {formatRelative(p.lastActivityMs)}</div>
       {expanded && (
         <div className="thread-list" onClick={(e) => e.stopPropagation()}>
