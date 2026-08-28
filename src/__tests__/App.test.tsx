@@ -10,8 +10,17 @@ vi.mock('../ipc', () => ({
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 // 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
-// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。
-vi.mock('../store/status', () => ({ statusEventsReady: Promise.resolve(), useThreadStatus: () => undefined, useProjectStatus: () => 'unknown' as const }))
+// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。Task 10
+// 起 App.tsx 新挂了 StatusBar，它直接读 useStatusStore/threadStatusKey（不经
+// useThreadStatus/useProjectStatus 这两个既有 selector），这里一并补最小静态桩，否则
+// 渲染 <App/> 会在 StatusBar 内部因缺失导出而抛错。
+vi.mock('../store/status', () => ({
+  statusEventsReady: Promise.resolve(),
+  useThreadStatus: () => undefined,
+  useProjectStatus: () => 'unknown' as const,
+  useStatusStore: (selector: (s: { statuses: Map<string, unknown> }) => unknown) => selector({ statuses: new Map() }),
+  threadStatusKey: (dirName: string, rootKey: string) => `${dirName}::${rootKey}`,
+}))
 // 与上面 store/status 同一理由：这批测试不关心 hooks 安装状态，整个模块换成不触碰真实
 // ipc 调用的空实现（真实行为由 HooksInstall.test.tsx / hooksInstall.test.ts 单独覆盖）。
 vi.mock('../store/hooksInstall', () => ({

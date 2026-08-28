@@ -10,6 +10,7 @@ import { DropIndicator } from './components/DropIndicator'
 import { HomePage } from './components/HomePage'
 import { OverviewPage } from './components/OverviewPage'
 import { Sidebar } from './components/Sidebar'
+import { StatusBar } from './components/StatusBar'
 import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
 import { TerminalLayer } from './components/TerminalLayer'
@@ -170,6 +171,14 @@ export default function App() {
           <DropIndicator containerRef={contentRef} />
           {hint && <div className="pane-hint">{hint}</div>}
         </div>
+        {/* 底部常驻状态栏（spec §5.2，StatusBar.tsx）：`.content` 的同级兄弟，不是它的
+            子节点——`.content` 及其内部子树（`.term-wrap`/`.pane-body`/
+            `.terminal-wrapper`/`.terminal-host`）是 TerminalLayer/TerminalView 两层
+            ResizeObserver 真正测量几何的地方，状态栏绝不能挤进这棵子树，理由同
+            StatusBar.tsx 顶部注释引用的那次"终端底部一行被裁"教训（提交 3d6b0da）。
+            放在这里，`.main` 的 flex 布局会正常地把它算作固定高度的一行，`.content`
+            通过 flex:1 分到剩余高度——这和 `.tabbar` 早已在做的事完全一样。 */}
+        <StatusBar />
       </div>
       <ConversationPanel />
       {/* 跟随光标的拖拽指示（TabBar.tsx/Sidebar.tsx/TabPanes.tsx 三处拖拽源共用，见
