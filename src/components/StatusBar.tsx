@@ -1,8 +1,11 @@
 // 底部常驻状态栏（spec §5.2）：内容随当前激活标签的 kind 变化——
 //   - term 标签：显示该会话（活动窗格指向的 thread）的 模型 · effort 强度 · 权限模式。
-//   - home / overview 标签：显示全局会话统计（n 个会话 · n 运行中 · n 等待回答）。
-//     两种 kind 共用同一份统计口径（跨全部项目的全部 thread，不按单个项目筛选）——
-//     spec §5.2 原文把总览与主页并列写在一起，字面意思就是同一份数据、两个入口都能看到。
+//   - home 标签：显示全局会话统计（跨全部项目的全部 thread）。
+//   - overview 标签：显示**该标签自己 dirName 对应项目**的会话统计，不是全局——
+//     overview 标签渲染的是这一个项目的方块（OverviewPage.tsx 按 dirName 过滤
+//     projects），状态栏若混入其它项目的会话数，数字会与屏幕上看到的方块对不上，
+//     这比不显示数字更糟（controller ruling，见 task-10-report.md）。home 标签没有
+//     "当前项目"这个概念，维持跨全部项目的统计。
 //
 // spec §5.2 原文还写了总览/主页这一档要额外带上"全局默认模型"，这里**没有实现**：
 // 全仓库（含 src-tauri）没有任何地方读取过"默认模型"这个概念（没有对应的 Rust 命令、
@@ -71,11 +74,14 @@ export function StatusBar() {
       if (!thread) return ''
       return buildSessionStatusText(thread)
     }
-    // home / overview：跨全部项目统计会话总数与运行中/等待回答数。
+    // home：跨全部项目统计；overview：只统计该标签自己 dirName 对应的那一个项目
+    // （与 OverviewPage.tsx 渲染的方块集合保持同一个筛选条件）。
+    const scopedProjects =
+      activeTab?.kind === 'overview' ? projects.filter((p) => p.dirName === activeTab.dirName) : projects
     let total = 0
     let running = 0
     let awaiting = 0
-    for (const project of projects) {
+    for (const project of scopedProjects) {
       for (const t of project.threads) {
         total += 1
         const status = statuses.get(threadStatusKey(project.dirName, t.rootKey))?.status

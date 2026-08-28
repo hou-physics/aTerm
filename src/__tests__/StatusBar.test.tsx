@@ -115,6 +115,51 @@ describe('StatusBar 随标签切换而变化', () => {
     expect(screen.getByText('3 个会话 · 1 运行中 · 1 等待回答')).toBeTruthy()
   })
 
+  it('总览页的统计只算该标签自己 dirName 对应的项目，不混入其它项目（controller ruling：总览渲染的是单个项目的方块，混入别的项目会让数字与屏幕上的方块对不上）', () => {
+    setProjects([
+      {
+        dirName: 'proj-a',
+        cwd: '/tmp/a',
+        lastActivityMs: 1,
+        threads: [thread({ rootKey: 'a1' }), thread({ rootKey: 'a2' }), thread({ rootKey: 'a3' })],
+      },
+      {
+        // proj-b 会话数、运行中数都比 proj-a 多，若统计口径误取全局，两个数字会
+        // 明显偏大——用这个差异让测试在"改回全局统计"时必然失败，而不是巧合地
+        // 凑巧数值相同。
+        dirName: 'proj-b',
+        cwd: '/tmp/b',
+        lastActivityMs: 1,
+        threads: [
+          thread({ rootKey: 'b1' }),
+          thread({ rootKey: 'b2' }),
+          thread({ rootKey: 'b3' }),
+          thread({ rootKey: 'b4' }),
+          thread({ rootKey: 'b5' }),
+        ],
+      },
+    ])
+    useStatusStore.setState({
+      statuses: new Map<string, SessionStatusPayload>([
+        [threadStatusKey('proj-a', 'a1'), { dirName: 'proj-a', rootKey: 'a1', sessionId: 's', status: 'running', lastActivityMs: 1, updatedAtMs: 1 }],
+        [threadStatusKey('proj-b', 'b1'), { dirName: 'proj-b', rootKey: 'b1', sessionId: 's', status: 'running', lastActivityMs: 1, updatedAtMs: 1 }],
+        [threadStatusKey('proj-b', 'b2'), { dirName: 'proj-b', rootKey: 'b2', sessionId: 's', status: 'running', lastActivityMs: 1, updatedAtMs: 1 }],
+        [threadStatusKey('proj-b', 'b3'), { dirName: 'proj-b', rootKey: 'b3', sessionId: 's', status: 'awaitingInput', lastActivityMs: 1, updatedAtMs: 1 }],
+      ]),
+    })
+    // 激活标签是 proj-a 的总览页；proj-a 只有 3 个会话、1 个运行中，全局（含 proj-b）
+    // 则是 8 个会话、3 个运行中、1 个等待回答——两组数字互不相同，断言必须精确匹配
+    // "只属于 proj-a" 那一组，才能确认没有意外读到全局口径。
+    useTabs.setState({
+      tabs: [HOME_TAB, { id: 'ov-a', kind: 'overview', title: '▦ proj-a', panes: [], dirName: 'proj-a' }],
+      activeId: 'ov-a',
+    })
+
+    render(<StatusBar />)
+    expect(screen.getByText('3 个会话 · 1 运行中')).toBeTruthy()
+    expect(screen.queryByText(/8 个会话/)).toBeNull()
+  })
+
   it('活动标签是主页时同样显示会话统计', () => {
     setProjects([
       { dirName: 'proj', cwd: '/tmp/p', lastActivityMs: 1, threads: [thread({ rootKey: 'a' }), thread({ rootKey: 'b' })] },
