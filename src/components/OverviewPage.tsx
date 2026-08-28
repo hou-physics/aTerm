@@ -148,40 +148,68 @@ export function OverviewPage({ dirName }: { dirName: string }) {
   // 对已经问过的会话重复发起请求——captureOrder（store/overview.ts）每次都会
   // set() 一份新的 order 数组，哪怕内容没变。
   const requestedSubagentKeysRef = useRef<Set<string>>(new Set())
+  // 并发上限必须按"这个组件当前总共有多少个请求在飞"计，不能按"这一轮 effect 发出
+  // 了几个"计（复审 Important：App.tsx:35 的窗口聚焦 refresh 在终端复用场景下会
+  // 频繁触发，超过 4 个会话的项目会经常在上一批还没 drain 完时就迎来下一轮
+  // 调度——如果每轮各起一个上限为 4 的独立 worker 池，两轮池子互不知道对方存在，
+  // 真实在飞数会摸到 4+4=8）。这里把队列和在飞 worker 数都提升成跨 effect 重跑共享
+  // 的 ref（组件整个生命周期只有一份，不随 dirName 之外的任何依赖重置）：新一轮
+  // 发现的目标只是 push 进同一个队列，只有当在飞 worker 数低于上限时才补新 worker，
+  // 已经在跑的 worker 会自己继续从共享队列里取下一个，不需要、也不能再重复起。
+  // 每个目标携带自己的 dirName（而不是各 worker 依赖创建时闭包到的外层 dirName）：
+  // 队列本身跨越多轮 effect 重跑存活，一个更早创建、仍在运行的 worker 完全可能在
+  // dirName 变化之后才取到一个属于新一轮的目标，这样它请求时用的是这个目标自带的
+  // dirName，不会把新目标的 rootKey 错配到旧的 dirName 上。
+  const subagentQueueRef = useRef<{ key: string; dirName: string; rootKey: string }[]>([])
+  const subagentActiveWorkersRef = useRef(0)
   useEffect(() => {
     const epoch = subagentEpochRef.current
-    const targets: { key: string; rootKey: string }[] = []
+    const newTargets: { key: string; dirName: string; rootKey: string }[] = []
     for (const key of order) {
       if (requestedSubagentKeysRef.current.has(key)) continue
       const t = byKey.get(key)
       if (!t) continue
       requestedSubagentKeysRef.current.add(key)
-      targets.push({ key, rootKey: t.rootKey })
+      newTargets.push({ key, dirName, rootKey: t.rootKey })
     }
-    if (targets.length === 0) return
+    if (newTargets.length === 0) return
+    subagentQueueRef.current.push(...newTargets)
 
-    // 简单的并发上限队列：固定数量的 worker 共享一个游标，谁先 await 完谁先取下一个
-    // ——不是"切成几批、批内并发、批间串行"，一个位置腾出来立刻补下一个，直到目标
-    // 耗尽。失败的单个请求 catch 后跳过，不影响这个 worker 继续处理队列里的下一个。
-    let cursor = 0
+    // 简单的并发上限队列：固定数量的 worker 共享同一个队列，谁先 await 完谁先取
+    // 下一个——不是"切成几批、批内并发、批间串行"，一个位置腾出来立刻补下一个，
+    // 直到队列耗尽。失败的单个请求 catch 后跳过，不影响这个 worker 继续处理队列
+    // 里的下一个目标。
     const runWorker = async () => {
-      while (cursor < targets.length) {
-        const { key, rootKey } = targets[cursor++]
-        try {
-          const count = await countSubagents(dirName, rootKey)
-          if (subagentEpochRef.current !== epoch) return // 卸载或 dirName 已切换：丢弃
-          setSubagentCounts((prev) => {
-            const next = new Map(prev)
-            next.set(key, count)
-            return next
-          })
-        } catch {
-          // 静默略过：这一个会话的徽章读取失败，不弹错误、不影响其它方块。
+      try {
+        while (true) {
+          const next = subagentQueueRef.current.shift()
+          if (!next) return
+          try {
+            const count = await countSubagents(next.dirName, next.rootKey)
+            if (subagentEpochRef.current !== epoch) return // 卸载或 dirName 已切换：丢弃
+            setSubagentCounts((prev) => {
+              const nextMap = new Map(prev)
+              nextMap.set(next.key, count)
+              return nextMap
+            })
+          } catch {
+            // 静默略过：这一个会话的徽章读取失败，不弹错误、不影响队列里其它目标。
+          }
         }
+      } finally {
+        subagentActiveWorkersRef.current--
       }
     }
-    const workerCount = Math.min(SUBAGENT_FETCH_CONCURRENCY, targets.length)
-    for (let i = 0; i < workerCount; i++) void runWorker()
+    // 只把在飞 worker 数补到上限——如果已经有 4 个在跑，这里什么都不新起，刚 push
+    // 进去的目标会被那些正在跑的 worker 自然消费到。
+    const spawnCount = Math.min(
+      SUBAGENT_FETCH_CONCURRENCY - subagentActiveWorkersRef.current,
+      subagentQueueRef.current.length,
+    )
+    for (let i = 0; i < spawnCount; i++) {
+      subagentActiveWorkersRef.current++
+      void runWorker()
+    }
   }, [dirName, order, byKey])
 
   return (

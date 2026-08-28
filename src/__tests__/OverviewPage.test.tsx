@@ -296,13 +296,36 @@ describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
     expect(await screen.findByText('⑂ 7')).toBeTruthy()
   })
 
+  // 复审纠正：原版只种了一个 thread，标题却叫"其它方块不受影响"——场上压根没有
+  // 别的方块，这句话没有被验证到（行为本身是对的，per-item try/catch 靠读代码
+  // 确认，不是靠这条测试）。改成两个 thread：一个失败、一个成功，断言失败的那个
+  // 不出徽章，成功的那个正常出，且只出这一个——这样"没受牵连"才是真的被断言到。
   it('计数失败时静默略过该徽章，其它方块不受影响', async () => {
-    vi.mocked(ipc.countSubagents).mockRejectedValue(new Error('读文件失败'))
+    setProject([
+      thread('a', '重构解析器', 100),
+      thread('b', '正常会话', 90),
+    ])
+    vi.mocked(ipc.countSubagents).mockImplementation((_dirName, rootKey) =>
+      rootKey === 'a' ? Promise.reject(new Error('读文件失败')) : Promise.resolve(5),
+    )
     render(<OverviewPage dirName="proj" />)
     expect(await screen.findByText('重构解析器')).toBeTruthy()
-    expect(screen.queryByText(/⑂/)).toBeNull()
+    expect(await screen.findByText('正常会话')).toBeTruthy()
+    // 成功的那个（rootKey 'b'）徽章正常出现……
+    expect(await screen.findByText('⑂ 5')).toBeTruthy()
+    // ……而且场上只有这一个 ⑂ 徽章——失败的那个（rootKey 'a'）没有被拖累出一个
+    // 假徽章，也没有任何徽章泄漏到不该出现的地方。
+    const badges = screen.queryAllByText(/⑂/)
+    expect(badges.length).toBe(1)
+    expect(badges[0].textContent).toBe('⑂ 5')
   })
 
+  // React 19 的 createRoot 路径下，组件卸载后的 setState 只是静默 no-op，不会像
+  // 旧版 ReactDOM 那样打一条 "Can't perform a React state update on an unmounted
+  // component" 的 console.error——所以这条测试无论有没有下面 subagentEpochRef 那个
+  // 陈旧响应守卫都会通过，证明力有限。守卫本身是按 spec 实现、靠读代码确认正确的
+  // （对照 ConversationPanel.tsx 的 requestIdRef 同一个 idiom），这条测试留着是
+  // 任务简报给定的原文用例，不是这个守卫的证据来源。
   it('组件卸载后到达的响应不写 state（沿用 ConversationPanel 的陈旧响应守卫）', async () => {
     let resolveCount: (n: number) => void = () => {}
     vi.mocked(ipc.countSubagents).mockReturnValue(new Promise((r) => { resolveCount = r }))
@@ -343,6 +366,47 @@ describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
     resolvers[0](0)
     await act(async () => { await Promise.resolve(); await Promise.resolve() })
 
+    expect(vi.mocked(ipc.countSubagents).mock.calls.length).toBe(5)
+  })
+
+  // 复审 Important：上面那条测试只覆盖"一次性发现一大批目标"这一种调度轮次，
+  // 抓不住"两轮调度时间窗重叠"这个真实场景（App.tsx:35 窗口聚焦触发的周期性
+  // refresh，在终端复用场景下会很频繁；一个超过 4 个会话的项目，上一轮的池子
+  // 大概率还没 drain 完就等来了下一轮）。如果并发上限是按"这一轮 effect 各起一个
+  // 独立的、上限为 4 的 worker 池"实现的（而不是按"这个组件当前总共有多少个请求
+  // 在飞"），第一轮 4 个仍在飞时，第二轮只要发现哪怕一个新目标，也会在原有 4 个
+  // 之上再起一个新 worker——总在飞数摸到 5，就已经越过了"上限是 4"这句话。
+  it('并发受限（重叠调度轮次）：第二轮新目标只是排队，不在原有 4 个之上再起新 worker', async () => {
+    const resolvers: Array<(n: number) => void> = []
+    vi.mocked(ipc.countSubagents).mockImplementation(
+      () => new Promise<number>((resolve) => { resolvers.push(resolve) }),
+    )
+    // 首批 5 个候选：并发上限 4，第 5 个理应还在队列里排队，不属于"在飞"。
+    const initialThreads = Array.from({ length: 5 }, (_, i) => thread(`t${i}`, `T${i}`, 1000 - i))
+    setProject(initialThreads)
+
+    render(<OverviewPage dirName="proj" />)
+    expect(vi.mocked(ipc.countSubagents).mock.calls.length).toBe(4)
+
+    // 首批 4 个全部仍在飞（mock 从不 resolve，故意不放行任何一个），此时触发第二轮
+    // 调度：一个新会话到达——同一个组件实例、dirName 不变，只是 threads 换了新引用
+    // （与 App.tsx 周期性 refresh 换出新 projects 数组同一种触发方式），会经
+    // captureOrder 把这个新 key 追加进 order，进而让下面调度 effect 的依赖数组
+    // （[dirName, order, byKey]）变化、重新跑一轮。
+    const newThread = thread('t-new', 'NEW', 2000)
+    act(() => {
+      setProject([...initialThreads, newThread])
+    })
+
+    // 关键断言：总在飞数必须原地不动，仍是 4——4 个位置早已占满，这个新目标只能
+    // 排进共享队列，不能在原有 4 个之上再单独起一个新 worker（那样会变成 5）。
+    expect(vi.mocked(ipc.countSubagents).mock.calls.length).toBe(4)
+
+    // 放行一个旧的，腾出的位置应该立刻被队列里排队的下一个（不论是首批第 5 个、
+    // 还是这次新到的）补上——证明这确实是一个跨轮次共享的队列，而不是"新目标被
+    // 发现了、却因为上限已经用完就再也没人来处理"。
+    resolvers[0](0)
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
     expect(vi.mocked(ipc.countSubagents).mock.calls.length).toBe(5)
   })
 })
