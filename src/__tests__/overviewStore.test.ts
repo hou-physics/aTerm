@@ -100,6 +100,17 @@ describe('重命名', () => {
     s.rename('k', '   ')
     expect(useOverviewStore.getState().names.k).toBeUndefined()
   })
+
+  // 终审：空白规则此前只对"全空白"做了特判，非空名字的两侧填充原样落盘——
+  // `"  我的任务  "` 会带着空格持久化，之后每次渲染都带着空格显示，用户既看不出多的
+  // 是什么、也删不掉。trim 放在 rename 的第一步，这条规则因此对全空白和两侧填充是
+  // 同一条，不再是特例。
+  it('非空名字两侧的空白同样被 trim，不带着空格落盘', () => {
+    const s = useOverviewStore.getState()
+    s.rename('k', '  我的任务  ')
+    expect(useOverviewStore.getState().names.k).toBe('我的任务')
+    expect(JSON.parse(localStorage.getItem('aterm.overview.names')!)).toEqual({ k: '我的任务' })
+  })
 })
 
 describe('持久化读回的健壮性', () => {

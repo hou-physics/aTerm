@@ -27,14 +27,14 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 /// 从一条 assistant 记录的 usage 中求出该轮送入模型的上下文总量。
 /// 只累加“入向”三项：output_tokens 是产出，不占用下一轮上下文预算。
-fn context_tokens_of(usage: &serde_json::Value) -> Option<u64> {
+fn context_tokens_of(usage: &Value) -> Option<u64> {
     let g = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
     let total = g("input_tokens") + g("cache_creation_input_tokens") + g("cache_read_input_tokens");
     (total > 0).then_some(total)
 }
 
 /// 取 content 数组里第一个文本块，折叠空白并按字符（非字节）截断。
-fn preview_of(content: &serde_json::Value) -> Option<String> {
+fn preview_of(content: &Value) -> Option<String> {
     let text = content.as_array()?.iter().find_map(|b| {
         (b.get("type")?.as_str()? == "text").then(|| b.get("text")?.as_str()).flatten()
     })?;
@@ -165,7 +165,7 @@ pub fn parse_meta(head: &[String], tail: &[String]) -> ParsedMeta {
     // context_tokens 则必须绑定同一条记录一起落定：一旦找到最新的、带 model 的
     // 非 <synthetic> assistant 记录，context_tokens 就取自那一条的 usage——哪怕它
     // 没有 usage 或合计为 0（此时 context_tokens 停在 None），也绝不再向更早的
-    // 记录回退取值，否则徽号会把新模型名和旧一轮的 token 用量错配在一起。
+    // 记录回退取值，否则徽章会把新模型名和旧一轮的 token 用量错配在一起。
     for v in parsed_tail.iter().rev() {
         if m.effort.is_none() {
             m.effort = v.get("effort").and_then(|x| x.as_str()).map(str::to_string);
@@ -175,7 +175,7 @@ pub fn parse_meta(head: &[String], tail: &[String]) -> ParsedMeta {
         }
         if v.get("type").and_then(|t| t.as_str()) == Some("assistant") {
             if let Some(msg) = v.get("message") {
-                let model = msg.get("model").and_then(|m| m.as_str());
+                let model = msg.get("model").and_then(|v| v.as_str());
                 if model != Some(SYNTHETIC_MODEL) {
                     if m.model.is_none() {
                         if let Some(model) = model {

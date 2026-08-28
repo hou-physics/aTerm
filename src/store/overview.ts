@@ -104,11 +104,16 @@ export const useOverviewStore = create<OverviewState>((set, get) => ({
     set({ order: next })
   },
   rename: (key, name) => {
-    if (name.trim() === '') {
+    // 一律先 trim，再判空——空白规则因此在这个方法里是统一的一条，而不是"全空白特殊
+    // 处理成清除、非空的两侧填充却原样留着"。此前只对全空白做了特判：`"  我的任务  "`
+    // 会带着两侧空格落盘，之后每次渲染都带着那对空格显示，而且用户再也无法从 UI 上
+    // 看出多出来的是什么、更没法删掉它。
+    const trimmed = name.trim()
+    if (trimmed === '') {
       get().clearName(key)
       return
     }
-    const nextNames = { ...get().names, [key]: name }
+    const nextNames = { ...get().names, [key]: trimmed }
     persist(NAMES_KEY, nextNames)
     set({ names: nextNames })
   },
