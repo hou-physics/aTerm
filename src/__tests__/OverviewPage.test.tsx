@@ -419,3 +419,36 @@ describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
     expect(vi.mocked(ipc.countSubagents).mock.calls.length).toBe(5)
   })
 })
+
+describe('OverviewPage —— 状态色图例', () => {
+  it('三种状态的中文标签都列出来（此前只存在于状态点的悬停提示里）', () => {
+    setProject([thread('a', 'A', 100)])
+
+    const { container } = render(<OverviewPage dirName={DIR} />)
+    const legend = container.querySelector('.overview-legend')!
+
+    expect(legend.textContent).toContain('运行中')
+    expect(legend.textContent).toContain('等你回答')
+    expect(legend.textContent).toContain('已完成')
+  })
+
+  it('图例的色块是 StatusDot 组件本身，不是另画的一套', () => {
+    setProject([thread('a', 'A', 100)])
+
+    const { container } = render(<OverviewPage dirName={DIR} />)
+    const legend = container.querySelector('.overview-legend')!
+
+    // 这三条断言是"防脱节"守卫：若有人把图例改成自己写的色块 <span>，
+    // 状态配色再调整时图例就会和方块上的实际颜色对不上，而这里会先失败。
+    expect(legend.querySelector('.status-dot-running')).toBeTruthy()
+    expect(legend.querySelector('.status-dot-awaitingInput')).toBeTruthy()
+    expect(legend.querySelector('.status-dot-done')).toBeTruthy()
+  })
+
+  it('没有任何会话时图例依然显示（否则空项目里用户更无从得知颜色含义）', () => {
+    setProject([])
+
+    const { container } = render(<OverviewPage dirName={DIR} />)
+    expect(container.querySelector('.overview-legend')).toBeTruthy()
+  })
+})

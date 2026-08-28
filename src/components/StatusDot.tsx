@@ -15,7 +15,9 @@
 // 还在（本次改动未触碰它们），转圈动画就绝不会在不可见时消耗任何重绘/CPU。
 import type { AggregateStatus } from '../store/status'
 
-const STATUS_TITLE: Record<'running' | 'awaitingInput' | 'done', string> = {
+/** 三种状态的中文标签。**唯一来源**：状态点的悬停提示与总览页图例都读它，
+ *  避免两处各写一份、改了一处另一处静默过时。顺序即图例的展示顺序。 */
+export const STATUS_LABEL: Record<'running' | 'awaitingInput' | 'done', string> = {
   running: '运行中',
   awaitingInput: '等你回答',
   done: '已完成',
@@ -26,7 +28,7 @@ export function StatusDot({ status }: { status: AggregateStatus | undefined }) {
   return (
     <span className="status-dot-slot">
       {known && (
-        <span className={`status-dot status-dot-${known}`} title={STATUS_TITLE[known]}>
+        <span className={`status-dot status-dot-${known}`} title={STATUS_LABEL[known]}>
           {known === 'running' && <span className="status-dot-spinner" />}
         </span>
       )}

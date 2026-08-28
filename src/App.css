@@ -575,3 +575,20 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .overview-page::-webkit-scrollbar-track { background: transparent; }
 .overview-page::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 .overview-page::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+
+/* 总览页状态色图例。色块由 StatusDot 组件渲染，这里只排版，不定义任何状态色——
+   状态色的唯一定义处仍是 .status-dot-* 那几条规则。 */
+.overview-legend {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 0 2px 10px;
+  font-size: 11px;
+  color: var(--color-text-dim);
+  user-select: none;
+}
+.overview-legend-item {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}

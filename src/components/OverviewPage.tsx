@@ -30,6 +30,7 @@ import { DRAG_THRESHOLD_PX } from '../paneDrop'
 import { blockKey, useOverviewStore, type Position } from '../store/overview'
 import { useDragGhost } from '../store/dragGhost'
 import { useSessions } from '../store/sessions'
+import { STATUS_LABEL, StatusDot } from './StatusDot'
 import { SessionBlock } from './SessionBlock'
 
 const EMPTY_THREADS: ThreadInfo[] = []
@@ -229,6 +230,18 @@ export function OverviewPage({ dirName }: { dirName: string }) {
 
   return (
     <div className="overview-page">
+      {/* 状态色图例。加它的直接原因：用户看着方块问「三种状态色都什么意思」——
+          颜色的含义此前只存在于状态点的 title 里，得先知道该去悬停才看得到。
+          色块直接复用 StatusDot 组件本身而不是自己画一个：任何一次状态配色调整
+          都会同时反映到图例上，不可能出现图例与实际颜色对不上的情况。 */}
+      <div className="overview-legend">
+        {(Object.keys(STATUS_LABEL) as Array<keyof typeof STATUS_LABEL>).map((k) => (
+          <span className="overview-legend-item" key={k}>
+            <StatusDot status={k} />
+            {STATUS_LABEL[k]}
+          </span>
+        ))}
+      </div>
       <div
         className="overview-canvas"
         ref={containerRef}
