@@ -1222,6 +1222,44 @@ git commit -m "feat(ui): 总览页异步补齐 sub-agent 徽章，不阻塞首�
 
 ---
 
+### Task 12: 总览页入口
+
+**Files:**
+- Modify: `src/components/HomePage.tsx`（项目卡片上增加「▦ 总览」入口）
+- Test: `src/__tests__/HomePage.test.tsx`（或既有的主页测试文件）
+
+**Interfaces:**
+- Consumes: Task 8 的 `openOverview(dirName, projectName)`
+
+> **为什么需要这个任务**：Task 1–11 建好了总览页的全部能力，但**没有任何一处 UI 调用 `openOverview`**——功能存在却无法抵达。这是计划本身的缺口（Task 8 的审查独立确认：它不在 Task 8 的声明范围内，也未被 9–11 中任何一个认领）。spec §5.2 写明总览标签「常驻」，隐含它必须可达。
+
+- [ ] **Step 1: 写失败测试**
+
+```tsx
+it('项目卡片上的「总览」按钮打开该项目的总览标签', async () => {
+  render(<HomePage />)
+  await userEvent.click(await screen.findByRole('button', { name: /总览/ }))
+  const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')
+  expect(ov).toBeTruthy()
+  expect(ov?.dirName).toBe('-Users-hou-astro-aTerm')
+})
+
+it('点击总览按钮不会同时触发展开卡片（事件不冒泡到卡片头）', async () => {
+  render(<HomePage />)
+  await userEvent.click(await screen.findByRole('button', { name: /总览/ }))
+  // 卡片仍处于收起状态：其会话列表未出现
+  expect(screen.queryByText('重构解析器')).toBeNull()
+})
+```
+
+- [ ] **Step 2–5:** 确认失败 → 在 `ProjectCard` 头部加一个按钮，`onClick` 中 `e.stopPropagation()` 后调 `openOverview(p.dirName, basename(p.cwd))` → 确认通过 → 提交
+
+```bash
+git commit -m "feat(ui): 主页项目卡片增加总览页入口"
+```
+
+---
+
 ## 完成标准（对应 spec §12 P2 行验收）
 
 - [ ] 打开总览页：方块按最后活动时间新→旧排列，打开期间不因状态刷新而重排
@@ -1230,6 +1268,7 @@ git commit -m "feat(ui): 总览页异步补齐 sub-agent 徽章，不阻塞首�
 - [ ] 重命名持久化；清空名字回退默认标题
 - [ ] 四枚徽章正确：模型短名、⑂n（仅有时显示）、相对时间、`上下文 107k`
 - [ ] 底部状态栏随标签切换而变化
+- [ ] 总览页可从主页项目卡片打开（功能可抵达，而非仅存在）
 - [ ] `npx vitest run` 全绿、`npm run build` 零错误、`cargo test` 全绿、`cargo check` 干净
 - [ ] 全程未向 `~/.claude/` 写入任何内容
 
