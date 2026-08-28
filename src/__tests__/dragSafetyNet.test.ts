@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { attachDragSafetyNet } from '../dragSafetyNet'
 
+// dragSafetyNet.trigger() 内部用 setTimeout(fn, 0)（宏任务）延后判断，不再是
+// queueMicrotask——见 dragSafetyNet.ts 顶部注释。`await Promise.resolve()` 只排空
+// 微任务队列，等不到宏任务；这里改用一个真的宏任务作为"栅栏"，等它跑完就能保证前面
+// 排进宏任务队列的 setTimeout(fn, 0) 也已经跑完（同一优先级的宏任务先进先出）。
+function flushMacrotask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
 // 本轮修复的直接回归测试（见 .superpowers/drag-blur-fix-report.md）：上一轮 blur 兜底用
 // capture:true 挂在 window 上。捕获阶段对不冒泡的事件同样会先经过 window——文档树里
 // 任意元素的 blur（不只是窗口整体失焦）都会被这张网误判成"应当中止拖拽"，pointerdown
@@ -31,7 +39,7 @@ describe('attachDragSafetyNet — blur 只应响应窗口整体失焦，不是�
     // blur 本身不冒泡——这正是本次回归的关键：捕获阶段挂在 window 上的监听器曾经
     // 依然能看到它（问题所在），非捕获阶段的监听器则完全看不到（本次修复后的状态）。
     el.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false }))
-    await Promise.resolve() // trigger() 内部用 queueMicrotask 延后判断，见 dragSafetyNet.ts
+    await flushMacrotask()
 
     expect(endCalls).toBe(0)
     expect(active).toBe(true)
@@ -48,7 +56,7 @@ describe('attachDragSafetyNet — blur 只应响应窗口整体失焦，不是�
     })
 
     window.dispatchEvent(new Event('blur'))
-    await Promise.resolve()
+    await flushMacrotask()
 
     expect(endCalls).toBe(1)
     expect(active).toBe(false)
@@ -64,13 +72,13 @@ describe('attachDragSafetyNet — blur 只应响应窗口整体失焦，不是�
 
     // 无关 pointerId 的 pointerup 不应打断
     window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 2, bubbles: true, cancelable: true }))
-    await Promise.resolve()
+    await flushMacrotask()
     expect(endCalls).toBe(0)
     expect(active).toBe(true)
 
     // 匹配 pointerId 的 pointerup 才会打断
     window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-    await Promise.resolve()
+    await flushMacrotask()
     expect(endCalls).toBe(1)
     expect(active).toBe(false)
   })

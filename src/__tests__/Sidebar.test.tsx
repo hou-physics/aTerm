@@ -477,7 +477,7 @@ describe('Sidebar — 窗口级兜底：被拖会话项在拖拽中途从 DOM �
 
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve() // 兜底的 endDrag() 被 queueMicrotask 推迟，见 dragSafetyNet.ts 顶部注释
+      await new Promise((r) => setTimeout(r, 0)) // 兜底的 endDrag() 被 setTimeout(fn, 0) 宏任务推迟，见 dragSafetyNet.ts 顶部注释
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
@@ -503,7 +503,7 @@ describe('Sidebar — 窗口级兜底：被拖会话项在拖拽中途从 DOM �
 
     await act(async () => {
       window.dispatchEvent(new Event('blur'))
-      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：setTimeout(fn, 0) 宏任务推迟，不是微任务
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
@@ -541,7 +541,7 @@ describe('Sidebar — 窗口级兜底：被拖会话项在拖拽中途从 DOM �
     // 可观察效果（body class 早已是干净状态，不会被重新弄脏，也不会误触发任何动作）。
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：setTimeout(fn, 0) 宏任务推迟，不是微任务
     })
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
     expect(useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes).toHaveLength(1)
