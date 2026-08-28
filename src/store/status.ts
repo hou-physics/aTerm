@@ -51,11 +51,16 @@ function upsert(map: Map<string, SessionStatusPayload>, entry: SessionStatusPayl
 
 type StatusStoreState = {
   statuses: Map<string, SessionStatusPayload>
+  /** 单调递增的变更计数。存在的意义是给 React 一个**标量**依赖：`statuses` 是每次
+   *  更新都换新引用的 Map，直接当依赖会让消费方难以区分"真的变了"与"重渲染了"，
+   *  而计数器只在确有条目被更新时才加一。App.tsx 用它触发会话元数据的节流刷新。 */
+  version: number
   applyEntries(entries: SessionStatusPayload[]): void
 }
 
 export const useStatusStore = create<StatusStoreState>((set) => ({
   statuses: new Map(),
+  version: 0,
   applyEntries: (entries) => {
     if (entries.length === 0) return
     set((state) => {
@@ -64,7 +69,7 @@ export const useStatusStore = create<StatusStoreState>((set) => ({
       for (const e of entries) {
         if (upsert(next, e)) changed = true
       }
-      return changed ? { statuses: next } : state
+      return changed ? { statuses: next, version: state.version + 1 } : state
     })
   },
 }))

@@ -15,10 +15,16 @@ import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
 import { TerminalLayer } from './components/TerminalLayer'
 import { decidePaneFit, MAX_PANES, neighborPaneId, usablePaneAreaWidth } from './paneLayout'
+import { createTrailingThrottle, type Throttled } from './refreshThrottle'
 import { useHint } from './store/hint'
 import { useLayout } from './store/layout'
 import { useSessions } from './store/sessions'
+import { useStatusStore } from './store/status'
 import { useTabs } from './store/tabs'
+
+// 元数据刷新的最小间隔。15s：足够让底栏在一轮对话内跟上，又不会让 list_projects
+// 的头尾读取变成持续负载。
+const METADATA_REFRESH_MS = 15_000
 
 export default function App() {
   const { tabs, activeId } = useTabs()
@@ -29,13 +35,41 @@ export default function App() {
   // 拖拽入口各自的同类拒绝，共用同一条内联轻提示（store/hint.ts）：不用对话框，
   // 几秒后自行消失（设计文档 §5-A"无对话，内联自消失提示即可"），三处触发、一处
   // 渲染，不写第二套提示机制。
+  const statusVersion = useStatusStore((s) => s.version)
+  const metadataRefreshRef = useRef<Throttled | null>(null)
+  const skipFirstStatusTickRef = useRef(true)
   const hint = useHint((s) => s.message)
   useEffect(() => {
     refresh().catch(console.error)
     const onFocus = () => { refresh().catch(console.error) }
     window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
+
+    // 会话元数据（模型 / effort / 权限模式 / 上下文用量 / 预览行 / 标题）随转录增长
+    // 而变，但上面两个触发点覆盖不到"用户一直待在 aTerm 里面"这个常态——窗口从不
+    // 失焦，元数据就停在启动那一刻（实测：底栏长期显示已经换掉的旧模型）。FSEvents
+    // 推来的 session-status 事件恰好标志"某个转录被写了"，拿它当刷新信号；但必须
+    // 节流：refresh() 会对每个项目的每个转录做头尾读取，而运行中的会话每 120ms 就
+    // 可能推一条事件。
+    const throttled = createTrailingThrottle(() => { refresh().catch(console.error) }, METADATA_REFRESH_MS)
+    metadataRefreshRef.current = throttled
+
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      throttled.cancel()
+      metadataRefreshRef.current = null
+    }
   }, [refresh])
+
+  // statusVersion 是 store 里的单调计数器（不是 statuses 那个每次都换引用的 Map），
+  // 所以这个效应只在确有状态条目更新时才跑。首次挂载那一下跳过——上面的 effect 已经
+  // 刷过一次了，不必紧接着再刷。
+  useEffect(() => {
+    if (skipFirstStatusTickRef.current) {
+      skipFirstStatusTickRef.current = false
+      return
+    }
+    metadataRefreshRef.current?.trigger()
+  }, [statusVersion])
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       // Control+Tab / Control+Shift+Tab：像 Chrome 一样在标签间循环切换（含主页标签），

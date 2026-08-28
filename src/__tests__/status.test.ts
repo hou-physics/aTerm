@@ -115,3 +115,33 @@ describe('aggregateStatus — 项目卡片聚合规则（spec §7）', () => {
     expect(aggregateStatus([])).toBe('unknown')
   })
 })
+
+describe('store/status — version 变更计数（App.tsx 据此节流刷新会话元数据）', () => {
+  it('确有条目被更新时递增', async () => {
+    getSessionStatusesMock.mockResolvedValueOnce([entry({ status: 'running', updatedAtMs: 10 })])
+    const { useStatusStore } = await freshModule()
+    const before = useStatusStore.getState().version
+
+    handlers['session-status']({ payload: [entry({ status: 'done', updatedAtMs: 20 })] })
+    expect(useStatusStore.getState().version).toBe(before + 1)
+  })
+
+  it('事件带来的是更旧的数据、什么都没改时不递增——否则 App.tsx 会被无谓地唤起刷新', async () => {
+    getSessionStatusesMock.mockResolvedValueOnce([entry({ status: 'done', updatedAtMs: 20 })])
+    const { useStatusStore } = await freshModule()
+    const before = useStatusStore.getState().version
+
+    // updatedAtMs 更小 = 更旧，upsert 会拒绝它
+    handlers['session-status']({ payload: [entry({ status: 'running', updatedAtMs: 10 })] })
+    expect(useStatusStore.getState().version).toBe(before)
+  })
+
+  it('空事件不递增', async () => {
+    getSessionStatusesMock.mockResolvedValueOnce([])
+    const { useStatusStore } = await freshModule()
+    const before = useStatusStore.getState().version
+
+    handlers['session-status']({ payload: [] })
+    expect(useStatusStore.getState().version).toBe(before)
+  })
+})
