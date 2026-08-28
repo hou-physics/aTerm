@@ -1,0 +1,80 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { blockKey, useOverviewStore } from '../store/overview'
+
+const t = (rootKey: string, ms: number) => ({ rootKey, lastActivityMs: ms })
+
+beforeEach(() => {
+  localStorage.clear()
+  useOverviewStore.setState({ order: {}, positions: {}, names: {} })
+})
+
+describe('排序快照（spec §5.2：打开时按最后活动时间新→旧，打开期间不重排）', () => {
+  it('首次捕获按时间新→旧', () => {
+    useOverviewStore.getState().captureOrder('proj', [t('a', 100), t('b', 300), t('c', 200)])
+    expect(useOverviewStore.getState().order.proj).toEqual([
+      blockKey('proj', 'b'), blockKey('proj', 'c'), blockKey('proj', 'a'),
+    ])
+  })
+
+  it('已有快照时不因时间变化而重排', () => {
+    const s = useOverviewStore.getState()
+    s.captureOrder('proj', [t('a', 100), t('b', 300)])
+    const before = useOverviewStore.getState().order.proj
+    s.captureOrder('proj', [t('a', 999_999), t('b', 300)]) // a 变成最新
+    expect(useOverviewStore.getState().order.proj).toEqual(before)
+  })
+
+  it('新出现的会话追加到快照末尾，不打乱既有顺序', () => {
+    const s = useOverviewStore.getState()
+    s.captureOrder('proj', [t('a', 100), t('b', 300)])
+    s.captureOrder('proj', [t('a', 100), t('b', 300), t('新', 50)])
+    expect(useOverviewStore.getState().order.proj).toEqual([
+      blockKey('proj', 'b'), blockKey('proj', 'a'), blockKey('proj', '新'),
+    ])
+  })
+
+  it('消失的会话从快照中移除', () => {
+    const s = useOverviewStore.getState()
+    s.captureOrder('proj', [t('a', 100), t('b', 300)])
+    s.captureOrder('proj', [t('b', 300)])
+    expect(useOverviewStore.getState().order.proj).toEqual([blockKey('proj', 'b')])
+  })
+})
+
+describe('位置：拖拽中只改内存，落手才持久化（沿用项目既有两动作范式）', () => {
+  it('setPosition 不写 localStorage', () => {
+    useOverviewStore.getState().setPosition('k', { x: 10, y: 20 })
+    expect(useOverviewStore.getState().positions.k).toEqual({ x: 10, y: 20 })
+    expect(localStorage.getItem('aterm.overview.positions')).toBeNull()
+  })
+
+  it('commitPosition 写入 localStorage', () => {
+    useOverviewStore.getState().commitPosition('k', { x: 10, y: 20 })
+    expect(JSON.parse(localStorage.getItem('aterm.overview.positions')!)).toEqual({ k: { x: 10, y: 20 } })
+  })
+})
+
+describe('重命名', () => {
+  it('rename 持久化，clearName 恢复默认标题', () => {
+    const s = useOverviewStore.getState()
+    s.rename('k', '我的重构任务')
+    expect(JSON.parse(localStorage.getItem('aterm.overview.names')!)).toEqual({ k: '我的重构任务' })
+    s.clearName('k')
+    expect(useOverviewStore.getState().names.k).toBeUndefined()
+  })
+
+  it('空白名字视为清除，不留下空标题的方块', () => {
+    const s = useOverviewStore.getState()
+    s.rename('k', '   ')
+    expect(useOverviewStore.getState().names.k).toBeUndefined()
+  })
+})
+
+describe('持久化读回的健壮性', () => {
+  it('localStorage 内容损坏时回退为空，不抛异常', async () => {
+    localStorage.setItem('aterm.overview.positions', '{ 这不是 JSON')
+    vi.resetModules()
+    const fresh = await import('../store/overview')
+    expect(fresh.useOverviewStore.getState().positions).toEqual({})
+  })
+})
