@@ -61,6 +61,12 @@ beforeEach(() => {
   // describe('sub-agent 徽章异步补齐…') 里每条用例都会自己用 mockReturnValue/
   // mockRejectedValue/mockImplementation 覆盖这个默认值。
   vi.mocked(ipc.countSubagents).mockReset().mockImplementation(() => new Promise(() => {}))
+  // resumeThread 同样是模块级 vi.fn()（不是 vi.spyOn），afterEach 的 restoreAllMocks()
+  // 不会清它的调用记录。下面「未拖拽、直接双击方块」那条断言的是
+  // toHaveBeenCalledTimes(1)——它现在能过，只是因为本文件恰好只有这一条会打开会话的
+  // 用例；再加第二条（哪怕在它前面）就会因为记录累积而失败。显式清一次，把这条断言
+  // 的正确性钉在 beforeEach 上，而不是钉在"文件里碰巧只有一条"这个偶然事实上。
+  vi.mocked(resumeThread).mockClear()
 })
 
 afterEach(() => {
@@ -296,6 +302,19 @@ describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
     expect(await screen.findByText('⑂ 7')).toBeTruthy()
   })
 
+  // 终审 Important 1：Rust 侧不再从 rootKey 反推该数哪个文件（那要把整个项目目录
+  // 重扫一遍——每个 .jsonl 读头 40 行/256KB + 尾 64KB 再各跑一次 parse_meta，代价
+  // N×F），改由前端把手里现成的 ThreadInfo.resumeSessionId 传进去。传错的后果是静默
+  // 的：Rust 侧会拼出一个不存在的文件名，按既有约定返回 Ok(0)，所有徽章一起消失，
+  // 没有任何报错。这条测试钉住传的确实是 sessionId。
+  it('传给 Rust 的是 resumeSessionId，不是 rootKey', () => {
+    // 沿用 beforeEach 钉的默认实现（永不 resolve）：本例只关心用什么参数调，不关心
+    // 返回值。worker 在 await 之前就同步打出这一通调用，render 返回时已经发生。
+    render(<OverviewPage dirName="proj" />)
+    expect(vi.mocked(ipc.countSubagents)).toHaveBeenCalledWith('proj', 's-a')
+    expect(vi.mocked(ipc.countSubagents)).not.toHaveBeenCalledWith('proj', 'a')
+  })
+
   // 复审纠正：原版只种了一个 thread，标题却叫"其它方块不受影响"——场上压根没有
   // 别的方块，这句话没有被验证到（行为本身是对的，per-item try/catch 靠读代码
   // 确认，不是靠这条测试）。改成两个 thread：一个失败、一个成功，断言失败的那个
@@ -305,8 +324,10 @@ describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
       thread('a', '重构解析器', 100),
       thread('b', '正常会话', 90),
     ])
-    vi.mocked(ipc.countSubagents).mockImplementation((_dirName, rootKey) =>
-      rootKey === 'a' ? Promise.reject(new Error('读文件失败')) : Promise.resolve(5),
+    // 第二个参数是 sessionId（= ThreadInfo.resumeSessionId），不是 rootKey——
+    // 上面的 thread() 工厂把它造成 `s-${rootKey}`。
+    vi.mocked(ipc.countSubagents).mockImplementation((_dirName, sessionId) =>
+      sessionId === 's-a' ? Promise.reject(new Error('读文件失败')) : Promise.resolve(5),
     )
     render(<OverviewPage dirName="proj" />)
     expect(await screen.findByText('重构解析器')).toBeTruthy()
@@ -320,26 +341,14 @@ describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
     expect(badges[0].textContent).toBe('⑂ 5')
   })
 
-  // React 19 的 createRoot 路径下，组件卸载后的 setState 只是静默 no-op，不会像
-  // 旧版 ReactDOM 那样打一条 "Can't perform a React state update on an unmounted
-  // component" 的 console.error——所以这条测试无论有没有下面 subagentEpochRef 那个
-  // 陈旧响应守卫都会通过，证明力有限。守卫本身是按 spec 实现、靠读代码确认正确的
-  // （对照 ConversationPanel.tsx 的 requestIdRef 同一个 idiom），这条测试留着是
-  // 任务简报给定的原文用例，不是这个守卫的证据来源。
-  it('组件卸载后到达的响应不写 state（沿用 ConversationPanel 的陈旧响应守卫）', async () => {
-    let resolveCount: (n: number) => void = () => {}
-    vi.mocked(ipc.countSubagents).mockReturnValue(new Promise((r) => { resolveCount = r }))
-    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { unmount } = render(<OverviewPage dirName="proj" />)
-    unmount()
-    resolveCount(3)
-    await Promise.resolve()
-    expect(warn).not.toHaveBeenCalled()
-    warn.mockRestore()
-  })
+  // 终审删除：这里原本还有一条「组件卸载后到达的响应不写 state」。它自己的注释就
+  // 写明了它在有守卫和没守卫两种实现下都会通过（React 19 的 createRoot 路径下，卸载
+  // 后的 setState 只是静默 no-op，不打 console.error），也就是说它证明不了任何事，
+  // 却在文件列表里占着一行"覆盖率"。守卫（OverviewPage.tsx 的 subagentEpochRef）
+  // 保留，理由已经写进那里的代码注释。
 
-  // 上面三条是任务简报里给定的原文测试；简报把这一条的正文只留了一句注释
-  // （"构造 20 个 thread；断言首轮同时在飞的调用数不超过 4"），需要自己把断言写实。
+  // 下面这条的正文由实现者自己写实（简报只给了一句注释：「构造 20 个 thread；断言
+  // 首轮同时在飞的调用数不超过 4」）。
   //
   // 证明力设计：mock 实现让 countSubagents 调用时同步记一次调用、但返回一个直到测试
   // 手动放行才 resolve 的 promise——worker 池里每个 worker 在 await 之前都会同步打这一

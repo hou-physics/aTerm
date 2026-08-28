@@ -29,7 +29,11 @@ pub struct ProjectInfo {
     pub threads: Vec<ThreadInfo>,
 }
 
-fn is_uuid_stem(stem: &str) -> bool {
+/// 文件名（不含扩展名）是否是一个合法的 session id。`group_chain_files` 用它过滤目录
+/// 项；`subagents::count_subagents_in` 用它校验**前端传回来的** session id——那条路径
+/// 会把 session id 直接拼进文件名（`<session_id>.jsonl`），必须先确认它只由十六进制
+/// 字符与短横线组成，`.`/`/` 一律不可能通过，从而在文件名这一半上关掉路径穿越。
+pub(crate) fn is_uuid_stem(stem: &str) -> bool {
     stem.len() == 36 && stem.chars().filter(|c| *c == '-').count() == 4
         && stem.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }

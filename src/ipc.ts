@@ -46,9 +46,16 @@ export const confirmExit = () => invoke<void>('confirm_exit')
 export const hooksStatus = () => invoke<HooksStatus>('hooks_status')
 export const installHooks = () => invoke<InstallOutcome>('install_hooks')
 export const uninstallHooks = () => invoke<UninstallOutcome>('uninstall_hooks')
-// sub-agent 计数（Task 3 的 count_subagents，整读大文件、故意标 async 跑在后台线程）：
-// 未知的 dirName/rootKey 组合按既有约定返回 Ok(0)，与「读取失败」在这一层不可区分——
-// 调用方（OverviewPage.tsx）按 spec §5.3 把 0 一律当「不显示徽章」处理，不需要在这里
-// 额外分辨。
-export const countSubagents = (dirName: string, rootKey: string) =>
-  invoke<number>('count_subagents', { dirName, rootKey })
+// sub-agent 计数（Task 3 的 count_subagents，逐行流式读完整个 transcript、故意标 async
+// 跑在后台线程）。
+//
+// 第二个参数是 sessionId，传 ThreadInfo.resumeSessionId：Rust 侧不再从 rootKey 反推
+// 文件——那要把整个项目目录重扫一遍（每个 .jsonl 都读头 40 行/256KB + 尾 64KB 再各跑
+// 一次 parse_meta），只为算出一个前端本来就握在手里的文件名；总览页每个方块都会发一次
+// 这个命令，代价是 N×F。详见 src-tauri/src/sessions/subagents.rs 的 count_subagents 注释。
+//
+// 未知的 dirName/sessionId 组合（含非法 id）按既有约定返回 Ok(0)，与「读取失败」在这一
+// 层不可区分——调用方（OverviewPage.tsx）按 spec §5.3 把 0 一律当「不显示徽章」处理，
+// 不需要在这里额外分辨。
+export const countSubagents = (dirName: string, sessionId: string) =>
+  invoke<number>('count_subagents', { dirName, sessionId })

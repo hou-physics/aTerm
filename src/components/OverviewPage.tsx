@@ -35,10 +35,11 @@ import { SessionBlock } from './SessionBlock'
 const EMPTY_THREADS: ThreadInfo[] = []
 const EMPTY_ORDER: string[] = []
 
-// sub-agent 徽章（Task 11，spec §5.3）的并发上限：count_subagents 是全仓库唯一的整读
-// 大文件操作（Rust 侧按文件缓存、只重新解析新追加的字节，但冷启动的第一次读取仍然
-// 可能很贵——见 src-tauri/src/sessions/subagents.rs 顶部注释），一次性对几十个会话
-// 同时发起会在冷启动时把这条本该轻量的补齐请求变成一次并发风暴。
+// sub-agent 徽章（Task 11，spec §5.3）的并发上限：count_subagents 是全仓库唯一会读完
+// 整个 transcript 的操作（Rust 侧逐行流式读、内存 O(1)，并按文件缓存、只重新解析新追加
+// 的字节；但冷启动的第一次读取仍然要把整份文件走一遍，本机就有 64MB 级的样本——见
+// src-tauri/src/sessions/subagents.rs 顶部注释），一次性对几十个会话同时发起会在冷启动
+// 时把这条本该轻量的补齐请求变成一次并发风暴。
 const SUBAGENT_FETCH_CONCURRENCY = 4
 
 export function OverviewPage({ dirName }: { dirName: string }) {
@@ -135,6 +136,15 @@ export function OverviewPage({ dirName }: { dirName: string }) {
   // ConversationPanel 每次请求各领一个专属 id，因为这里天然就是"整批一起失效"的粒度：
   // 一旦 dirName 变了或组件卸了，这一整代里所有仍在飞的请求都应该被一起丢弃，不需要
   // 逐个区分谁是"更新的那个"。
+  //
+  // 关于"卸载后到达的响应"这一半，说明它的证据来源：不是测试，是这段注释。React 19 的
+  // createRoot 路径下，卸载后的 setState 只是静默 no-op（不再像旧版 ReactDOM 那样打
+  // "Can't perform a React state update on an unmounted component"），所以任何试图从
+  // 外部观察这个守卫的 jsdom 测试，在有守卫和没守卫两种实现下都会通过——那样的测试
+  // 在文件列表里看着像覆盖率，实际证明不了任何事，因此终审时删掉了（原名「组件卸载后
+  // 到达的响应不写 state」）。守卫本身保留：它按 spec 实现，与 ConversationPanel.tsx
+  // 的 requestIdRef 是同一个 idiom，真正吃紧的那一半（dirName 切换后旧请求的响应不得
+  // 写进新项目的 state）也确实需要它。
   const subagentEpochRef = useRef(0)
   useEffect(() => {
     subagentEpochRef.current++
@@ -159,18 +169,23 @@ export function OverviewPage({ dirName }: { dirName: string }) {
   // 每个目标携带自己的 dirName（而不是各 worker 依赖创建时闭包到的外层 dirName）：
   // 队列本身跨越多轮 effect 重跑存活，一个更早创建、仍在运行的 worker 完全可能在
   // dirName 变化之后才取到一个属于新一轮的目标，这样它请求时用的是这个目标自带的
-  // dirName，不会把新目标的 rootKey 错配到旧的 dirName 上。
-  const subagentQueueRef = useRef<{ key: string; dirName: string; rootKey: string }[]>([])
+  // dirName，不会把新目标的 sessionId 错配到旧的 dirName 上。
+  //
+  // 目标带的是 sessionId（= ThreadInfo.resumeSessionId）而不是 rootKey：Rust 侧靠它
+  // 直接拼出文件名，不必为了反推同一个文件把整个项目目录重扫一遍（见 ipc.ts 的
+  // countSubagents 注释）。resumeSessionId 正是 scan.rs 为这条链选出的最新文件，也正是
+  // 「继续对话」会 resume 的那一个，徽章因此和用户点下去会进入的会话对得上。
+  const subagentQueueRef = useRef<{ key: string; dirName: string; sessionId: string }[]>([])
   const subagentActiveWorkersRef = useRef(0)
   useEffect(() => {
     const epoch = subagentEpochRef.current
-    const newTargets: { key: string; dirName: string; rootKey: string }[] = []
+    const newTargets: { key: string; dirName: string; sessionId: string }[] = []
     for (const key of order) {
       if (requestedSubagentKeysRef.current.has(key)) continue
       const t = byKey.get(key)
       if (!t) continue
       requestedSubagentKeysRef.current.add(key)
-      newTargets.push({ key, dirName, rootKey: t.rootKey })
+      newTargets.push({ key, dirName, sessionId: t.resumeSessionId })
     }
     if (newTargets.length === 0) return
     subagentQueueRef.current.push(...newTargets)
@@ -185,7 +200,7 @@ export function OverviewPage({ dirName }: { dirName: string }) {
           const next = subagentQueueRef.current.shift()
           if (!next) return
           try {
-            const count = await countSubagents(next.dirName, next.rootKey)
+            const count = await countSubagents(next.dirName, next.sessionId)
             if (subagentEpochRef.current !== epoch) return // 卸载或 dirName 已切换：丢弃
             setSubagentCounts((prev) => {
               const nextMap = new Map(prev)
