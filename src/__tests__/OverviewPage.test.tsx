@@ -1,4 +1,4 @@
-import { act, fireEvent, render } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { BLOCK_WIDTH_PX } from '../overviewLayout'
@@ -10,7 +10,10 @@ import { useSessions } from '../store/sessions'
 // + getSessionStatuses()）。测试环境没有真实的 Tauri IPC 桥，必须换成不触碰真实桥的空
 // 实现——与 SessionBlock.test.tsx 同一套 mock 边界。
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
-vi.mock('../ipc', () => ({ getSessionStatuses: vi.fn(async () => []) }))
+// countSubagents：Task 11 新增。真正的默认实现在下面的 beforeEach 里钉（不依赖
+// afterEach 的 vi.restoreAllMocks() 对 vi.fn()〔非 vi.spyOn〕到底会不会保留它），各
+// 测试按需用 mockReturnValue/mockRejectedValue/mockImplementation 覆盖。
+vi.mock('../ipc', () => ({ getSessionStatuses: vi.fn(async () => []), countSubagents: vi.fn() }))
 // 只测「双击到底有没有打开会话」这一件事，不牵扯 actions.ts 内部真实调用的
 // useTabs.openTerminal/ptySpawn 这条重链路——那条链路有自己的测试覆盖
 // （tabs.test.ts/actions 相关用例），这里换成一个可断言调用参数的 spy。
@@ -18,6 +21,7 @@ vi.mock('../actions', () => ({ resumeThread: vi.fn() }))
 
 import { OverviewPage } from '../components/OverviewPage'
 import { resumeThread } from '../actions'
+import * as ipc from '../ipc'
 
 const DIR = 'proj'
 
@@ -48,6 +52,15 @@ beforeEach(() => {
   localStorage.clear()
   useOverviewStore.setState({ order: {}, positions: {}, names: {} })
   useSessions.setState({ projects: [], loading: false })
+  // 见上面 vi.mock('../ipc', ...) 处的注释：显式钉一次默认实现，不依赖 afterEach 的
+  // vi.restoreAllMocks() 对纯 vi.fn() 到底会不会保留上一次设的返回值。默认给一个永不
+  // resolve 的 promise，而不是 mockResolvedValue(0)——本文件里绝大多数用例根本不关心
+  // 徽章、渲染后也不会去 await 任何东西，如果默认值是一个会 resolve 的 promise，它在
+  // 测试同步的断言体跑完之后才落地的那次 setState 就会落在 act() 范围之外，冒出一堆
+  // 无谓的 "not wrapped in act" 警告，污染这些用例的测试输出。新加的
+  // describe('sub-agent 徽章异步补齐…') 里每条用例都会自己用 mockReturnValue/
+  // mockRejectedValue/mockImplementation 覆盖这个默认值。
+  vi.mocked(ipc.countSubagents).mockReset().mockImplementation(() => new Promise(() => {}))
 })
 
 afterEach(() => {
@@ -260,5 +273,76 @@ describe('OverviewPage —— 拖拽手柄不吞掉 SessionBlock 自己的双击
 
       expect(captureSpy).not.toHaveBeenCalled()
     })
+  })
+})
+
+// Task 11：sub-agent 徽章异步补齐。方块必须先用 Task 2 的 bounded 数据画出来，
+// count_subagents 是全仓库唯一的整读大文件操作（Rust 侧 cache，仍可能是冷启动的大
+// 开销），因此这枚徽章必须在渲染之后异步补——首屏绝不等它。
+describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
+  beforeEach(() => {
+    setProject([thread('a', '重构解析器', 100)])
+  })
+
+  it('方块先渲染，⑂ 徽章随后出现', async () => {
+    let resolveCount: (n: number) => void = () => {}
+    vi.mocked(ipc.countSubagents).mockReturnValue(new Promise((r) => { resolveCount = r }))
+    render(<OverviewPage dirName="proj" />)
+    // 首屏：方块已在，徽章未到
+    expect(await screen.findByText('重构解析器')).toBeTruthy()
+    expect(screen.queryByText(/⑂/)).toBeNull()
+    // 计数返回后徽章出现
+    resolveCount(7)
+    expect(await screen.findByText('⑂ 7')).toBeTruthy()
+  })
+
+  it('计数失败时静默略过该徽章，其它方块不受影响', async () => {
+    vi.mocked(ipc.countSubagents).mockRejectedValue(new Error('读文件失败'))
+    render(<OverviewPage dirName="proj" />)
+    expect(await screen.findByText('重构解析器')).toBeTruthy()
+    expect(screen.queryByText(/⑂/)).toBeNull()
+  })
+
+  it('组件卸载后到达的响应不写 state（沿用 ConversationPanel 的陈旧响应守卫）', async () => {
+    let resolveCount: (n: number) => void = () => {}
+    vi.mocked(ipc.countSubagents).mockReturnValue(new Promise((r) => { resolveCount = r }))
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { unmount } = render(<OverviewPage dirName="proj" />)
+    unmount()
+    resolveCount(3)
+    await Promise.resolve()
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  // 上面三条是任务简报里给定的原文测试；简报把这一条的正文只留了一句注释
+  // （"构造 20 个 thread；断言首轮同时在飞的调用数不超过 4"），需要自己把断言写实。
+  //
+  // 证明力设计：mock 实现让 countSubagents 调用时同步记一次调用、但返回一个直到测试
+  // 手动放行才 resolve 的 promise——worker 池里每个 worker 在 await 之前都会同步打这一
+  // 通调用，所以"首轮到底发了几个请求"精确等于 render() 刚返回那一刻的调用次数，不需要
+  // 猜测事件循环时序。
+  //   - 如果实现根本没做并发上限（一次性 for 循环发全部 20 个），这里会是 20，第一个
+  //     断言就会失败。
+  //   - 如果实现把「并发上限」错当成「只发前 4 个，不再补位」（例如 slice(0,4) 而不是
+  //     真正的工作队列），第一个断言能过，但放行一个之后调用数不会补到 5，第二个断言
+  //     会失败——单看"首轮是不是 4"这一件事无法把这两种实现区分开，所以两个断言缺一
+  //     不可。
+  it('并发受限：会话很多时不一次性发起全部请求', async () => {
+    const resolvers: Array<(n: number) => void> = []
+    vi.mocked(ipc.countSubagents).mockImplementation(
+      () => new Promise<number>((resolve) => { resolvers.push(resolve) }),
+    )
+    const threads = Array.from({ length: 20 }, (_, i) => thread(`t${i}`, `T${i}`, 1000 - i))
+    setProject(threads)
+
+    render(<OverviewPage dirName="proj" />)
+
+    expect(vi.mocked(ipc.countSubagents).mock.calls.length).toBe(4)
+
+    resolvers[0](0)
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    expect(vi.mocked(ipc.countSubagents).mock.calls.length).toBe(5)
   })
 })

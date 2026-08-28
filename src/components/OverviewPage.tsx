@@ -22,7 +22,7 @@ import {
 } from 'react'
 import { resumeThread } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
-import type { ProjectInfo, ThreadInfo } from '../ipc'
+import { countSubagents, type ProjectInfo, type ThreadInfo } from '../ipc'
 import {
   BLOCK_WIDTH_PX, canvasHeight, clampPosition, columnsForWidth, gridSlot,
 } from '../overviewLayout'
@@ -34,6 +34,12 @@ import { SessionBlock } from './SessionBlock'
 
 const EMPTY_THREADS: ThreadInfo[] = []
 const EMPTY_ORDER: string[] = []
+
+// sub-agent 徽章（Task 11，spec §5.3）的并发上限：count_subagents 是全仓库唯一的整读
+// 大文件操作（Rust 侧按文件缓存、只重新解析新追加的字节，但冷启动的第一次读取仍然
+// 可能很贵——见 src-tauri/src/sessions/subagents.rs 顶部注释），一次性对几十个会话
+// 同时发起会在冷启动时把这条本该轻量的补齐请求变成一次并发风暴。
+const SUBAGENT_FETCH_CONCURRENCY = 4
 
 export function OverviewPage({ dirName }: { dirName: string }) {
   const projects = useSessions((s) => s.projects)
@@ -119,6 +125,65 @@ export function OverviewPage({ dirName }: { dirName: string }) {
     void resumeThread(project.dirName, project.cwd, t)
   }, [project])
 
+  // sub-agent 徽章（Task 11）：方块本身已经用上面 Task 2 的 bounded 数据画完了，这里
+  // 只是补一个纯展示层的异步 state，绝不影响、也不等待上面的渲染——按 key 存进
+  // Map，取不到时 SessionBlock 拿到 undefined，和显式传 0 是同一种「不显示徽章」
+  // 效果（spec §5.3：⑂ n 只在 n > 0 时出现）。
+  const [subagentCounts, setSubagentCounts] = useState<Map<string, number>>(new Map())
+  // 「代」计数器：只在 dirName 变化或组件卸载时推进（与 ConversationPanel.tsx 的
+  // requestIdRef 同一个陈旧响应守卫 idiom）。这里所有请求共享同一个当前代——不像
+  // ConversationPanel 每次请求各领一个专属 id，因为这里天然就是"整批一起失效"的粒度：
+  // 一旦 dirName 变了或组件卸了，这一整代里所有仍在飞的请求都应该被一起丢弃，不需要
+  // 逐个区分谁是"更新的那个"。
+  const subagentEpochRef = useRef(0)
+  useEffect(() => {
+    subagentEpochRef.current++
+    return () => {
+      subagentEpochRef.current++
+    }
+  }, [dirName])
+  // 记录本代里已经发起过请求的 key（成功/失败/仍在飞都算），跨渲染持久（不放进
+  // state，纯粹是去重簿记，本身不该触发重渲染）。防止 order/byKey 因为无关的
+  // useSessions 周期性 refresh（App.tsx）换出新数组引用、导致下面的 effect 重跑时，
+  // 对已经问过的会话重复发起请求——captureOrder（store/overview.ts）每次都会
+  // set() 一份新的 order 数组，哪怕内容没变。
+  const requestedSubagentKeysRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const epoch = subagentEpochRef.current
+    const targets: { key: string; rootKey: string }[] = []
+    for (const key of order) {
+      if (requestedSubagentKeysRef.current.has(key)) continue
+      const t = byKey.get(key)
+      if (!t) continue
+      requestedSubagentKeysRef.current.add(key)
+      targets.push({ key, rootKey: t.rootKey })
+    }
+    if (targets.length === 0) return
+
+    // 简单的并发上限队列：固定数量的 worker 共享一个游标，谁先 await 完谁先取下一个
+    // ——不是"切成几批、批内并发、批间串行"，一个位置腾出来立刻补下一个，直到目标
+    // 耗尽。失败的单个请求 catch 后跳过，不影响这个 worker 继续处理队列里的下一个。
+    let cursor = 0
+    const runWorker = async () => {
+      while (cursor < targets.length) {
+        const { key, rootKey } = targets[cursor++]
+        try {
+          const count = await countSubagents(dirName, rootKey)
+          if (subagentEpochRef.current !== epoch) return // 卸载或 dirName 已切换：丢弃
+          setSubagentCounts((prev) => {
+            const next = new Map(prev)
+            next.set(key, count)
+            return next
+          })
+        } catch {
+          // 静默略过：这一个会话的徽章读取失败，不弹错误、不影响其它方块。
+        }
+      }
+    }
+    const workerCount = Math.min(SUBAGENT_FETCH_CONCURRENCY, targets.length)
+    for (let i = 0; i < workerCount; i++) void runWorker()
+  }, [dirName, order, byKey])
+
   return (
     <div className="overview-page">
       <div
@@ -139,6 +204,7 @@ export function OverviewPage({ dirName }: { dirName: string }) {
               dirName={dirName}
               pos={pos}
               containerWidth={containerWidth}
+              subagentCount={subagentCounts.get(key) ?? 0}
               onOpen={onOpen}
             />
           )
@@ -199,6 +265,7 @@ function DraggableBlock({
   dirName,
   pos,
   containerWidth,
+  subagentCount,
   onOpen,
 }: {
   blockKey: string
@@ -206,6 +273,7 @@ function DraggableBlock({
   dirName: string
   pos: Position
   containerWidth: number
+  subagentCount: number
   onOpen: (t: ThreadInfo) => void
 }) {
   const dragRef = useRef<DragState | null>(null)
@@ -351,7 +419,7 @@ function DraggableBlock({
       onPointerDown={onPointerDown}
       onLostPointerCapture={onLostPointerCapture}
     >
-      <SessionBlock thread={thread} dirName={dirName} subagentCount={0} onOpen={() => onOpen(thread)} />
+      <SessionBlock thread={thread} dirName={dirName} subagentCount={subagentCount} onOpen={() => onOpen(thread)} />
     </div>
   )
 }

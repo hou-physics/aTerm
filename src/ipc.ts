@@ -46,3 +46,9 @@ export const confirmExit = () => invoke<void>('confirm_exit')
 export const hooksStatus = () => invoke<HooksStatus>('hooks_status')
 export const installHooks = () => invoke<InstallOutcome>('install_hooks')
 export const uninstallHooks = () => invoke<UninstallOutcome>('uninstall_hooks')
+// sub-agent 计数（Task 3 的 count_subagents，整读大文件、故意标 async 跑在后台线程）：
+// 未知的 dirName/rootKey 组合按既有约定返回 Ok(0)，与「读取失败」在这一层不可区分——
+// 调用方（OverviewPage.tsx）按 spec §5.3 把 0 一律当「不显示徽章」处理，不需要在这里
+// 额外分辨。
+export const countSubagents = (dirName: string, rootKey: string) =>
+  invoke<number>('count_subagents', { dirName, rootKey })
