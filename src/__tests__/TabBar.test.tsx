@@ -23,6 +23,7 @@ vi.mock('../closeRequest', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 
 import App from '../App'
+import { attachDragSafetyNet } from '../dragSafetyNet'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
@@ -708,7 +709,7 @@ describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失
 
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve() // 兜底的 endDrag() 被 queueMicrotask 推迟，见 dragSafetyNet.ts 顶部注释
+      await new Promise((r) => setTimeout(r, 0)) // 兜底的 endDrag() 被 setTimeout(fn, 0) 宏任务推迟，见 dragSafetyNet.ts 顶部注释
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
@@ -735,7 +736,7 @@ describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失
 
     await act(async () => {
       window.dispatchEvent(new Event('blur'))
-      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：setTimeout(fn, 0) 宏任务推迟，不是微任务
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
@@ -775,7 +776,7 @@ describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失
     // 可观察效果（body class 早已是干净状态，不会被重新弄脏，也不会误触发任何动作）。
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：setTimeout(fn, 0) 宏任务推迟，不是微任务
     })
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
@@ -815,7 +816,7 @@ describe('TabBar — 回归：pointerdown 之后任意元素失焦不应中止�
     })
     await act(async () => {
       fakeXtermTextarea.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false }))
-      await Promise.resolve() // 安全网内部用 queueMicrotask 延后判断，见 dragSafetyNet.ts
+      await new Promise((r) => setTimeout(r, 0)) // 安全网内部用 setTimeout(fn, 0) 宏任务延后判断，见 dragSafetyNet.ts
     })
     await act(async () => {
       fireEvent.pointerMove(c, { clientX: 150, clientY: 10, pointerId: 1 }) // 跨过 4px 阈值
@@ -1092,5 +1093,161 @@ describe('TabBar — 会被拒绝的落点：拖拽过程中即可见，持续�
     const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
     expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(false)
     expect(document.querySelector('.pane-drop-reason')).toBeNull()
+  })
+})
+
+// 回归测试（Fix 1）：dragSafetyNet.ts 曾经用 queueMicrotask 推迟 endDrag()，理由写的是
+// "推迟到本次事件的捕获+目标+冒泡三个阶段全部跑完之后"——这个假设是错的：HTML 规范要求
+// "每个监听器回调一返回、只要 JS 调用栈已清空，就做一次 microtask checkpoint"，不是
+// "整个派发结束后才做一次"。安全网的 pointerup 监听器挂在 window 上、capture:true，是
+// 捕获阶段最先跑的监听器之一，它一返回，checkpoint 立刻发生——排在 queueMicrotask 里的
+// endDrag() 就在这个 checkpoint 里被调用，此时事件根本还没走到目标/冒泡阶段，组件自己
+// 冒泡阶段的 onTabPointerUp 完全没机会先跑，导致这张"安全网"在每一次正常收尾的拖拽上
+// 都抢先把 dragRef 清空，把合法的 drop 悄悄变成空操作。
+//
+// 这里不能直接用 `fireEvent.pointerUp(标签元素, ...)` 一次性触发（jsdom 的 dispatchEvent
+// 实现不会在捕获阶段监听器返回后插入一次真实的 microtask checkpoint 再继续派发——这正是
+// 这条回归当初能骗过整套已有测试套件的原因，见任务记录）。改为手动拆成两步，用一次
+// `window.dispatchEvent` 只让安全网自己的 window 级监听器单独处理这次 pointerup（此时
+// 事件的目标是 window 本身，不会传导到标签元素，组件自己的处理器完全不会被牵扯进来），
+// 中间插入一次"只 flush 微任务、不 flush 宏任务"的 await（`await Promise.resolve()`），
+// 然后才真正触发标签元素自己的 pointerup（组件冒泡阶段的处理器）——这精确还原了真实
+// 浏览器里"捕获阶段监听器返回 → 立即一次 microtask checkpoint → 之后才轮到目标/冒泡
+// 阶段"的时序，不依赖 jsdom 对 dispatchEvent 内部具体怎么串联捕获/冒泡与微任务队列。
+describe('TabBar — 回归（Fix 1）：安全网的 pointerup 触发不应抢在组件自身的冒泡处理器之前结束拖拽', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('安全网先一步收到 pointerup 并判定 isDragActive=true，随后组件自己的 onTabPointerUp 才跑：drop 仍然正常完成（断言真实 store 状态，不是某个 mock 被调用过）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 落在 pane-a 右半侧
+    })
+    expect(useDnd.getState().target).not.toBeNull()
+
+    // 第一步：只让安全网的 window 级监听器单独处理这次 pointerup，中间只 flush 微任务
+    // ——旧的 queueMicrotask 写法会在这一步就抢跑，同步把 dragRef 清空。
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+      await Promise.resolve()
+    })
+
+    // 第二步：组件自己冒泡阶段的处理器现在才跑——修复前，上一步已经把 dragRef 清空，
+    // 这里会因为 `!drag || !drag.dragging` 直接 early-return，drop 根本不会发生。
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    // flush 一次宏任务：即便安全网还留有尚未触发的 setTimeout（例如上一步已经通过组件
+    // 自己的 endDrag() 摘掉了监听器/取消了计时器），这里确保不会有任何迟到的副作用。
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // 断言真实 store 状态——drop 应当照常完成，与「拖已打开的标签进窗格区」那组用例
+    // 里"落在右半侧"的断言完全一致。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeUndefined()
+    const t = useTabs.getState().tabs.find((t) => t.id === 'tab-a')!
+    expect(t.panes.map((p) => p.id)).toEqual(['pane-a', 'pane-b'])
+    expect(t.panes.find((p) => p.id === 'pane-b')!.ptyId).toBe('pty-b')
+  })
+
+  it('对照组：组件自己的处理器真的完全没跑时（元素在拖拽中途被移出 DOM），安全网仍然独立完成清理——证明这张网的本职功能没有被 Fix 1 破坏', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(useDnd.getState().target).not.toBeNull()
+
+    // 被拖的标签节点直接从 DOM 里摘掉——不触发 lostpointercapture、也不触发
+    // pointerup/pointercancel（jsdom 不模拟隐式指针捕获释放），组件自己的
+    // onTabPointerUp 因此彻底没有机会执行。只剩窗口级安全网这一条路可以兜底。
+    b.remove()
+
+    // 只 dispatch window 级事件，绝不触碰组件自己的处理器。
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：现在是宏任务，不是微任务
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().target).toBeNull()
+    // 没有完成任何动作——安全网和 lostpointercapture 一样只清理，不识别落点、不下判断。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+})
+
+// 回归测试（Fix 2）：dragSafetyNet.ts 的调用方（TabBar.tsx/Sidebar.tsx/TabPanes.tsx）
+// 挂新网前现在会先摘掉 netCleanupRef 里任何仍然挂着的旧网（见 onTabPointerDown 注释），
+// 正常情况下不该再有两张网同时存活。但"万一"这道防线失守（例如未来某次重构不小心漏掉了
+// 这一行），isDragActive() 本身也不能只看共享的 dragRef 是否非空——那样一张属于旧拖拽的
+// 网，只要有任何一次新的拖拽正在进行（dragRef 非空，但指向的是新拖拽），就会把自己误判成
+// "仍然存活"，从而有能力打断这次它根本不认识的新拖拽。这里直接在 dragSafetyNet.ts 的层面
+// 单元测试这条"第二道保险"：isDragActive 必须比较 drag id，不能只判断非空——这正是三处
+// 调用方现在构造 isDragActive 闭包的真实写法（`dragRef.current !== null && dragRef.current.id === dragId`），
+// 不是假设性的写法。
+describe('dragSafetyNet — 回归（Fix 2）：一张属于旧拖拽的网不能结束一次新的拖拽', () => {
+  it('两张网都挂着（模拟旧网泄漏未被摘除）：旧网收到匹配自己 pointerId 的事件时，不会打断新网所属的、仍在进行中的拖拽；新网自己随后正常收尾时机也不受影响', async () => {
+    // 与三处真实调用方完全相同的写法：一个共享的、可变的"当前拖拽"引用 + 每次开始
+    // 拖拽时分配的单调递增 id，isDragActive 同时比较"非空"与"id 相同"两个条件。
+    const dragRef: { current: { id: number } | null } = { current: null }
+    let nextId = 0
+    const endDragCalls: number[] = []
+
+    function startDrag(pointerId: number) {
+      const id = ++nextId
+      dragRef.current = { id }
+      const cleanup = attachDragSafetyNet(
+        pointerId,
+        () => dragRef.current !== null && dragRef.current.id === id,
+        () => {
+          endDragCalls.push(id)
+          dragRef.current = null
+        },
+      )
+      return { id, cleanup }
+    }
+
+    // "旧拖拽"：pointerId=1，网挂上之后没有被正常摘除（模拟泄漏）。
+    const stale = startDrag(1)
+    // "新拖拽"：pointerId=2，覆盖了共享的 dragRef——此刻 dragRef.current.id 是新拖拽的 id。
+    const fresh = startDrag(2)
+    expect(dragRef.current?.id).toBe(fresh.id)
+
+    // 一次匹配旧拖拽 pointerId 的 pointerup（例如某个滞后到达的、与旧拖拽相关的事件）
+    // 落在 window 上——只有旧网会响应（pointerId 过滤），新网不受影响。
+    window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+    await new Promise((r) => setTimeout(r, 0))
+
+    // 新拖拽必须还活着：旧网的 isDragActive() 因为 id 不匹配而判定为 false，没有调用 endDrag()。
+    expect(dragRef.current).not.toBeNull()
+    expect(dragRef.current?.id).toBe(fresh.id)
+    expect(endDragCalls).toEqual([])
+
+    // 新拖拽随后正常收尾（自己的 pointerId=2），断言这次真正成功——不是"从未被打断"这种
+    // 消极断言，是"完整走完一次生命周期，自己的 endDrag 被调用了恰好一次"。
+    window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 2, bubbles: true, cancelable: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(dragRef.current).toBeNull()
+    expect(endDragCalls).toEqual([fresh.id])
+
+    stale.cleanup()
+    fresh.cleanup()
   })
 })

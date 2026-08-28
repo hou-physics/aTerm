@@ -17,7 +17,10 @@ import { HooksControl } from './HooksInstall'
 import { StatusDot } from './StatusDot'
 import { ThemeSwitcher } from './ThemeSwitcher'
 
-type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
+// id：每次 pointerdown 分配的单调递增拖拽序号，见 onItemPointerDown 与
+// dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释——isDragActive() 靠它辨认
+// "自己是不是仍然对应当前这次拖拽"，不是只看 dragRef.current 是否非空。
+type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number; id: number }
 
 // 从侧边栏「最近会话」拖入（设计文档 §5-B 场景 B）：落点解析、上限/窄窗口降级判断、
 // 轻提示三处都复用与 TabBar.tsx 场景 A 完全相同的纯函数/store（paneDrop.ts、
@@ -41,6 +44,8 @@ export function Sidebar() {
   // 窗口级兜底监听器的卸载函数，见 dragSafetyNet.ts 顶部注释与 TabBar.tsx 同名字段
   // 的注释（不塞进 DragState，理由相同）。
   const netCleanupRef = useRef<(() => void) | null>(null)
+  // 每次 pointerdown 递增一次，赋给这次拖拽的 DragState.id——见 onItemPointerDown。
+  const nextDragIdRef = useRef(0)
 
   // 拖拽清理的唯一入口，与 TabBar.tsx 的 endDrag 同一理由——这里格外关键：「最近会话」
   // 列表在 window focus 时 refresh()，可能把正被拖拽的那一条会话挤出前 12 条，使其
@@ -79,9 +84,18 @@ export function Sidebar() {
     // 调用，不影响随后仍会正常触发的合成 click，普通点击会话条目的行为不变。
     useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId }
-    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。
-    netCleanupRef.current = attachDragSafetyNet(e.pointerId, () => dragRef.current !== null, endDrag)
+    const dragId = ++nextDragIdRef.current
+    dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId, id: dragId }
+    // 挂新网前先摘掉任何仍然挂着的旧网——见 TabBar.tsx onTabPointerDown 同名注释，
+    // 三处拖拽源同一套保险。
+    netCleanupRef.current?.()
+    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。isDragActive 额外比较
+    // dragId，见上方 DragState.id 注释。
+    netCleanupRef.current = attachDragSafetyNet(
+      e.pointerId,
+      () => dragRef.current !== null && dragRef.current.id === dragId,
+      endDrag,
+    )
   }, [endDrag])
 
   const onItemPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {

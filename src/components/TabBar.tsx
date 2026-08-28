@@ -8,7 +8,6 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { newTerminal } from '../actions'
-import { debugLog, markDragStart } from '../dragDebugLog'
 import { attachDragSafetyNet } from '../dragSafetyNet'
 import { DRAG_THRESHOLD_PX, pointInRect, resolveDropMode, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
@@ -20,12 +19,10 @@ import { useLayout } from '../store/layout'
 import { type Tab, useTabs } from '../store/tabs'
 import { ContextMenu } from './ContextMenu'
 
-type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
-
-// 临时诊断开关（定位「拖 tab 到 ⌘D 空槽窗格、drop 不生效」这个 bug 用，定位后随本次改动
-// 整体 revert，见 ../dragDebugLog.ts 顶部注释）：单一常量控制本文件里所有 debugLog 调用，
-// 不改变任何控制流本身——每个调用点都是"读值 + 打日志"，不影响原有分支/返回。
-const DRAG_LOG = true
+// id：每次 pointerdown 分配的单调递增拖拽序号，见下方 nextDragIdRef 与 onTabPointerDown
+// 注释——dragSafetyNet.ts 的 isDragActive() 靠它辨认"自己是不是仍然对应当前这次拖拽"，
+// 不是只看 dragRef.current 是否非空。
+type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number; id: number }
 
 // 把窗格拖出成独立标签、松手时落在标签栏上（设计文档 §5-C，TabPanes.tsx 的
 // PaneTitleBar 是拖拽源）应插入的位置指示：一条竖线，与 DropIndicator.tsx 的
@@ -82,16 +79,10 @@ export function TabBar() {
   // （不塞进 DragState 里）：endDrag() 需要先调用它再清空 dragRef，顺序反过来的话
   // 兜底监听器里读 dragRef.current 的 isDragActive() 就会先一步看到 null。
   const netCleanupRef = useRef<(() => void) | null>(null)
+  // 每次 pointerdown 递增一次，赋给这次拖拽的 DragState.id——见 onTabPointerDown 与
+  // dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释。
+  const nextDragIdRef = useRef(0)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
-  // 临时诊断用：pointermove 的决策分支日志按约 80ms 节流，避免刷屏（见任务要求）。
-  const lastMoveLogRef = useRef(0)
-  const logMove = useCallback((line: string) => {
-    if (!DRAG_LOG) return
-    const now = performance.now()
-    if (now - lastMoveLogRef.current < 80) return
-    lastMoveLogRef.current = now
-    debugLog(line)
-  }, [])
 
   // 拖拽清理的唯一入口：pointerup/pointercancel（同一个 onTabPointerUp）、
   // lostpointercapture（指针捕获被浏览器隐式释放——例如被拖的标签因为其它原因中途
@@ -104,10 +95,7 @@ export function TabBar() {
   // 可观察效果，见各自文件顶部注释），因此这里不需要再加一层"是否已经清理过"的判断，
   // 被调用多次（例如 lostpointercapture 之后又收到 pointerup，或窗口级兜底与正常路径
   // 前后各触发一次）也完全无害。
-  const endDrag = useCallback((reason: string) => {
-    // 本次诊断最重要的一条日志：记录每一次 endDrag() 被谁调用、调用时 dragRef.current
-    // 是否还非空（在下面清空它之前先读）——见任务要求"这是单一最重要的信号"。
-    if (DRAG_LOG) debugLog(`endDrag reason=${reason} dragRefWasNonNull=${dragRef.current !== null}`)
+  const endDrag = useCallback(() => {
     netCleanupRef.current?.()
     netCleanupRef.current = null
     dragRef.current = null
@@ -123,7 +111,7 @@ export function TabBar() {
   // 任何指针事件），必须在这里主动兜底。
   useEffect(() => {
     return () => {
-      if (dragRef.current) endDrag('unmount-effect')
+      if (dragRef.current) endDrag()
     }
   }, [endDrag])
 
@@ -138,14 +126,22 @@ export function TabBar() {
     // 随后的原生 click 照常触发。
     useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId }
-    if (DRAG_LOG) {
-      markDragStart() // 重置本次拖拽的 +Nms 计时基准，见 ../dragDebugLog.ts。
-      debugLog(`pointerdown tabId=${tabId} pointerId=${e.pointerId} activeId=${useTabs.getState().activeId}`)
-    }
+    const dragId = ++nextDragIdRef.current
+    dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId, id: dragId }
+    // 挂新网前先摘掉任何仍然挂着的旧网：正常情况下不该有残留（endDrag() 是唯一出口，
+    // 每次拖拽结束都会摘网），这里是防止极端时序下旧网泄漏、永远留在 window 上的
+    // 第二道保险。见 dragSafetyNet.ts 顶部注释。
+    netCleanupRef.current?.()
     // 窗口级兜底：见 dragSafetyNet.ts 顶部注释。在这里（拖拽开始的唯一入口）挂上，
     // 在 endDrag()（拖拽结束的唯一出口）里摘掉，二者是同一对，不会有挂了忘摘的情况。
-    netCleanupRef.current = attachDragSafetyNet(e.pointerId, () => dragRef.current !== null, endDrag)
+    // isDragActive 不只看 dragRef.current 是否非空，还要求它的 id 与这次拖拽自己的
+    // dragId 一致——万一上面这道"先摘旧网"的保险还是没能防住某张旧网存活下来，它也
+    // 不会把一次更新的拖拽（属于不同 dragId）误判成自己仍然存活，从而打断新拖拽。
+    netCleanupRef.current = attachDragSafetyNet(
+      e.pointerId,
+      () => dragRef.current !== null && dragRef.current.id === dragId,
+      endDrag,
+    )
   }, [endDrag])
 
   const onTabPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -154,7 +150,6 @@ export function TabBar() {
     if (!drag.dragging) {
       if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
       drag.dragging = true
-      if (DRAG_LOG) debugLog(`threshold-crossed tabId=${drag.tabId} pointerId=${drag.pointerId} x=${e.clientX} y=${e.clientY}`)
     }
     // 真正开始拖拽了才抑制默认行为（例如原生的文字/图像拖拽手势）——只在跨过阈值之后
     // 的每一次 move 上调用，从不在 pointerdown 上调用，这样普通点击的合成 click 永远
@@ -170,7 +165,6 @@ export function TabBar() {
       useDnd.getState().setDropMode(null)
       useDnd.getState().setRefusal(null)
       useDnd.getState().setTabBarIndex(null)
-      logMove(`pointermove branch=invalid-target x=${e.clientX} y=${e.clientY} target=null dropMode=null refusal=null`)
       return
     }
     // 光标落在标签栏上：这一段拖拽此刻的落点语义是"标签排序"（新增），不是"合并进
@@ -193,7 +187,6 @@ export function TabBar() {
       } else {
         useDragGhost.getState().move(e.clientX, e.clientY)
       }
-      logMove(`pointermove branch=tab-bar x=${e.clientX} y=${e.clientY} target=null dropMode=null refusal=null tabBarIndex=${clampedIndex}`)
       return
     }
     useDnd.getState().setTabBarIndex(null)
@@ -204,7 +197,6 @@ export function TabBar() {
       useDnd.getState().setTarget(null)
       useDnd.getState().setDropMode(null)
       useDnd.getState().setRefusal(null)
-      logMove(`pointermove branch=same-as-active x=${e.clientX} y=${e.clientY} target=null dropMode=null refusal=null`)
       return
     }
     if (!drag.ghostStarted) {
@@ -223,7 +215,6 @@ export function TabBar() {
     if (!target || !activeTab) {
       useDnd.getState().setDropMode(null)
       useDnd.getState().setRefusal(null)
-      logMove(`pointermove branch=pane-area x=${e.clientX} y=${e.clientY} target=null dropMode=null refusal=null`)
       return
     }
     const targetPane = activeTab.panes.find((p) => p.id === target.paneId)
@@ -231,10 +222,8 @@ export function TabBar() {
     useDnd.getState().setDropMode(mode)
     const layout = useLayout.getState()
     const preview = previewPaneDrop(mode, activeTab.panes.length, dragTab.panes.length, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
-    const refusal = preview.refused ? { reason: preview.reason! } : null
-    useDnd.getState().setRefusal(refusal)
-    logMove(`pointermove branch=pane-area x=${e.clientX} y=${e.clientY} target=${JSON.stringify(target)} dropMode=${mode} refusal=${JSON.stringify(refusal)}`)
-  }, [logMove])
+    useDnd.getState().setRefusal(preview.refused ? { reason: preview.reason! } : null)
+  }, [])
 
   const onTabPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current
@@ -243,44 +232,25 @@ export function TabBar() {
     // 提前读好这两个值就不受调用顺序影响。
     const target = useDnd.getState().target
     const tabBarIndex = useDnd.getState().tabBarIndex
-    if (DRAG_LOG) {
-      debugLog(
-        `onTabPointerUp entry type=${e.type} dragRefNull=${drag === null} dragging=${drag?.dragging ?? 'n/a'} target=${JSON.stringify(target)} tabBarIndex=${tabBarIndex}`,
-      )
-    }
     e.currentTarget.releasePointerCapture?.(e.pointerId)
     // 无条件调用，任何后续 return 都不可能让屏蔽选择的 body class 卡住；这个函数同时
     // 接在 onPointerUp 和 onPointerCancel 上，两条退出路径因此都被覆盖。与
     // onTabLostPointerCapture/卸载 effect 共用同一个 endDrag()，被调用第二次
     // （例如上面的 releasePointerCapture 已经先触发过一次）也是安全的空操作。
-    // 传 e.type 作为 endDrag 的 reason：这个处理器同时接在 onPointerUp 与 onPointerCancel
-    // 上，原生事件的 type 天然就是 'pointerup'/'pointercancel'，与任务要求的 reason
-    // 字符串刚好一致，不需要另外判断走的是哪一路。
-    endDrag(e.type)
-    if (!drag || !drag.dragging) {
-      if (DRAG_LOG) debugLog(`onTabPointerUp early-return=not-dragging`)
-      return
-    }
+    endDrag()
+    if (!drag || !drag.dragging) return
     suppressClickRef.current = true
     if (tabBarIndex !== null) {
       // 松手时落在标签栏上：这是排序落点，不是合并——纯数组挪动，不涉及窗格/上限/
       // 窄窗口降级那一整套校验（reorderTab 内部对"落回原位"这类空操作已经处理好）。
       useTabs.getState().reorderTab(drag.tabId, tabBarIndex)
-      if (DRAG_LOG) debugLog(`onTabPointerUp action=reorderTab tabId=${drag.tabId} tabBarIndex=${tabBarIndex}`)
       return
     }
-    if (!target) {
-      // 松手时不在任何窗格范围内，视为放弃这次拖拽
-      if (DRAG_LOG) debugLog(`onTabPointerUp early-return=no-target`)
-      return
-    }
+    if (!target) return // 松手时不在任何窗格范围内，视为放弃这次拖拽
     const { tabs, activeId } = useTabs.getState()
     const sourceTab = tabs.find((t) => t.id === drag.tabId)
     const targetTab = tabs.find((t) => t.id === activeId)
-    if (!sourceTab || sourceTab.kind !== 'term' || !targetTab || targetTab.kind !== 'term') {
-      if (DRAG_LOG) debugLog(`onTabPointerUp early-return=invalid-tabs sourceTab=${sourceTab?.kind ?? 'missing'} targetTab=${targetTab?.kind ?? 'missing'}`)
-      return
-    }
+    if (!sourceTab || sourceTab.kind !== 'term' || !targetTab || targetTab.kind !== 'term') return
     // 目标窗格没有 ptyId（空槽，⌘D 新建后还没选定会话）：这次拖放是"填充"，取代它的
     // 位置，结果窗格数不变；否则是既有的"插入"行为。与 onTabPointerMove 的实时预览
     // 共用同一份 resolveDropMode/previewPaneDrop，保证判断一致（见那边的注释）。
@@ -296,16 +266,13 @@ export function TabBar() {
       // 提示——那句已经在拖拽过程中持续显示过了，这里的一次性轻提示只是复盘同一个
       // 结论，保持与 ⌘D/既有拖放行为一致的措辞）。
       useHint.getState().show(preview.refusalKind === 'max-panes' ? '最多支持 3 个窗格' : '窗口太窄，放不下新窗格')
-      if (DRAG_LOG) debugLog(`onTabPointerUp early-return=refused refusalKind=${preview.refusalKind} mode=${mode}`)
       return
     }
     if (preview.decision === 'collapse-panel') layout.togglePanel()
     if (mode === 'fill' && targetPane) {
       useTabs.getState().fillEmptyPane(drag.tabId, activeId, targetPane.id)
-      if (DRAG_LOG) debugLog(`onTabPointerUp action=fillEmptyPane tabId=${drag.tabId} activeId=${activeId} paneId=${targetPane.id}`)
     } else {
       useTabs.getState().movePanesToTab(drag.tabId, activeId, target)
-      if (DRAG_LOG) debugLog(`onTabPointerUp action=movePanesToTab tabId=${drag.tabId} activeId=${activeId} target=${JSON.stringify(target)}`)
     }
   }, [endDrag])
 
@@ -316,13 +283,11 @@ export function TabBar() {
   // 这里只做清理，不尝试识别落点或完成任何动作——指针已经不再受我们控制，与"松手
   // 落空"是同一处理（不完成这次拖拽）。
   const onTabLostPointerCapture = useCallback(() => {
-    if (DRAG_LOG) debugLog(`onTabLostPointerCapture entry dragRefNonNull=${dragRef.current !== null}`)
-    endDrag('lostpointercapture')
+    endDrag()
   }, [endDrag])
 
   const onTabClick = useCallback(
     (tabId: string) => {
-      if (DRAG_LOG) debugLog(`onTabClick entry tabId=${tabId} suppressClick=${suppressClickRef.current}`)
       if (suppressClickRef.current) {
         suppressClickRef.current = false
         return

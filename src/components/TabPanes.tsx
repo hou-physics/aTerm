@@ -18,7 +18,10 @@ import { type Pane, type Tab, useTabs } from '../store/tabs'
 import { ContextMenu } from './ContextMenu'
 import { PanePicker } from './PanePicker'
 
-type TitlebarDragState = { startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
+// id：每次 pointerdown 分配的单调递增拖拽序号，见 onPointerDown 与
+// dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释——isDragActive() 靠它辨认
+// "自己是不是仍然对应当前这次拖拽"，不是只看 dragRef.current 是否非空。
+type TitlebarDragState = { startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number; id: number }
 
 // 窗格标题栏（设计文档 §4）：仅在标签持有多于一个窗格时渲染（单窗格与现状保持一致，
 // 不占高度）。左侧标题过长用 CSS 省略号截断；右侧 × 关闭该窗格。聚焦窗格用强调色
@@ -50,6 +53,8 @@ function PaneTitleBar({
   // 窗口级兜底监听器的卸载函数，见 dragSafetyNet.ts 顶部注释与 TabBar.tsx 同名字段
   // 的注释（不塞进 TitlebarDragState，理由相同）。
   const netCleanupRef = useRef<(() => void) | null>(null)
+  // 每次 pointerdown 递增一次，赋给这次拖拽的 TitlebarDragState.id——见 onPointerDown。
+  const nextDragIdRef = useRef(0)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
 
   const detach = useCallback(
@@ -90,9 +95,18 @@ function PaneTitleBar({
     // 动作抑制挪到了下面 onPointerMove 里，只在跨过阈值、确认是拖拽后才调用。
     useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId }
-    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。
-    netCleanupRef.current = attachDragSafetyNet(e.pointerId, () => dragRef.current !== null, endDrag)
+    const dragId = ++nextDragIdRef.current
+    dragRef.current = { startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId, id: dragId }
+    // 挂新网前先摘掉任何仍然挂着的旧网——见 TabBar.tsx onTabPointerDown 同名注释，
+    // 三处拖拽源同一套保险。
+    netCleanupRef.current?.()
+    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。isDragActive 额外比较
+    // dragId，见上方 TitlebarDragState.id 注释。
+    netCleanupRef.current = attachDragSafetyNet(
+      e.pointerId,
+      () => dragRef.current !== null && dragRef.current.id === dragId,
+      endDrag,
+    )
   }, [endDrag])
 
   const onPointerMove = useCallback(
