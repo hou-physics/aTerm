@@ -521,3 +521,22 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .conv-body::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 .conv-timeline::-webkit-scrollbar-thumb:hover,
 .conv-body::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+
+/* 总览页方块（SessionBlock.tsx，spec §5.3）：一个会话一个方块，状态决定底色/边框色调，
+   与既有 .card 同一基调（边框+圆角+ panel 底色），只是额外叠一层状态色。全部颜色都从
+   --color-* 主题变量派生（color-mix 混色，不写死色值）——本项目有 28 套主题 × 3 种
+   外观模式，硬编码颜色会在多数主题下显得突兀甚至不可读，这条规则不允许有例外。
+   .session-block-unknown（状态尚未知）不加任何叠色，直接沿用 .session-block 本身的
+   panel/border，不猜一个颜色（与 StatusDot「未知不画点」同一原则）。 */
+.session-block { border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-panel); padding: 10px 12px; cursor: default; }
+.session-block:hover { border-color: var(--color-accent); }
+.session-block-running { background: color-mix(in srgb, var(--color-status-running) 12%, var(--color-panel)); border-color: color-mix(in srgb, var(--color-status-running) 45%, var(--color-border)); }
+.session-block-awaitingInput { background: color-mix(in srgb, var(--color-status-awaiting) 12%, var(--color-panel)); border-color: color-mix(in srgb, var(--color-status-awaiting) 45%, var(--color-border)); }
+.session-block-done { background: color-mix(in srgb, var(--color-status-done) 12%, var(--color-panel)); border-color: color-mix(in srgb, var(--color-status-done) 45%, var(--color-border)); }
+/* 状态点 + 标题同一行，与 .side-item-row / .thread-row-main 同一处理（截断放在标题
+   自己身上，不是外层容器）。 */
+.session-block-head { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.session-block-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
+.session-block-preview { margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-dim); font-size: 12px; }
+.session-block-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
+.badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 11px; line-height: 1.6; white-space: nowrap; }
