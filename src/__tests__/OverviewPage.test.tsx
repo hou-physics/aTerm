@@ -164,10 +164,44 @@ describe('OverviewPage —— pointermove/pointerup 落在包装 div 之外时�
     // dragRef 残留成陈旧记录，这次悬停会被误判成一次新拖拽的继续。
     fireEvent.pointerMove(wrap, { clientX: 305, clientY: 10, pointerId: 1, buttons: 0 })
 
-    // 没有产生第二次持久化：上一次拖拽早已在 pointerup 时正常收尾（dragRef 已清空、
-    // window 监听器已摘除），这次无按键的悬停不会被当成拖拽的延续。
-    const savedAfterHover = JSON.parse(localStorage.getItem('aterm.overview.positions')!)
-    expect(savedAfterHover[key]).toEqual({ x: 290, y: 0 })
+    // 复审纠正：这一步原来断言的是 localStorage 不变，但被劫持的悬停只会调
+    // setPosition（只改内存，从不 commitPosition），localStorage 在 bug 版本下同样
+    // 不会变——那个断言两种实现都能通过，证明不了任何东西。真正会被这次悬停悄悄
+    // 改写的是内存中的 positions，必须断言它。
+    expect(useOverviewStore.getState().positions[key]).toEqual({ x: 290, y: 0 })
+  })
+})
+
+// 回归覆盖（复审新发现的 Important）：pointerdown 时无条件调用的 blockSelect() 会给
+// body 加上屏蔽文本选择的 class（dragGhost.ts 的 DRAG_NO_SELECT_CLASS），这个 class
+// 只有 useDragGhost 的 end() 会移除。上一轮修复漏了在 endDrag() 里调用它——单纯点一下
+// 方块（从未越过阈值）就会让这个 class 永久卡在 body 上，直到某个不相关的标签/侧边栏/
+// 窗格拖拽碰巧调用了它自己的 end() 才会被带走。
+describe('OverviewPage —— pointerdown 屏蔽的文本选择必须在手势结束时解除（回归）', () => {
+  it('单纯点一下方块（未越过阈值）：body 上不残留 dragging-no-select class', () => {
+    setProject([thread('a', 'A', 100)])
+    const { container } = render(<OverviewPage dirName={DIR} />)
+    const wrap = container.querySelector('.overview-block-wrap') as HTMLElement
+
+    fireEvent.pointerDown(wrap, { clientX: 10, clientY: 10, pointerId: 1, buttons: 1 })
+    fireEvent.pointerUp(wrap, { clientX: 10, clientY: 10, pointerId: 1 }) // 没有移动，纯点击
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+  })
+
+  it('真正越过阈值拖拽一次后落手：同样不残留 class', () => {
+    mockCanvasWidth(1000)
+    setProject([thread('a', 'A', 100)])
+    const { container } = render(<OverviewPage dirName={DIR} />)
+    const wrap = container.querySelector('.overview-block-wrap') as HTMLElement
+
+    fireEvent.pointerDown(wrap, { clientX: 10, clientY: 10, pointerId: 1, buttons: 1 })
+    fireEvent.pointerMove(wrap, { clientX: 60, clientY: 10, pointerId: 1, buttons: 1 })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true) // 拖拽期间应该是加上的
+
+    fireEvent.pointerUp(wrap, { clientX: 60, clientY: 10, pointerId: 1 })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
   })
 })
 

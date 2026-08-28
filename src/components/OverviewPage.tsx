@@ -148,7 +148,7 @@ export function OverviewPage({ dirName }: { dirName: string }) {
   )
 }
 
-type DragState = { startX: number; startY: number; startPos: Position; dragging: boolean; pointerId: number }
+type DragState = { startX: number; startY: number; startPos: Position; dragging: boolean; pointerId: number; id: number }
 
 // 拖拽手柄：order.map() 里的一项，不能在 map 回调体内直接调用 useRef/useCallback
 // （Rules of Hooks），拆成独立组件——和 SessionBlock.tsx 顶部注释、Sidebar.tsx:246
@@ -215,6 +215,14 @@ function DraggableBlock({
   // 独立挂、独立摘，互不代替（同 TabBar.tsx 的 netCleanupRef 注释）。
   const gestureCleanupRef = useRef<(() => void) | null>(null)
   const netCleanupRef = useRef<(() => void) | null>(null)
+  // 每次 pointerdown 递增一次，赋给这次拖拽的 DragState.id——供下面 attachDragSafetyNet
+  // 的 isDragActive 判定使用，而不是拿 pointerId 当身份。见 onPointerDown 与
+  // dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释：鼠标的 pointerId 在整个会话
+  // 期间恒定不变，如果拿它当"这张网是否还对应当前这次拖拽"的判据，一张本该被摘掉却
+  // 意外残留的旧网会把后续任何一次新拖拽（哪怕 pointerId 相同）都误判成"自己仍然
+  // 存活"，从而把新拖拽提前打断——三处既有拖拽源都用单调递增的 id 而不是 pointerId，
+  // 这里保持一致。
+  const nextDragIdRef = useRef(0)
   const setPosition = useOverviewStore((s) => s.setPosition)
   const commitPosition = useOverviewStore((s) => s.commitPosition)
 
@@ -227,6 +235,13 @@ function DraggableBlock({
     netCleanupRef.current?.()
     netCleanupRef.current = null
     dragRef.current = null
+    // pointerdown 时无条件调用的 blockSelect() 必须有一个对应的 end()——否则单纯
+    // 点一下（从未越过阈值）就会让 body 上屏蔽文本选择的 class 永久卡住，直到某个
+    // 不相关的标签/侧边栏/窗格拖拽碰巧清掉它为止（复审发现：dragGhost.ts 顶部注释
+    // 明确写了"调用方只需要保证 start() 之后无论走哪条退出路径都恰好调用一次
+    // end()"，三处既有拖拽源都在各自的 endDrag 里这样做，这里漏掉了）。end() 对
+    // "根本没有调用过 blockSelect()"也是安全的空操作，无条件调用不需要额外判断。
+    useDragGhost.getState().end()
   }, [])
 
   useEffect(() => {
@@ -248,7 +263,8 @@ function DraggableBlock({
 
     const pointerId = e.pointerId
     const startPos = pos
-    dragRef.current = { startX: e.clientX, startY: e.clientY, startPos, dragging: false, pointerId }
+    const dragId = ++nextDragIdRef.current
+    dragRef.current = { startX: e.clientX, startY: e.clientY, startPos, dragging: false, pointerId, id: dragId }
 
     const handleMove = (ev: PointerEvent) => {
       if (ev.pointerId !== pointerId) return
@@ -278,8 +294,11 @@ function DraggableBlock({
     }
 
     // pointerup 与 pointercancel 共用同一个收尾逻辑（与 TabPanes.tsx 的
-    // onPointerCancel={onPointerUp} 同一约定）：只有真的越过阈值（drag.dragging）
-    // 才落盘，纯点击/取消都不产生任何持久化。
+    // onPointerCancel={onPointerUp} 同一约定）：只要越过阈值（drag.dragging 为
+    // true）就落盘——pointercancel 也不例外，这与"取消"字面听起来的语义不同，但和
+    // 三处既有拖拽源的约定一致（复审纠正：上一版注释在这里写成"纯点击/取消都不
+    // 产生任何持久化"，不准确——取消一次已经越过阈值的拖拽同样会落盘，真正不落盘
+    // 的只有从未越过阈值的纯点击）。
     const handleEnd = (ev: PointerEvent) => {
       if (ev.pointerId !== pointerId) return
       const drag = dragRef.current
@@ -307,11 +326,12 @@ function DraggableBlock({
     }
 
     // 挂新网前先摘掉任何仍然挂着的旧网——见 TabBar.tsx onTabPointerDown 同名注释，
-    // 三处既有拖拽源同一套保险。
+    // 三处既有拖拽源同一套保险。isDragActive 比较的是 dragId 而不是 pointerId，
+    // 理由见上方 nextDragIdRef 的注释。
     netCleanupRef.current?.()
     netCleanupRef.current = attachDragSafetyNet(
       pointerId,
-      () => dragRef.current !== null && dragRef.current.pointerId === pointerId,
+      () => dragRef.current !== null && dragRef.current.id === dragId,
       endDrag,
     )
   }, [pos, key, containerWidth, setPosition, commitPosition, endDrag])
