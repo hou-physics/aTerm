@@ -311,7 +311,9 @@ export const useTabs = create<TabsState>((set, get) => ({
     if (idx === -1) return null
     const pane = sourceTab.panes[idx]
     const newTabId = `tab-${nextTab++}`
-    const newTab: Tab = { id: newTabId, kind: 'term', title: pane.title, panes: [pane], activePaneId: pane.id }
+    // 同 splitTabPanes：新标签只持有这一个窗格，标题走 deriveTabTitle（与直接写
+    // pane.title 等价，但统一了标题的计算规则只有一处来源）。
+    const newTab: Tab = { id: newTabId, kind: 'term', title: deriveTabTitle([pane], pane.title), panes: [pane], activePaneId: pane.id }
     set((s) => {
       const remainingPanes = sourceTab.panes.filter((p) => p.id !== paneId)
       const activePaneId =
@@ -350,7 +352,12 @@ export const useTabs = create<TabsState>((set, get) => ({
     const newTabs: Tab[] = sourceTab.panes.map((pane) => ({
       id: `tab-${nextTab++}`,
       kind: 'term',
-      title: pane.title,
+      // 与其余五处"窗格数量变化"的调用点（insertPaneAtIndex/movePanesToTab/
+      // fillEmptyPane/detachPaneToNewTab/closePane）统一走 deriveTabTitle，不再
+      // 手写与它恰好等价的 `pane.title`——单窗格新标签下 deriveTabTitle 本就等同于
+      // 直接取 pane.title，这里改用同一个函数只是让标题的计算规则只有一处来源，
+      // 不会因为将来 deriveTabTitle 的单窗格分支变化而在这里悄悄脱节。
+      title: deriveTabTitle([pane], pane.title),
       panes: [pane],
       activePaneId: pane.id,
     }))

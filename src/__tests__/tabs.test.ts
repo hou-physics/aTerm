@@ -471,6 +471,95 @@ describe('useTabs — fillEmptyPane：把源标签的全部窗格填进目标标
   })
 })
 
+// 本次修复（用户反馈"把标签拖进分屏后，标签名没有更新"）：deriveTabTitle 在六处
+// "窗格数量变化"的调用点（insertPaneAtIndex/movePanesToTab/fillEmptyPane/
+// detachPaneToNewTab/splitTabPanes/closePane）里其实早已逐一正确重算——上面
+// fillEmptyPane 那个 describe 块的每条用例都从未断言过 `.title`，这里补上，覆盖
+// 用户描述的具体路径：填充、插入、拆出窗格、关到剩一个、整体拆分。fillEmptyPane
+// 本身"结果窗格数 = 目标原数"这条规则决定了——若填充前目标标签已经是多窗格
+// （常见的"先 ⌘D 开一个空槽，再拖别的标签进来填"），填充前后都落在 deriveTabTitle
+// 的"多窗格→固定文案"分支，字符串本就不含具体内容、填充前后完全相同——这是既有
+// 多窗格标题惯例本身的表现（movePanesToTab 同样如此），不是标题没有重算；真正会
+// 让标题文本发生变化的是"结果窗格数跨过 1 这条界线"（本描述块第一条用例）。
+// 目前代码库里没有"用户重命名标签"这个功能（deriveTabTitle 顶部注释明确写着
+// "不做'用户重命名'——不在本步骤范围"，全仓库也搜不到任何重命名入口），因此这里
+// 不需要、也没有"保留用户自定义标题"这一分支要测。
+describe('useTabs — 标题在窗格数变化后始终重算（fill/insert/detach/close/split 五条路径）', () => {
+  it('fillEmptyPane：单空槽窗格标签被整个替换，标题从空槽占位符变为新内容的标题', () => {
+    const emptyPane = makePane({ ptyId: undefined, title: '新窗格' })
+    const targetTab = makeTermTab({ panes: [emptyPane], activePaneId: emptyPane.id, title: '新窗格' })
+    const sourcePane = makePane({ title: '我的会话' })
+    const sourceTab = makeTermTab({ panes: [sourcePane], activePaneId: sourcePane.id, title: '我的会话' })
+    useTabs.setState({ tabs: [HOME_TAB, targetTab, sourceTab], activeId: targetTab.id })
+
+    useTabs.getState().fillEmptyPane(sourceTab.id, targetTab.id, emptyPane.id)
+
+    expect(useTabs.getState().tabs.find((t) => t.id === targetTab.id)!.title).toBe('我的会话')
+  })
+
+  it('fillEmptyPane：目标标签填充前后都停留在多窗格（结果数不变），标题按既有「N 个对话」惯例，与填充前文本相同——这是惯例本身，不是重算失效', () => {
+    const kept = makePane({ title: '已有窗格' })
+    const emptyPane = makePane({ ptyId: undefined, title: '新窗格' })
+    const targetTab = makeTermTab({ panes: [kept, emptyPane], activePaneId: kept.id, title: '2 个对话' })
+    const sourcePane = makePane({ title: '新内容' })
+    const sourceTab = makeTermTab({ panes: [sourcePane], activePaneId: sourcePane.id, title: '新内容' })
+    useTabs.setState({ tabs: [HOME_TAB, targetTab, sourceTab], activeId: targetTab.id })
+
+    useTabs.getState().fillEmptyPane(sourceTab.id, targetTab.id, emptyPane.id)
+
+    const t = useTabs.getState().tabs.find((x) => x.id === targetTab.id)!
+    expect(t.panes.map((p) => p.id)).toEqual([kept.id, sourcePane.id]) // 内容确实换了
+    expect(t.title).toBe('2 个对话') // 标题按数量惯例重算，恰好与填充前文本相同
+  })
+
+  it('movePanesToTab（插在旁边）：单窗格标签变成两窗格，标题从原标题变为「2 个对话」', () => {
+    const targetPane = makePane({ title: '原标题' })
+    const targetTab = makeTermTab({ panes: [targetPane], activePaneId: targetPane.id, title: '原标题' })
+    const sourcePane = makePane()
+    const sourceTab = makeTermTab({ panes: [sourcePane], activePaneId: sourcePane.id })
+    useTabs.setState({ tabs: [HOME_TAB, targetTab, sourceTab], activeId: targetTab.id })
+
+    useTabs.getState().movePanesToTab(sourceTab.id, targetTab.id, { paneId: targetPane.id, side: 'right' })
+
+    expect(useTabs.getState().tabs.find((t) => t.id === targetTab.id)!.title).toBe('2 个对话')
+  })
+
+  it('detachPaneToNewTab：拆出的新标签标题跟随该窗格自己的标题，原标签回到单窗格后标题也跟随剩下的窗格', () => {
+    const p1 = makePane({ title: '窗格甲' })
+    const p2 = makePane({ title: '窗格乙' })
+    const sourceTab = makeTermTab({ panes: [p1, p2], activePaneId: p2.id, title: '2 个对话' })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab], activeId: sourceTab.id })
+
+    const newTabId = useTabs.getState().detachPaneToNewTab(sourceTab.id, p2.id)
+
+    expect(useTabs.getState().tabs.find((t) => t.id === newTabId)!.title).toBe('窗格乙')
+    expect(useTabs.getState().tabs.find((t) => t.id === sourceTab.id)!.title).toBe('窗格甲')
+  })
+
+  it('closePane：从两窗格关到剩一个，标题从「2 个对话」变回剩下那个窗格自己的标题', async () => {
+    const p1 = makePane({ title: 'A' })
+    const p2 = makePane({ ptyId: undefined, title: 'B' })
+    const tab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id, title: '2 个对话' })
+    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
+
+    await useTabs.getState().closePane(tab.id, p2.id, async () => true)
+
+    expect(useTabs.getState().tabs.find((t) => t.id === tab.id)!.title).toBe('A')
+  })
+
+  it('splitTabPanes：拆分出的每个新标签标题都跟随各自唯一窗格的标题，不是「N 个对话」的残留', () => {
+    const p1 = makePane({ title: '窗格甲' })
+    const p2 = makePane({ title: '窗格乙' })
+    const sourceTab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id, title: '2 个对话' })
+    useTabs.setState({ tabs: [HOME_TAB, sourceTab], activeId: sourceTab.id })
+
+    const newTabIds = useTabs.getState().splitTabPanes(sourceTab.id)!
+
+    const titles = newTabIds.map((id) => useTabs.getState().tabs.find((t) => t.id === id)!.title)
+    expect(titles).toEqual(['窗格甲', '窗格乙'])
+  })
+})
+
 // 把窗格拖出成独立标签（设计文档 §5-C"拖出去/右键菜单"）：movePanesToTab 的反方向。
 // 核心不变量同样是 pane 对象的 id/ptyId 原样保留——TerminalLayer.test.tsx 用真实渲染
 // 的 <App> 单独验证 DOM 节点身份；这里只测 store 状态本身。
