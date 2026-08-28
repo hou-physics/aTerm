@@ -1291,3 +1291,62 @@ describe('dragSafetyNet — 回归（Fix 2）：一张属于旧拖拽的网不�
     fresh.cleanup()
   })
 })
+
+// 「＋」新建标签按钮移到标签栏最左侧（用户反馈：标签一多，原先排在最右端的按钮会被
+// 滚动条推出视野）。jsdom 不做真实布局/滚动，测不出"滚动到底也够不着"这类像素级
+// 回归本身（那属于 App.css 的 position: sticky，只能靠人工/真实浏览器验证），这里
+// 断言的是让那份 CSS 生效的前提：DOM 结构上「＋」必须和侧边栏折叠按钮、主页标签
+// 一起落在同一个 .tabbar-pinned 容器里，且顺序是"侧边栏按钮 → 主页标签 → ＋"，
+// 不再是原来"排在全部标签之后"的位置；行为/文案/⌘T 快捷键不变。
+describe('TabBar — 「＋」新建标签按钮固定在标签栏最左侧（紧邻主页标签，不被滚动挤出视野）', () => {
+  it('DOM 结构：侧边栏折叠按钮、主页标签、＋ 三者同属 .tabbar-pinned，且在这个顺序下相邻', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+
+    const pinned = document.querySelector('.tabbar-pinned') as HTMLElement
+    expect(pinned).toBeTruthy()
+    const children = Array.from(pinned.children) as HTMLElement[]
+    expect(children.map((el) => el.className)).toEqual([
+      'sidebar-toggle',
+      expect.stringContaining('tab'), // 主页标签（含 active 时的额外 class）
+      'tab-new',
+    ])
+    expect(children[1].getAttribute('data-tab-id')).toBe('home')
+    expect(children[2].textContent).toBe('＋')
+  })
+
+  it('普通标签（非主页）不在 .tabbar-pinned 里，仍按原顺序排在它后面，可以被横向滚动', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+
+    const pinned = document.querySelector('.tabbar-pinned') as HTMLElement
+    expect(pinned.querySelector('[data-tab-id="tab-a"]')).toBeNull()
+    expect(pinned.querySelector('[data-tab-id="tab-b"]')).toBeNull()
+    const tabbar = document.querySelector('.tabbar') as HTMLElement
+    const topLevelOrder = Array.from(tabbar.children).map((el) => el.className)
+    expect(topLevelOrder[0]).toBe('tabbar-pinned')
+    // ＋ 已经不在 .tabbar 的直接子节点里单独出现（它现在是 .tabbar-pinned 内部的一员）
+    expect(topLevelOrder.some((c) => c === 'tab-new')).toBe(false)
+  })
+
+  it('点击「＋」的行为不变：新建一个空白终端标签并成为激活标签', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    const before = useTabs.getState().tabs.length
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('.tab-new') as HTMLElement)
+      await Promise.resolve()
+    })
+
+    expect(useTabs.getState().tabs.length).toBe(before + 1)
+    expect(useTabs.getState().activeId).not.toBe('tab-a')
+  })
+
+  it('标题/快捷键提示文案不变：仍是「新建终端标签 (⌘T)」', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+
+    expect((document.querySelector('.tab-new') as HTMLElement).title).toBe('新建终端标签 (⌘T)')
+  })
+})

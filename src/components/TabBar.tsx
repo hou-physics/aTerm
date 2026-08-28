@@ -314,43 +314,61 @@ export function TabBar() {
 
   const contextMenuTab = contextMenu ? tabs.find((t) => t.id === contextMenu.tabId) : undefined
 
+  // 单个标签自身的渲染——主页标签（钉在标签栏最左侧那组固定元素里）与其余可滚动的
+  // 标签共用同一份 JSX/事件接线，不重复写两遍，只是挂载的位置不同（见下方
+  // .tabbar-pinned 与 restTabs.map）。
+  const renderTab = (t: Tab) => (
+    <div
+      key={t.id}
+      data-tab-id={t.id}
+      className={`tab ${t.id === activeId ? 'active' : ''}`}
+      onPointerDown={(e) => onTabPointerDown(e, t.id)}
+      onPointerMove={onTabPointerMove}
+      onPointerUp={onTabPointerUp}
+      onPointerCancel={onTabPointerUp}
+      onLostPointerCapture={onTabLostPointerCapture}
+      onClick={() => onTabClick(t.id)}
+      onContextMenu={(e) => onTabContextMenu(e, t)}
+    >
+      <span className="tab-title">{t.kind === 'home' ? '⌂' : t.title}</span>
+      {t.kind !== 'home' && (
+        <span className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(t.id) }}>×</span>
+      )}
+    </div>
+  )
+
+  // 主页标签恒为 tabs[0]（设计要求：既不能被顶替，也不可被拖动排序，见 reorderTab/
+  // detachPaneToNewTab 里对 insertAt 的钳位），因此这里可以放心地把它和「＋」一起
+  // 从可滚动的标签列表里摘出来，放进下面的 .tabbar-pinned。
+  const [homeTab, ...restTabs] = tabs
+
   return (
     <div className="tabbar">
-      <button
-        type="button"
-        className="sidebar-toggle"
-        onClick={() => toggleSidebar()}
-        title={sidebarCollapsed ? '展开侧边栏 (⌘B)' : '折叠侧边栏 (⌘B)'}
-      >
-        {sidebarCollapsed ? '›' : '‹'}
-      </button>
-      {tabs.map((t) => (
-        <div
-          key={t.id}
-          data-tab-id={t.id}
-          className={`tab ${t.id === activeId ? 'active' : ''}`}
-          onPointerDown={(e) => onTabPointerDown(e, t.id)}
-          onPointerMove={onTabPointerMove}
-          onPointerUp={onTabPointerUp}
-          onPointerCancel={onTabPointerUp}
-          onLostPointerCapture={onTabLostPointerCapture}
-          onClick={() => onTabClick(t.id)}
-          onContextMenu={(e) => onTabContextMenu(e, t)}
+      {/* 「＋」新建标签按钮固定在标签栏最左侧、紧邻主页标签（用户反馈：标签一多，
+          原先排在最右端的按钮会被滚动条推出视野，必须先把标签栏滚到底才能新建
+          标签）。与侧边栏折叠按钮、主页标签一起放进同一个 position: sticky 容器
+          （见 App.css 的 .tabbar-pinned 注释），三者作为一个整体钉住，其余标签从
+          它们下面滚过去，不会互相重叠。行为/文案/⌘T 快捷键均未改动。 */}
+      <div className="tabbar-pinned">
+        <button
+          type="button"
+          className="sidebar-toggle"
+          onClick={() => toggleSidebar()}
+          title={sidebarCollapsed ? '展开侧边栏 (⌘B)' : '折叠侧边栏 (⌘B)'}
         >
-          <span className="tab-title">{t.kind === 'home' ? '⌂' : t.title}</span>
-          {t.kind !== 'home' && (
-            <span className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(t.id) }}>×</span>
-          )}
-        </div>
-      ))}
-      <button
-        type="button"
-        className="tab-new"
-        onClick={() => void newTerminal()}
-        title="新建终端标签 (⌘T)"
-      >
-        ＋
-      </button>
+          {sidebarCollapsed ? '›' : '‹'}
+        </button>
+        {homeTab && renderTab(homeTab)}
+        <button
+          type="button"
+          className="tab-new"
+          onClick={() => void newTerminal()}
+          title="新建终端标签 (⌘T)"
+        >
+          ＋
+        </button>
+      </div>
+      {restTabs.map(renderTab)}
       <button
         type="button"
         className="panel-toggle"

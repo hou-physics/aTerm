@@ -58,7 +58,16 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    变量，不新增调色板条目；pointer-events:none 与 .pane-drop-indicator 同理，不拦截
    拖拽过程中持续发生的指针事件。 */
 .tabbar-drop-indicator { position: absolute; top: 4px; bottom: 2px; width: 2px; background: var(--color-accent); border-radius: 1px; z-index: 5; pointer-events: none; }
-.sidebar-toggle { flex: none; align-self: flex-start; position: sticky; left: 0; z-index: 1; width: 24px; height: 26px; margin-right: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+/* 侧边栏折叠按钮 + 主页标签 + 新建标签「＋」三者钉在标签栏最左侧，作为一个整体
+   position: sticky; left: 0——标签一多、`.tabbar` 横向滚动时，这一整块不随内容滚动，
+   而是让其余标签从它下面/后面滚过去（背景色与 `.tabbar` 一致，挡住滚过的标签，
+   见下面「不再被标签挤出视野」的改动）。三者放进同一个 sticky 容器而不是各自单独
+   sticky + 手算 left 偏移：主页标签的宽度由内容（当前恒为单字符"⌂"）决定，不是一个
+   写死的像素值，分别 sticky 需要精确知道"前面已占了多少像素"才能算出各自的 left，
+   任何一处内容/内边距变化都要连带改另一处；整体一起 sticky 则不需要知道任何像素
+   数字，天然不会互相重叠，也天然维持三者原有的相对间距（gap 与 `.tabbar` 本身一致）。 */
+.tabbar-pinned { position: sticky; left: 0; z-index: 2; display: flex; align-items: flex-start; gap: 4px; background: var(--color-panel); }
+.sidebar-toggle { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-right: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .sidebar-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 /* cursor: grab——标签本身是拖拽手柄（TabBar.tsx 场景 A：把已打开的标签拖进窗格区/
    拖拽排序），hover 时应该读作"可以抓起来"；.tab-close 单独有自己的 cursor:default，
