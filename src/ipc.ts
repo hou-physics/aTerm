@@ -1,6 +1,14 @@
 import { invoke } from '@tauri-apps/api/core'
 
-export interface ThreadInfo { rootKey: string; resumeSessionId: string; title: string; cwd: string; lastActivityMs: number; fileCount: number }
+export interface ThreadInfo {
+  rootKey: string; resumeSessionId: string; title: string; cwd: string; lastActivityMs: number; fileCount: number
+  // 徽章数据：均可缺省（老会话或异常记录取不到时为 null），与 rust 端 ThreadInfo 同源。
+  model?: string | null
+  contextTokens?: number | null
+  preview?: string | null
+  effort?: string | null
+  permissionMode?: string | null
+}
 export interface ProjectInfo { dirName: string; cwd: string; lastActivityMs: number; threads: ThreadInfo[] }
 export interface Turn { role: string; text: string; tsMs: number; uuid: string }
 export interface Conversation { turns: Turn[]; files: string[]; totalBytes: number }

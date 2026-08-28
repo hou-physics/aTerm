@@ -11,6 +11,13 @@ pub struct ThreadInfo {
     pub cwd: String,
     pub last_activity_ms: i64,
     pub file_count: u32,
+    // 徽章数据：均可缺省（老会话或异常记录取不到时为 None），取自链上最后一个
+    // 文件的 ParsedMeta——与 last_activity_ms 同一来源，保证徽章与时间描述同一时刻。
+    pub model: Option<String>,
+    pub context_tokens: Option<u64>,
+    pub preview: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -81,6 +88,11 @@ pub fn scan_projects(projects_dir: &Path) -> Vec<ProjectInfo> {
                 title, cwd,
                 last_activity_ms: newest.meta.last_ts_ms.unwrap_or(newest.mtime_ms),
                 file_count: fs.len() as u32,
+                model: newest.meta.model.clone(),
+                context_tokens: newest.meta.context_tokens,
+                preview: newest.meta.preview.clone(),
+                effort: newest.meta.effort.clone(),
+                permission_mode: newest.meta.permission_mode.clone(),
             }
         }).collect();
         threads.sort_by_key(|t| std::cmp::Reverse(t.last_activity_ms));
@@ -148,5 +160,29 @@ mod tests {
         fs::create_dir(tmp.path().join("-empty")).unwrap();
         assert!(scan_projects(tmp.path()).is_empty());
         assert!(scan_projects(&tmp.path().join("nonexistent")).is_empty());
+    }
+
+    #[test]
+    fn thread_info_carries_badge_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("-tmp-demo");
+        fs::create_dir_all(&proj).unwrap();
+        // 文件名必须是合法 UUID stem（group_chain_files 靠 is_uuid_stem 过滤），
+        // 与本文件其它测试的 S_A/S_B/S_C 命名约定一致。scan_projects_at 在本文件
+        // 不存在，本文件既有的、接受调用方传入根目录的测试入口是 scan_projects
+        // （见上面两个测试），因此改用它。
+        let sid = "44444444-4444-4444-4444-444444444444";
+        let line = format!(
+            r#"{{"type":"assistant","effort":"max","permissionMode":"plan","timestamp":"2026-08-28T00:00:00Z","message":{{"role":"assistant","model":"claude-opus-5","content":[{{"type":"text","text":"预览文本"}}],"usage":{{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4}}}}}}"#
+        );
+        fs::write(proj.join(format!("{sid}.jsonl")), format!("{line}\n")).unwrap();
+
+        let projects = scan_projects(dir.path());
+        let t = &projects[0].threads[0];
+        assert_eq!(t.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(t.context_tokens, Some(6));
+        assert_eq!(t.preview.as_deref(), Some("预览文本"));
+        assert_eq!(t.effort.as_deref(), Some("max"));
+        assert_eq!(t.permission_mode.as_deref(), Some("plan"));
     }
 }
