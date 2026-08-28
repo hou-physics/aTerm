@@ -322,6 +322,46 @@ describe('TabBar — 标签右键菜单（拆分为独立标签 / 关闭标签�
   })
 })
 
+// 本次修复的排查记录（见 .superpowers/context-menu-portal-report.md）：PaneTitleBar
+// 那一份菜单曾经嵌在拖拽手柄的 DOM 子树里、点不动菜单项（见 PaneDetach.test.tsx 同名
+// 描述块）。这里的排查结论是这处标签栏菜单当时结构上不受影响——渲染在 `.tabbar` 下、
+// 与各 `.tab`（真正的拖拽手柄）是兄弟节点，不是嵌套关系，因此点击一直是好的。菜单
+// portal 到 document.body 之后这个结论继续成立，这里补两条断言把它钉住，并顺带验证
+// TabBar.tsx 新加的 `.context-menu` 早退 guard（纵深防御，即使将来这处嵌套关系被
+// 改坏也能兜住同一类问题）。
+describe('TabBar — 标签右键菜单不是标签拖拽手柄的 DOM 后代（防御性回归，见 context-menu-portal-report）', () => {
+  it('菜单节点 portal 到 document.body，不是任何 .tab 元素的 DOM 后代', async () => {
+    const MULTI = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }], activePaneId: 'p1' }
+    useTabs.setState({ tabs: [HOME, MULTI], activeId: 'tab-a' })
+    await renderApp()
+    const tab = tabEl('2 个对话')
+
+    await act(async () => { fireEvent.contextMenu(tab, { clientX: 50, clientY: 10 }) })
+
+    const menu = document.querySelector('.context-menu') as HTMLElement
+    expect(menu).toBeTruthy()
+    expect(tab.contains(menu)).toBe(false)
+    expect(menu.parentElement).toBe(document.body)
+  })
+
+  it('在菜单项上按下不会触发标签拖拽手柄自己的 pointerdown 逻辑', async () => {
+    const MULTI = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }], activePaneId: 'p1' }
+    useTabs.setState({ tabs: [HOME, MULTI], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(tabEl('2 个对话'), { clientX: 50, clientY: 10 }) })
+    const menuItem = screen.getByText('拆分为独立标签')
+
+    await act(async () => { fireEvent.pointerDown(menuItem, { clientX: 50, clientY: 10, pointerId: 7 }) })
+
+    // 与 PaneDetach.test.tsx 同名用例同一理由：标签拖拽手柄自己的 pointerdown 一旦
+    // 被触发就会无条件 blockSelect()，这里不该出现。
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+
+    await act(async () => { fireEvent.pointerUp(menuItem, { clientX: 50, clientY: 10, pointerId: 7 }) })
+  })
+})
+
 // 标签拖拽排序（设计文档新增）：与"拖已打开的标签进窗格区"是同一次拖拽手势的两个
 // 落点分支——光标在标签栏上走排序，在窗格区走既有的合并——见 TabBar.tsx 的
 // onTabPointerMove/onTabPointerUp。这里只测标签栏这一处接线；纯数组数学

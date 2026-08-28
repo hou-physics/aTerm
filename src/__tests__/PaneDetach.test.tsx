@@ -322,6 +322,78 @@ describe('TabPanes — 右键窗格标题栏打开上下文菜单（设计文档
   })
 })
 
+// 本次修复的回归（见 .superpowers/context-menu-portal-report.md）：右键菜单曾经渲染
+// 在标题栏这个拖拽手柄的 DOM 子树里。点击菜单项时 pointerdown 会先冒泡到标题栏，
+// 标题栏的 onPointerDown 无条件 setPointerCapture 接管该指针——真实浏览器里随后的
+// pointerup（进而派生出的合成 click）会被重定向到标题栏本身，菜单项自己的 click 再
+// 也发不出来。jsdom 完全没实现 setPointerCapture（甚至连这个方法都不存在，见各拖拽
+// 源里 `?.()` 的用法），因此那条"click 被吞掉"的链路本身在这里测不出来（与
+// TabBar.tsx"只在真正开始拖拽后才 preventDefault"一节注释是同一个局限）；这里改为
+// 直接验证根因机制本身：菜单是否仍是标题栏的 DOM 后代、以及在菜单项上按下是否仍会
+// 触发标题栏自己的 pointerdown 处理逻辑（该逻辑一旦被触发，会无条件调用
+// store/dragGhost.ts 的 blockSelect()，在标题栏未被真正点击的情况下就是不该发生的
+// 副作用——它正是真实浏览器里 setPointerCapture 被调用、进而吞掉 click 的前置条件）。
+describe('TabPanes — 右键菜单不再是标题栏拖拽手柄的 DOM 后代（本次修复：pointer capture 吞掉菜单项 click 的回归）', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+
+  it('菜单节点 portal 到 document.body，不是标题栏元素的 DOM 后代', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    const titlebar = titlebarFor('P2')
+
+    await act(async () => { fireEvent.contextMenu(titlebar, { clientX: 100, clientY: 100 }) })
+
+    const menu = document.querySelector('.context-menu') as HTMLElement
+    expect(menu).toBeTruthy()
+    expect(titlebar.contains(menu)).toBe(false) // 不再是子树的一部分
+    expect(menu.parentElement).toBe(document.body) // 直接挂在 document.body 下
+  })
+
+  it('回归：在菜单项上按下不会触发标题栏拖拽手柄自己的 pointerdown 逻辑（不会再吞掉随后的 click）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    await act(async () => { fireEvent.contextMenu(titlebarFor('P2'), { clientX: 100, clientY: 100 }) })
+    const menuItem = screen.getByText('移出为独立标签')
+
+    await act(async () => { fireEvent.pointerDown(menuItem, { clientX: 100, clientY: 100, pointerId: 7 }) })
+
+    // 标题栏自己的 pointerdown 处理器一旦被触发，第一件事就是无条件 blockSelect()
+    // （见 store/dragGhost.ts）——这里能观察到的最直接证据就是这个 body class 不该
+    // 出现：菜单不再是标题栏的后代（结构性修复）、标题栏自身也加了一层
+    // `.closest('.context-menu')` 早退（纵深防御），两道防线任何一道生效都足以让这
+    // 个断言成立。
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+
+    await act(async () => { fireEvent.pointerUp(menuItem, { clientX: 100, clientY: 100, pointerId: 7 }) })
+  })
+
+  it('从菜单项按下并越过拖拽阈值：不会开始拖拽（无 ghost、无 body 拖拽 class、也没有被误判成一次拖出）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    await act(async () => { fireEvent.contextMenu(titlebarFor('P2'), { clientX: 100, clientY: 100 }) })
+    const menuItem = screen.getByText('移出为独立标签')
+
+    await act(async () => {
+      fireEvent.pointerDown(menuItem, { clientX: 100, clientY: 100, pointerId: 7 })
+      fireEvent.pointerMove(menuItem, { clientX: 100, clientY: 200, pointerId: 7 }) // 远超 4px 阈值
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(document.querySelector('.drag-ghost')).toBeNull()
+
+    await act(async () => { fireEvent.pointerUp(menuItem, { clientX: 100, clientY: 200, pointerId: 7 }) })
+
+    // 没有被误判成一次"拖出去"：标签数、窗格数都不受影响。
+    expect(useTabs.getState().tabs).toHaveLength(2) // home + tab-a，没有多出新标签
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2)
+  })
+})
+
 // 指针捕获丢失时的清理（review 发现：三个拖拽源此前只在 pointerup/pointercancel 上
 // 清理，元素若在拖拽中途被移出 DOM，浏览器会静默释放指针捕获、只发 lostpointercapture
 // 而不补发 pointerup）。PaneTitleBar 是三个拖拽源里唯一"每个手柄都是独立组件实例"的
