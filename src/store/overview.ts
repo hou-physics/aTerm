@@ -53,6 +53,11 @@ type OverviewState = {
   setPosition(key: string, pos: Position): void
   /** 落手：持久化。 */
   commitPosition(key: string, pos: Position): void
+  /** 清除某个项目的排序快照（Task 8 ruling：「打开」指总览标签被创建这件事——
+   * tabs.ts 的 openOverview 只在真正新建标签时调用这个方法，聚焦已有标签不调用）。
+   * 纯内存操作：order 本就不持久化，这里不涉及 localStorage。对没有快照的
+   * dirName 也是安全的空操作。 */
+  clearOrder(dirName: string): void
   /** 重命名；空白名字（含全空白）视为清除，行为等同 clearName，不落盘空标题。 */
   rename(key: string, name: string): void
   clearName(key: string): void
@@ -92,6 +97,11 @@ export const useOverviewStore = create<OverviewState>((set, get) => ({
     const nextPositions = { ...get().positions, [key]: pos }
     persist(POSITIONS_KEY, nextPositions)
     set({ positions: nextPositions })
+  },
+  clearOrder: (dirName) => {
+    const next = { ...get().order }
+    delete next[dirName]
+    set({ order: next })
   },
   rename: (key, name) => {
     if (name.trim() === '') {

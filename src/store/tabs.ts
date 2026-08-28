@@ -3,12 +3,35 @@ import { ptyIsAlive, ptyKill, ptySpawn } from '../ipc'
 import { equalPaneWidths, MAX_PANES } from '../paneLayout'
 import { dropInsertionIndex, type DropTarget } from '../paneDrop'
 import { ptyEventsReady } from '../ptyBuffer'
+import { useOverviewStore } from './overview'
 
 // Pane：标签内的单个终端会话。ptyId 缺省表示该窗格还没有终端——⌘D 新建的窗格先显示
 // 会话选择器（见 components/PanePicker.tsx），选定后才通过 startPaneTerminal 补上
 // ptyId，此前不占用任何 PTY 资源（设计文档 §5-A）。
 export type Pane = { id: string; ptyId?: string; title: string; threadKey?: string; dirName?: string; rootKey?: string }
-export type Tab = { id: string; kind: 'home' | 'term'; title: string; panes: Pane[]; activePaneId?: string; paneWidths?: number[] }
+// dirName：只有 kind==='overview' 的标签使用，记住自己是哪个项目的总览页（App.tsx
+// 用它渲染 <OverviewPage dirName={...} />）；home/term 标签不填这个字段。
+export type Tab = {
+  id: string
+  kind: 'home' | 'term' | 'overview'
+  title: string
+  panes: Pane[]
+  activePaneId?: string
+  paneWidths?: number[]
+  dirName?: string
+}
+
+// 该标签是否承载窗格：目前只有 term 标签真的持有窗格、参与分屏。home 与 overview
+// 都恒为空数组，也都不该被新建/合并/拆分窗格等操作误当成 term 标签处理——但下面这些
+// 操作原本就已经写成"kind !== 'term'"的白名单，新增 overview 这第三种 kind 会被自动
+// 排除，不需要逐一替换成这个函数（批量替换反而是在 split view 核心代码上制造一次
+// 零行为变化的大 diff，见 progress.md Task 8 的 ruling）。这个函数目前只在 tabs.ts
+// 自身真正问"有没有窗格"这一处语义的地方（下面 closeTab 的注释）以及测试里使用，
+// 供以后新代码优先复用，避免继续拿 kind === 'home' 当"没有窗格"的代理判断。
+export function hasPanes(tab: Tab): boolean {
+  return tab.kind === 'term'
+}
+
 let nextTab = 1
 let nextPane = 1
 
@@ -94,6 +117,9 @@ type TabsState = {
   activeId: string
   setActive(id: string): void
   openTerminal(o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
+  /** 打开某个项目的总览页（标签栏第三种标签，spec §5.2）：已存在同一 dirName 的总览
+   * 标签则只聚焦它，不新建；新建时才清除该项目的排序快照（见下方实现注释）。 */
+  openOverview(dirName: string, projectName: string): void
   focusThread(threadKey: string): boolean
   closeTab(id: string, confirmFn?: ConfirmFn): Promise<void>
   addPane(tabId: string, afterPaneId: string): boolean
@@ -119,6 +145,24 @@ export const useTabs = create<TabsState>((set, get) => ({
     const id = `tab-${nextTab++}`
     const pane: Pane = { id: `pane-${nextPane++}`, ptyId, title, threadKey, dirName, rootKey }
     set((s) => ({ tabs: [...s.tabs, { id, kind: 'term', title, panes: [pane], activePaneId: pane.id }], activeId: id }))
+  },
+  // 「打开」总览页指的是这个总览标签被创建这件事，不是 OverviewPage 组件每次挂载
+  // （Task 4 store 的 ruling：见 store/overview.ts clearOrder 与 progress.md Task 4）。
+  // 已有同一 dirName 的总览标签时只聚焦、不新建，也不清排序快照——切走再切回来，
+  // 方块顺序应该保持稳定，不能因为标签重新变为激活标签就重排。只有真正新建时才调用
+  // clearOrder：这样"新开总览标签→按最后活动时间重排""切走再切回→顺序不变"两条
+  // spec §5.2 的要求同时成立。标题固定用「▦ 项目名·总览」，无窗格（不参与分屏，见
+  // hasPanes）。
+  openOverview: (dirName, projectName) => {
+    const existing = get().tabs.find((t) => t.kind === 'overview' && t.dirName === dirName)
+    if (existing) {
+      set({ activeId: existing.id })
+      return
+    }
+    useOverviewStore.getState().clearOrder(dirName)
+    const id = `tab-${nextTab++}`
+    const tab: Tab = { id, kind: 'overview', title: `▦ ${projectName}·总览`, panes: [], dirName }
+    set((s) => ({ tabs: [...s.tabs, tab], activeId: id }))
   },
   // 命中同一 threadKey 时优先匹配"当前激活标签"内的窗格：分屏后同一会话可能被手动
   // 开在多个窗格里（窗格选择器里"任一历史会话"不做去重，见 PanePicker.tsx），此时
@@ -149,6 +193,13 @@ export const useTabs = create<TabsState>((set, get) => ({
   },
   closeTab: async (id, confirmFn = dialogConfirm) => {
     const tab = get().tabs.find((t) => t.id === id)
+    // 这里问的是"是不是主页标签"（唯一恒不可关闭的标签），不是"有没有窗格"——总览
+    // 标签同样没有窗格，但设计要求它必须可关闭（TabBar.tsx 的 × 按钮对非 home 标签
+    // 常显，包含 overview）。不能把这一行改成 `!hasPanes(tab)`：hasPanes(home) 与
+    // hasPanes(overview) 都是 false，那样会把两者一并挡在这里，总览标签的 × 按钮点了
+    // 会什么都不发生。Task 8 审计过 tabs.ts 全部 kind 判断，这是唯一一处"名字长得像
+    // hasPanes、实际语义却不是"的分支，特意保留原判断，见 tabs.test.ts「总览标签可以
+    // 被关闭」一测。
     if (!tab || tab.kind === 'home') return
     // 只收集"确实有 ptyId 且确认存活"的窗格——待选会话的窗格（ptyId 缺省）从未
     // spawn 过 PTY，天然算不存活，不需要也不能查询。

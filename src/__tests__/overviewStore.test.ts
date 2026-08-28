@@ -41,6 +41,38 @@ describe('排序快照（spec §5.2：打开时按最后活动时间新→旧，
   })
 })
 
+describe('clearOrder（Task 8 ruling：新建总览标签时清快照，让方块重新按活跃度排序）', () => {
+  it('清除后该 dirName 没有快照，下一次 captureOrder 按当前活动时间重新建立顺序', () => {
+    const s = useOverviewStore.getState()
+    s.captureOrder('proj', [t('a', 100), t('b', 300)])
+
+    s.clearOrder('proj')
+    expect(useOverviewStore.getState().order.proj).toBeUndefined()
+
+    s.captureOrder('proj', [t('a', 999_999), t('b', 300)]) // a 现在最新
+    expect(useOverviewStore.getState().order.proj).toEqual([
+      blockKey('proj', 'a'), blockKey('proj', 'b'),
+    ])
+  })
+
+  it('不影响其它项目的快照', () => {
+    const s = useOverviewStore.getState()
+    s.captureOrder('proj-a', [t('a', 100)])
+    s.captureOrder('proj-b', [t('b', 200)])
+
+    s.clearOrder('proj-a')
+
+    expect(useOverviewStore.getState().order['proj-a']).toBeUndefined()
+    expect(useOverviewStore.getState().order['proj-b']).toEqual([blockKey('proj-b', 'b')])
+  })
+
+  it('对没有快照的项目是安全的空操作', () => {
+    const s = useOverviewStore.getState()
+    expect(() => s.clearOrder('never-opened')).not.toThrow()
+    expect(useOverviewStore.getState().order['never-opened']).toBeUndefined()
+  })
+})
+
 describe('位置：拖拽中只改内存，落手才持久化（沿用项目既有两动作范式）', () => {
   it('setPosition 不写 localStorage', () => {
     useOverviewStore.getState().setPosition('k', { x: 10, y: 20 })

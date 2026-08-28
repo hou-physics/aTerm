@@ -9,13 +9,15 @@ vi.mock('../ipc', () => ({
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 import * as ipc from '../ipc'
 import { resumeThread } from '../actions'
-import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
+import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, hasPanes, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
 import type { ThreadInfo } from '../ipc'
 import { HOME_TAB, makePane, makeTermTab } from './factories'
 import { MAX_PANES } from '../paneLayout'
+import { useOverviewStore } from '../store/overview'
 
 beforeEach(() => {
   useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
+  useOverviewStore.setState({ order: {} })
   vi.clearAllMocks()
 })
 
@@ -1030,5 +1032,79 @@ describe('buildTabCloseConfirmMessage / buildPaneCloseConfirmMessage（纯函数
   })
   it('关窗格：固定单数写法（一次只可能终止一个窗格自己的 PTY）', () => {
     expect(buildPaneCloseConfirmMessage()).toBe('进程仍在运行，关闭窗格将终止它。确认关闭？')
+  })
+})
+
+describe('overview 标签种类（spec §5.2）', () => {
+  it('打开总览页创建 kind=overview 的标签，标题为「▦ 项目名·总览」，且无窗格', () => {
+    useTabs.getState().openOverview('-Users-hou-astro-aTerm', 'aTerm')
+    const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')!
+    expect(ov).toBeDefined()
+    expect(ov.title).toBe('▦ aTerm·总览')
+    expect(ov.panes).toEqual([])
+    expect(useTabs.getState().activeId).toBe(ov.id)
+  })
+
+  it('同一项目重复打开只聚焦已有总览标签，不新建', () => {
+    useTabs.getState().openOverview('-dir-a', 'A')
+    const firstId = useTabs.getState().tabs.find((t) => t.kind === 'overview')!.id
+    useTabs.setState({ activeId: 'home' })
+    useTabs.getState().openOverview('-dir-a', 'A')
+    expect(useTabs.getState().tabs.filter((t) => t.kind === 'overview')).toHaveLength(1)
+    expect(useTabs.getState().activeId).toBe(firstId)
+  })
+
+  it('不同项目各有自己的总览标签', () => {
+    useTabs.getState().openOverview('-dir-a', 'A')
+    useTabs.getState().openOverview('-dir-b', 'B')
+    expect(useTabs.getState().tabs.filter((t) => t.kind === 'overview')).toHaveLength(2)
+  })
+
+  // tabs.ts:152 的 kind === 'home' 守卫问的是"是不是主页"，不是"有没有窗格"；若误改成
+  // !hasPanes(tab)，总览标签会和主页一起被这里挡住，点击 × 按钮不会有任何效果——这条
+  // 测试直接钉住正确行为。
+  it('总览标签可以被关闭——closeTab 对它不是空操作', async () => {
+    useTabs.getState().openOverview('-dir-a', 'A')
+    const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')!
+    await useTabs.getState().closeTab(ov.id)
+    expect(useTabs.getState().tabs.find((t) => t.id === ov.id)).toBeUndefined()
+  })
+})
+
+describe('hasPanes —— 取代散落各处的 kind === "home" 判断', () => {
+  it('终端标签有窗格', () => {
+    expect(hasPanes(makeTermTab({ panes: [makePane()] }))).toBe(true)
+  })
+
+  it('主页标签没有窗格', () => {
+    expect(hasPanes(HOME_TAB)).toBe(false)
+  })
+
+  it('总览标签没有窗格——这是本任务的核心不变量', () => {
+    useTabs.getState().openOverview('-dir-a', 'A')
+    const ov = useTabs.getState().tabs.find((t) => t.kind === 'overview')!
+    expect(hasPanes(ov)).toBe(false)
+  })
+})
+
+describe('openOverview 与排序快照的交互（Task 4 ruling：新建总览标签清快照，聚焦已有的不清）', () => {
+  it('新建总览标签时清除该项目的排序快照', () => {
+    useOverviewStore.getState().captureOrder('-dir-a', [{ rootKey: 'r1', lastActivityMs: 1 }])
+    expect(useOverviewStore.getState().order['-dir-a']).toBeDefined()
+
+    useTabs.getState().openOverview('-dir-a', 'A')
+
+    expect(useOverviewStore.getState().order['-dir-a']).toBeUndefined()
+  })
+
+  it('聚焦已有总览标签时不清除排序快照', () => {
+    useTabs.getState().openOverview('-dir-a', 'A')
+    useOverviewStore.getState().captureOrder('-dir-a', [{ rootKey: 'r1', lastActivityMs: 1 }])
+    const snapshot = useOverviewStore.getState().order['-dir-a']
+
+    useTabs.setState({ activeId: 'home' })
+    useTabs.getState().openOverview('-dir-a', 'A') // 已存在，只聚焦
+
+    expect(useOverviewStore.getState().order['-dir-a']).toEqual(snapshot)
   })
 })

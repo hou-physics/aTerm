@@ -8,6 +8,7 @@ import { ConversationPanel } from './components/ConversationPanel'
 import { DragGhost } from './components/DragGhost'
 import { DropIndicator } from './components/DropIndicator'
 import { HomePage } from './components/HomePage'
+import { OverviewPage } from './components/OverviewPage'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
@@ -142,6 +143,18 @@ export default function App() {
           </div>
           {tabs.filter((t) => t.kind === 'term').map((t) => (
             <TabPanes key={t.id} tab={t} isActiveTab={activeId === t.id} />
+          ))}
+          {/* 总览标签（Task 8）：与上面的 home-wrap/TabPanes 同一策略——非激活标签也
+              常驻挂载，只是 display:none 隐藏，标签切换/窗格变化都不会让它卸载重挂。
+              OverviewPage 自己的根元素（.overview-page）已经是 position:absolute;
+              inset:0（见 App.css），这里的包裹 div 不需要再写任何定位样式，只负责
+              显隐切换；它自己没有 position，浏览器会跳过它去找上一层有定位的祖先
+              （.content），效果与 .home-wrap 直接铺满一致。dirName 恒有值——只有
+              openOverview 会创建 kind==='overview' 的标签，创建时必填 dirName。 */}
+          {tabs.filter((t) => t.kind === 'overview').map((t) => (
+            <div key={t.id} style={{ display: activeId === t.id ? 'block' : 'none' }}>
+              <OverviewPage dirName={t.dirName!} />
+            </div>
           ))}
           {/* 扁平终端层：与上面各标签的 TabPanes 同级挂载，不嵌在任何一个标签自己的
               子树里——持有 PTY 的窗格，其 <TerminalView> 实例只存在于这一层，按各自
