@@ -3,12 +3,36 @@ import { ptyIsAlive, ptyKill, ptySpawn } from '../ipc'
 import { equalPaneWidths, MAX_PANES } from '../paneLayout'
 import { dropInsertionIndex, type DropTarget } from '../paneDrop'
 import { ptyEventsReady } from '../ptyBuffer'
+import { useOverviewStore } from './overview'
 
 // Pane：标签内的单个终端会话。ptyId 缺省表示该窗格还没有终端——⌘D 新建的窗格先显示
 // 会话选择器（见 components/PanePicker.tsx），选定后才通过 startPaneTerminal 补上
 // ptyId，此前不占用任何 PTY 资源（设计文档 §5-A）。
 export type Pane = { id: string; ptyId?: string; title: string; threadKey?: string; dirName?: string; rootKey?: string }
-export type Tab = { id: string; kind: 'home' | 'term'; title: string; panes: Pane[]; activePaneId?: string; paneWidths?: number[] }
+// dirName：只有 kind==='overview' 的标签使用，记住自己是哪个项目的总览页（App.tsx
+// 用它渲染 <OverviewPage dirName={...} />）；home/term 标签不填这个字段。
+export type Tab = {
+  id: string
+  kind: 'home' | 'term' | 'overview'
+  title: string
+  panes: Pane[]
+  activePaneId?: string
+  paneWidths?: number[]
+  dirName?: string
+}
+
+// 三种 kind 的窗格语义，写在这里备查（终审删掉了一个曾经把它包成谓词的
+// `hasPanes(tab)` 辅助函数：它没有任何生产调用方，而终审排查两处遗漏的 kind 判断时
+// 又确认，那两处真正需要的谓词是"可关闭/可排序"，不是"有没有窗格"——一个差点被用错
+// 地方的、`kind === 'term'` 的第二个名字，只会误导，不会澄清）：
+//   - term：真正持有窗格、参与分屏；
+//   - home / overview：panes 恒为空数组，都不该被新建/合并/拆分窗格等操作当成 term
+//     处理——这些操作本来就写成 `kind !== 'term'` 的白名单，新增 overview 这第三种
+//     kind 会被自动排除，不需要额外的谓词。
+// 反过来，"可关闭""可在标签栏里排序"这两条语义与"有没有窗格"并不重合：overview 两者
+// 皆可，只有 home 不可——那些地方问的是 `kind === 'home'`，见 closeTab 与 TabBar.tsx
+// 的 onTabPointerMove。
+
 let nextTab = 1
 let nextPane = 1
 
@@ -69,7 +93,7 @@ function insertPaneAtIndex(tabs: Tab[], tabId: string, insertAt: number): { tabs
 // 把这个几何下标换算成"从 order 里移除拖拽源之后，它该插入的下标"：目标下标若大于
 // 源下标，说明移除源标签后，同一个视觉缝隙对应的下标要向前挪一格。minIndex 钳住不能
 // 把任何标签排到主页标签前面——主页恒为下标 0，设计要求它既不能被顶替、自己也不可被
-// 拖动（后者由调用方在识别到 dragTab.kind !== 'term' 时整个手势直接判定无效来保证，
+// 拖动（后者由调用方在识别到 dragTab.kind === 'home' 时整个手势直接判定无效来保证，
 // 这里只负责钳住"别人"不能插到它前面）。
 export function reorderInsertIndex(order: string[], sourceId: string, rawTargetIndex: number, minIndex = 1): number {
   const srcIdx = order.indexOf(sourceId)
@@ -94,11 +118,15 @@ type TabsState = {
   activeId: string
   setActive(id: string): void
   openTerminal(o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
+  /** 打开某个项目的总览页（标签栏第三种标签，spec §5.2）：已存在同一 dirName 的总览
+   * 标签则只聚焦它，不新建；新建时才清除该项目的排序快照（见下方实现注释）。 */
+  openOverview(dirName: string, projectName: string): void
   focusThread(threadKey: string): boolean
   closeTab(id: string, confirmFn?: ConfirmFn): Promise<void>
   addPane(tabId: string, afterPaneId: string): boolean
   insertPaneAt(tabId: string, index: number): string | null
   movePanesToTab(sourceTabId: string, targetTabId: string, target: DropTarget): boolean
+  fillEmptyPane(sourceTabId: string, targetTabId: string, targetPaneId: string): boolean
   detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
   splitTabPanes(tabId: string): string[] | null
   reorderTab(tabId: string, rawTargetIndex: number): boolean
@@ -118,6 +146,24 @@ export const useTabs = create<TabsState>((set, get) => ({
     const id = `tab-${nextTab++}`
     const pane: Pane = { id: `pane-${nextPane++}`, ptyId, title, threadKey, dirName, rootKey }
     set((s) => ({ tabs: [...s.tabs, { id, kind: 'term', title, panes: [pane], activePaneId: pane.id }], activeId: id }))
+  },
+  // 「打开」总览页指的是这个总览标签被创建这件事，不是 OverviewPage 组件每次挂载
+  // （Task 4 store 的 ruling：见 store/overview.ts clearOrder 与 progress.md Task 4）。
+  // 已有同一 dirName 的总览标签时只聚焦、不新建，也不清排序快照——切走再切回来，
+  // 方块顺序应该保持稳定，不能因为标签重新变为激活标签就重排。只有真正新建时才调用
+  // clearOrder：这样"新开总览标签→按最后活动时间重排""切走再切回→顺序不变"两条
+  // spec §5.2 的要求同时成立。标题固定用「▦ 项目名·总览」，panes 恒为空数组（不参与
+  // 分屏，见文件顶部关于三种 kind 的说明）。
+  openOverview: (dirName, projectName) => {
+    const existing = get().tabs.find((t) => t.kind === 'overview' && t.dirName === dirName)
+    if (existing) {
+      set({ activeId: existing.id })
+      return
+    }
+    useOverviewStore.getState().clearOrder(dirName)
+    const id = `tab-${nextTab++}`
+    const tab: Tab = { id, kind: 'overview', title: `▦ ${projectName}·总览`, panes: [], dirName }
+    set((s) => ({ tabs: [...s.tabs, tab], activeId: id }))
   },
   // 命中同一 threadKey 时优先匹配"当前激活标签"内的窗格：分屏后同一会话可能被手动
   // 开在多个窗格里（窗格选择器里"任一历史会话"不做去重，见 PanePicker.tsx），此时
@@ -148,6 +194,11 @@ export const useTabs = create<TabsState>((set, get) => ({
   },
   closeTab: async (id, confirmFn = dialogConfirm) => {
     const tab = get().tabs.find((t) => t.id === id)
+    // 这里问的是"是不是主页标签"（唯一恒不可关闭的标签），不是"有没有窗格"——总览
+    // 标签同样没有窗格，但设计要求它必须可关闭（TabBar.tsx 的 × 按钮对非 home 标签
+    // 常显，包含 overview；App.tsx 的 ⌘W 用的是逐字相同的条件，两个入口必须一致）。
+    // 换成任何形式的"没有窗格就不给关"都会把总览标签和主页一起挡在这里，× 按钮点了
+    // 会什么都不发生——见 tabs.test.ts「总览标签可以被关闭」一测。
     if (!tab || tab.kind === 'home') return
     // 只收集"确实有 ptyId 且确认存活"的窗格——待选会话的窗格（ptyId 缺省）从未
     // spawn 过 PTY，天然算不存活，不需要也不能查询。
@@ -242,6 +293,50 @@ export const useTabs = create<TabsState>((set, get) => ({
     })
     return true
   },
+  // 把源标签的全部窗格"填进"目标标签某个空槽窗格（本次修复的设计间隙：目标窗格没有
+  // ptyId——⌘D 新建后还没选定会话、正在渲染 PanePicker 的那种占位——本身就是"等待
+  // 被填入内容的槽位"，拖拽落在它上面应该取代它的位置，而不是像 movePanesToTab 那样
+  // 在旁边插一个、把总窗格数推高到撞上 320px 最小宽度的上限。目标窗格被整个丢弃：
+  // 它从来没有 ptyId，没有 PTY 需要终止，不经过 closePane 那套确认逻辑，与
+  // insertPaneAtIndex 对"待选窗格"的处理一致——它本来就什么都没有。
+  //
+  // 结果窗格数 = 目标标签原有数 - 1（丢弃空槽） + 源标签窗格数，与 movePanesToTab
+  // "+ 源标签窗格数"（不减）不同——调用方（TabBar.tsx）必须用 paneLayout.ts 的
+  // previewPaneDrop 按 'fill' 语义算这个数字喂给宽度/上限判断，否则会把"填充"误判成
+  // "插入"从而错误拒绝。
+  //
+  // 与 movePanesToTab 共享的不变量：源标签的每个 Pane 对象原样保留、绝不重新创建
+  // （id/ptyId 都不变，TerminalLayer.tsx 按 pane.id 做 key，xterm 实例与其回滚缓冲
+  // 因此不受影响），源标签因此整体移除，不经过 closeTab 的确认流程（没有任何 PTY
+  // 被终止）。以下情况返回 false 且不做任何状态变更：源/目标标签之一不存在或非 term
+  // 标签；源标签就是目标标签；目标窗格不属于目标标签，或目标窗格并非空槽（有
+  // ptyId——那种落点应该走 movePanesToTab，这里只处理"空槽"这一种）；结果窗格数会
+  // 超过上限（防御性兜底，正常流程调用方已经用 previewPaneDrop 挡在前面）。
+  fillEmptyPane: (sourceTabId, targetTabId, targetPaneId) => {
+    if (sourceTabId === targetTabId) return false
+    const { tabs } = get()
+    const sourceTab = tabs.find((t) => t.id === sourceTabId)
+    const targetTab = tabs.find((t) => t.id === targetTabId)
+    if (!sourceTab || sourceTab.kind !== 'term' || !targetTab || targetTab.kind !== 'term') return false
+    const movedPanes = sourceTab.panes
+    if (movedPanes.length === 0) return false
+    const targetIdx = targetTab.panes.findIndex((p) => p.id === targetPaneId)
+    if (targetIdx === -1) return false
+    if (targetTab.panes[targetIdx].ptyId) return false
+    if (targetTab.panes.length - 1 + movedPanes.length > MAX_PANES) return false
+    const focusPaneId = sourceTab.activePaneId ?? movedPanes[0].id
+    set((s) => {
+      const withoutSource = s.tabs.filter((t) => t.id !== sourceTabId)
+      const nextTabs = withoutSource.map((t) => {
+        if (t.id !== targetTabId) return t
+        const panes = [...t.panes.slice(0, targetIdx), ...movedPanes, ...t.panes.slice(targetIdx + 1)]
+        return { ...t, panes, activePaneId: focusPaneId, paneWidths: equalPaneWidths(panes.length), title: deriveTabTitle(panes, t.title) }
+      })
+      const activeId = s.activeId === sourceTabId ? targetTabId : s.activeId
+      return { tabs: nextTabs, activeId }
+    })
+    return true
+  },
   // 把窗格从其所在标签拆出，独立成一个新标签（设计文档 §5-C"拖出去/右键菜单"，与
   // movePanesToTab 的"拖进来"互补，是用户明确要求的反向操作）。窗格对象原样保留、
   // 绝不重新创建——与 movePanesToTab 同一个最关键的不变量：TerminalLayer.tsx 按
@@ -266,7 +361,9 @@ export const useTabs = create<TabsState>((set, get) => ({
     if (idx === -1) return null
     const pane = sourceTab.panes[idx]
     const newTabId = `tab-${nextTab++}`
-    const newTab: Tab = { id: newTabId, kind: 'term', title: pane.title, panes: [pane], activePaneId: pane.id }
+    // 同 splitTabPanes：新标签只持有这一个窗格，标题走 deriveTabTitle（与直接写
+    // pane.title 等价，但统一了标题的计算规则只有一处来源）。
+    const newTab: Tab = { id: newTabId, kind: 'term', title: deriveTabTitle([pane], pane.title), panes: [pane], activePaneId: pane.id }
     set((s) => {
       const remainingPanes = sourceTab.panes.filter((p) => p.id !== paneId)
       const activePaneId =
@@ -305,7 +402,12 @@ export const useTabs = create<TabsState>((set, get) => ({
     const newTabs: Tab[] = sourceTab.panes.map((pane) => ({
       id: `tab-${nextTab++}`,
       kind: 'term',
-      title: pane.title,
+      // 与其余五处"窗格数量变化"的调用点（insertPaneAtIndex/movePanesToTab/
+      // fillEmptyPane/detachPaneToNewTab/closePane）统一走 deriveTabTitle，不再
+      // 手写与它恰好等价的 `pane.title`——单窗格新标签下 deriveTabTitle 本就等同于
+      // 直接取 pane.title，这里改用同一个函数只是让标题的计算规则只有一处来源，
+      // 不会因为将来 deriveTabTitle 的单窗格分支变化而在这里悄悄脱节。
+      title: deriveTabTitle([pane], pane.title),
       panes: [pane],
       activePaneId: pane.id,
     }))

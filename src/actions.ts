@@ -12,6 +12,12 @@ export const resumeThread = (dirName: string, cwd: string, t: ThreadInfo) => {
 export const newConversation = (cwd: string) =>
   useTabs.getState().openTerminal({ title: '新对话', cwd, inject: 'claude' })
 
+// 主页项目卡片的「总览」入口（Task 12）：Task 1–11 建好了总览页的全部能力，但没有
+// 任何一处 UI 调用 openOverview——功能存在却无法抵达。与上面几个 action 同一惯例，
+// 薄薄包一层 useTabs.getState()，组件只管调用、不直接碰 store。
+export const openProjectOverview = (dirName: string, projectName: string) =>
+  useTabs.getState().openOverview(dirName, projectName)
+
 export const runCommand = (cmd: string) => {
   const c = cmd.trim()
   return useTabs.getState().openTerminal(c ? { title: c.slice(0, 24), inject: c } : { title: 'zsh' })

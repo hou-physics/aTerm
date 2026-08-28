@@ -18,7 +18,10 @@ import { type Pane, type Tab, useTabs } from '../store/tabs'
 import { ContextMenu } from './ContextMenu'
 import { PanePicker } from './PanePicker'
 
-type TitlebarDragState = { startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
+// id：每次 pointerdown 分配的单调递增拖拽序号，见 onPointerDown 与
+// dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释——isDragActive() 靠它辨认
+// "自己是不是仍然对应当前这次拖拽"，不是只看 dragRef.current 是否非空。
+type TitlebarDragState = { startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number; id: number }
 
 // 窗格标题栏（设计文档 §4）：仅在标签持有多于一个窗格时渲染（单窗格与现状保持一致，
 // 不占高度）。左侧标题过长用 CSS 省略号截断；右侧 × 关闭该窗格。聚焦窗格用强调色
@@ -30,9 +33,13 @@ type TitlebarDragState = { startX: number; startY: number; dragging: boolean; gh
 // 视为"没有真的拖出去"，不做任何事；若停留在标签栏（`.tabbar`）上，按落点算出的位置
 // 插入新标签；否则（拖到窗格区之外的任意其它地方）追加到标签栏末尾。
 //
-// 右键（onContextMenu）打开一个自包含的小菜单（PaneContextMenu.tsx）：「移出为独立
+// 右键（onContextMenu）打开一个自包含的小菜单（ContextMenu.tsx）：「移出为独立
 // 标签」调用与拖出去完全相同的 store 方法（只是没有落点，追加到末尾）；「关闭窗格」
-// 直接复用 onClose（与 × 按钮同一条路径，含既有确认逻辑）。
+// 直接复用 onClose（与 × 按钮同一条路径，含既有确认逻辑）。菜单本身现在 portal 到
+// document.body（见 ContextMenu.tsx 顶部注释），不再是这个标题栏的 DOM 后代；下面
+// onPointerDown 里的 `.context-menu` 早退分支因此只是纵深防御，不是这条路径能否
+// 工作的必要条件——万一将来又有什么把某个菜单/弹层重新嵌回某个拖拽手柄的子树里，
+// 这一层还能兜住同一类问题。
 function PaneTitleBar({
   tab,
   pane,
@@ -50,6 +57,8 @@ function PaneTitleBar({
   // 窗口级兜底监听器的卸载函数，见 dragSafetyNet.ts 顶部注释与 TabBar.tsx 同名字段
   // 的注释（不塞进 TitlebarDragState，理由相同）。
   const netCleanupRef = useRef<(() => void) | null>(null)
+  // 每次 pointerdown 递增一次，赋给这次拖拽的 TitlebarDragState.id——见 onPointerDown。
+  const nextDragIdRef = useRef(0)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
 
   const detach = useCallback(
@@ -80,19 +89,32 @@ function PaneTitleBar({
 
   const onPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).closest('.pane-titlebar-close')) return
+    // 纵深防御：菜单本身已经 portal 到 document.body，不再是这个标题栏的 DOM 后代
+    // （见 ContextMenu.tsx 顶部注释），这条分支理论上不会被真的命中——保留它是为了
+    // 防止将来某处又把弹层嵌回某个拖拽手柄的子树里时，同一类"pointerdown 冒泡到手柄、
+    // 手柄 setPointerCapture 接管指针、菜单项自己的 click 再也发不出来"的问题重演。
+    if ((e.target as HTMLElement).closest('.context-menu')) return
     // 屏蔽文本选择，只加 body class，不调用 e.preventDefault()——与 TabBar.tsx/
     // Sidebar.tsx 同一理由/同一时机（见 store/dragGhost.ts 的 blockSelect() 注释）。
-    // 这一点在这里格外关键：右键菜单（PaneContextMenu）就渲染在这个标题栏的 DOM 子树
-    // 里（position:fixed 只改视觉位置，不改它仍是这个 pointerdown 处理器的后代这一
-    // 事实），点击菜单项时 pointerdown 会先冒泡到这里——上一轮在这里无条件
-    // preventDefault 正是"移出为独立标签"点不动这个回归的根源：会抑制冒泡到这里的
-    // 那个 pointerdown 所对应的、菜单项自己随后应该正常触发的合成 click。真正的默认
-    // 动作抑制挪到了下面 onPointerMove 里，只在跨过阈值、确认是拖拽后才调用。
+    // 真正的默认动作抑制挪到了下面 onPointerMove 里，只在跨过阈值、确认是拖拽后才
+    // 调用——上一轮在这里无条件 preventDefault 曾经是"移出为独立标签"点不动的回归
+    // 根源之一（见 .superpowers/tab-menu-reorder-report.md），本轮修复的是同一处代码
+    // 的另一种抑制机制（setPointerCapture 重定向 pointerup/click，见
+    // .superpowers/context-menu-portal-report.md 与上面 ContextMenu.tsx 的引用）。
     useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId }
-    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。
-    netCleanupRef.current = attachDragSafetyNet(e.pointerId, () => dragRef.current !== null, endDrag)
+    const dragId = ++nextDragIdRef.current
+    dragRef.current = { startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId, id: dragId }
+    // 挂新网前先摘掉任何仍然挂着的旧网——见 TabBar.tsx onTabPointerDown 同名注释，
+    // 三处拖拽源同一套保险。
+    netCleanupRef.current?.()
+    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。isDragActive 额外比较
+    // dragId，见上方 TitlebarDragState.id 注释。
+    netCleanupRef.current = attachDragSafetyNet(
+      e.pointerId,
+      () => dragRef.current !== null && dragRef.current.id === dragId,
+      endDrag,
+    )
   }, [endDrag])
 
   const onPointerMove = useCallback(

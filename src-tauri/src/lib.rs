@@ -1,6 +1,7 @@
 mod pty;
 mod pty_core;
 mod sessions;
+mod status;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -98,6 +99,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(pty::PtyManager::default())
+        .manage(sessions::subagents::SubagentCache::default())
         .manage(ExitConfirmed(AtomicBool::new(false)))
         .on_window_event(|window, event| {
             // 只关心主窗口（本应用只有一个窗口，label 固定为 "main"）；显式判断而非依赖
@@ -126,14 +128,25 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             sessions::scan::list_projects,
             sessions::conversation::read_conversation,
+            sessions::subagents::count_subagents,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_is_alive,
+            status::get_session_statuses,
+            status::installer::hooks_status,
+            status::installer::install_hooks,
+            status::installer::uninstall_hooks,
             confirm_exit
         ])
         .setup(|app| {
+            // 状态引擎（P2b）：起文件监听 + 后台刷新线程，注册管理状态。返回的句柄
+            // 必须交给 `.manage()` 存起来——它内部持有 `notify` 的监听器，drop 掉就会
+            // 停止监听；必须活到应用退出，与下面 macOS 专属那段互不相干，谁先谁后
+            // 不影响正确性，放在最前面只是顺序上更自然。
+            app.manage(status::start(app.handle()));
+
             #[cfg(target_os = "macos")]
             {
                 // 启动可用性优先于 ⌘Q 确认：这里替换的是 Tauri 默认菜单的内部结构（见

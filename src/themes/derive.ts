@@ -67,8 +67,12 @@ function nudge(base: string, target: string, amt: number, fallbackTarget: string
   return out
 }
 
+const ANSI_GREEN = 2
+const ANSI_YELLOW = 3
 const ANSI_BLUE = 4
 const ANSI_CYAN = 6
+const ANSI_BRIGHT_GREEN = 10
+const ANSI_BRIGHT_YELLOW = 11
 const ANSI_BRIGHT_BLUE = 12
 const ANSI_BRIGHT_CYAN = 14
 
@@ -131,6 +135,33 @@ function pickOnAccent(accent: string): string {
   return contrastRatio(accent, '#000000') >= contrastRatio(accent, '#ffffff') ? '#000000' : '#ffffff'
 }
 
+// 状态引擎前端任务（P2b）新增：running/awaitingInput/done 三个状态点颜色，从主题自身的
+// ANSI 蓝/黄/绿派生，不引入任何硬编码色值（设计文档 §7"状态色沿用主题派生变量体系，
+// 不新增硬编码颜色"）。
+//
+// 状态点是纯装饰性的小圆点，不承载文字——4.5 这个阈值本可以只按"非文字元素"要求放宽到
+// 3.0（WCAG 对 UI 部件/图形对象的建议下限），但实测（见 derive.test.ts）全部 28 个内置
+// 主题在"主色不够时退回高亮变体、高亮变体仍不够时用 boostContrast 推移"这条路径下都能
+// 达到 4.5（全局最低约 4.56，solarized-light 的 running 与 ayu-light 的 done），
+// 与文字级阈值同档，故直接采用 4.5、不需要真的用上 3.0 的兜底。
+const STATUS_MIN_CONTRAST = 4.5
+
+/**
+ * 为一种状态挑一个颜色：优先用主题的常规 ANSI 色（primaryIdx，如蓝=4/黄=3/绿=2）；
+ * 若对面板对比度不够，退到该颜色的高亮变体（fallbackIdx，如 12/11/10——spec 原文
+ * "falling back to 12 if contrast … is insufficient"，黄/绿同一模式）；两者都不够时，
+ * 从二者中选对比度更高的一个，交给既有的 boostContrast 朝黑/白推移到达标——不写第二套
+ * 对比度算法，复用 pickAccentText 用的同一个 boostContrast。
+ */
+function pickStatusColor(theme: Theme, panel: string, primaryIdx: number, fallbackIdx: number): string {
+  const primary = theme.ansi[primaryIdx]
+  if (contrastRatio(primary, panel) >= STATUS_MIN_CONTRAST) return primary
+  const fallback = theme.ansi[fallbackIdx]
+  if (contrastRatio(fallback, panel) >= STATUS_MIN_CONTRAST) return fallback
+  const better = contrastRatio(primary, panel) >= contrastRatio(fallback, panel) ? primary : fallback
+  return boostContrast(better, panel, STATUS_MIN_CONTRAST)
+}
+
 export function deriveUiVars(theme: Theme): Record<string, string> {
   const isDark = theme.appearance === 'dark'
   const extreme = isDark ? '#000000' : '#ffffff'
@@ -151,6 +182,12 @@ export function deriveUiVars(theme: Theme): Record<string, string> {
   const accentText = pickAccentText(theme, bg, accent)
   const onAccent = pickOnAccent(accent)
 
+  // 状态点画在侧边栏/主页卡片上，两者的底色都是 panel（不是 bg），所以状态色也按
+  // panel 校验对比度，与 accent 的校验对象保持一致。
+  const statusRunning = pickStatusColor(theme, panel, ANSI_BLUE, ANSI_BRIGHT_BLUE)
+  const statusAwaiting = pickStatusColor(theme, panel, ANSI_YELLOW, ANSI_BRIGHT_YELLOW)
+  const statusDone = pickStatusColor(theme, panel, ANSI_GREEN, ANSI_BRIGHT_GREEN)
+
   return {
     '--color-bg': bg,
     '--color-panel': panel,
@@ -165,6 +202,9 @@ export function deriveUiVars(theme: Theme): Record<string, string> {
     '--color-term-bg': bg,
     '--color-tab-close-hover-bg': tabCloseHoverBg,
     '--color-tab-close-hover-text': tabCloseHoverText,
+    '--color-status-running': statusRunning,
+    '--color-status-awaiting': statusAwaiting,
+    '--color-status-done': statusDone,
   }
 }
 
@@ -183,6 +223,9 @@ export const UI_VAR_NAMES = [
   '--color-term-bg',
   '--color-tab-close-hover-bg',
   '--color-tab-close-hover-text',
+  '--color-status-running',
+  '--color-status-awaiting',
+  '--color-status-done',
 ] as const
 
 // xterm ITheme 的 16 色属性名，顺序对应 Theme.ansi 的 0-15（黑红绿黄蓝紫青白 × 2）；

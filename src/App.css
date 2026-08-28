@@ -58,7 +58,16 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    变量，不新增调色板条目；pointer-events:none 与 .pane-drop-indicator 同理，不拦截
    拖拽过程中持续发生的指针事件。 */
 .tabbar-drop-indicator { position: absolute; top: 4px; bottom: 2px; width: 2px; background: var(--color-accent); border-radius: 1px; z-index: 5; pointer-events: none; }
-.sidebar-toggle { flex: none; align-self: flex-start; position: sticky; left: 0; z-index: 1; width: 24px; height: 26px; margin-right: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+/* 侧边栏折叠按钮 + 主页标签 + 新建标签「＋」三者钉在标签栏最左侧，作为一个整体
+   position: sticky; left: 0——标签一多、`.tabbar` 横向滚动时，这一整块不随内容滚动，
+   而是让其余标签从它下面/后面滚过去（背景色与 `.tabbar` 一致，挡住滚过的标签，
+   见下面「不再被标签挤出视野」的改动）。三者放进同一个 sticky 容器而不是各自单独
+   sticky + 手算 left 偏移：主页标签的宽度由内容（当前恒为单字符"⌂"）决定，不是一个
+   写死的像素值，分别 sticky 需要精确知道"前面已占了多少像素"才能算出各自的 left，
+   任何一处内容/内边距变化都要连带改另一处；整体一起 sticky 则不需要知道任何像素
+   数字，天然不会互相重叠，也天然维持三者原有的相对间距（gap 与 `.tabbar` 本身一致）。 */
+.tabbar-pinned { position: sticky; left: 0; z-index: 2; display: flex; align-items: flex-start; gap: 4px; background: var(--color-panel); }
+.sidebar-toggle { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-right: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .sidebar-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 /* cursor: grab——标签本身是拖拽手柄（TabBar.tsx 场景 A：把已打开的标签拖进窗格区/
    拖拽排序），hover 时应该读作"可以抓起来"；.tab-close 单独有自己的 cursor:default，
@@ -72,6 +81,14 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .panel-toggle { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .panel-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+/* 底部常驻状态栏（StatusBar.tsx，spec §5.2）：`.main` 里与 `.tabbar`/`.content` 并列
+   的第三行，flex: none 固定高度，靠 flex 布局自然从 `.content` 分走这份高度——不进
+   `.content` 内部、更不进 TerminalLayer/TabPanes 测量几何的任何容器（见
+   StatusBar.tsx 与 App.tsx 里对提交 3d6b0da 那次"终端底部一行被裁"教训的引用）。
+   文字为空时（buildSessionStatusText/buildOverviewStatusText 都可能返回空串）容器
+   仍占住这一整行高度，标签切换不会因为有无文字而跳动。 */
+.status-bar { flex: none; height: 24px; display: flex; align-items: center; padding: 0 10px; background: var(--color-panel); border-top: 1px solid var(--color-border); color: var(--color-text-dim); font-size: 11.5px; }
+.status-bar-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .home-wrap { position: absolute; inset: 0; overflow-y: auto; }
 /* display 在 TabPanes.tsx 里按"是否为激活标签"在 flex/none 间切换（保留原先
    block/none 的显隐策略，只是行内容从单个终端换成横向排列的窗格行）。 */
@@ -152,12 +169,53 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    定时自行消失（见 store/hint.ts 的 useHint），不是弹窗。 */
 .pane-hint { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px; background: var(--color-elevated); color: var(--color-text); border: 1px solid var(--color-border); font-size: 12.5px; z-index: 5; pointer-events: none; }
 
-/* 拖放落点指示（设计文档 §5-B）：半透明色块覆盖目标窗格的左半或右半，位置/尺寸由
-   DropIndicator.tsx 按目标窗格实测矩形现算写入内联样式（与 .terminal-wrapper 同一套
-   坐标换算）。用既有强调色变量叠加透明度，不引入新的调色板条目；pointer-events:none
-   确保它绝不拦截拖拽过程中持续发生的指针事件（拖拽源用 setPointerCapture 接管，
-   指示条只是纯视觉浮层）。 */
-.pane-drop-indicator { position: absolute; background: var(--color-accent); opacity: .18; border-radius: 4px; z-index: 4; pointer-events: none; }
+/* 拖放落点指示（设计文档 §5-B，本次修复 Fix 2/3 加强可见度 + 区分"拒绝"状态）：
+   半透明色块覆盖目标窗格（整个或左/右半，取决于落点语义——见 paneDrop.ts 的
+   dropIndicatorPreviewRect），位置/尺寸由 DropIndicator.tsx 按目标窗格实测矩形现算
+   写入内联样式（与 .terminal-wrapper 同一套坐标换算）。
+   opacity 曾经是 .18——真实窗口里被反馈"完全看不出来"，这里改用 ::before 承载底色
+   （opacity 提到 .32 并叠加一圈实色边框），让 .pane-drop-reason 这个兄弟节点不受
+   父级 opacity 拖累、能以完全不透明呈现具体文案。用既有强调色变量，不引入新的调色板
+   条目；pointer-events:none 确保它绝不拦截拖拽过程中持续发生的指针事件（拖拽源用
+   setPointerCapture 接管，指示条只是纯视觉浮层）。 */
+.pane-drop-indicator {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  z-index: 4;
+  pointer-events: none;
+}
+.pane-drop-indicator::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--color-accent);
+  opacity: .32;
+  border: 2px solid var(--color-accent);
+  border-radius: 4px;
+}
+/* "拒绝"状态（Fix 3）：此刻松手会被拒绝——换成既有的"等待中"状态色（既非强调色的
+   "会成功"含义，也不需要新增调色板条目），透明度略低，与正常状态一眼可辨。 */
+.pane-drop-indicator-refused::before {
+  background: var(--color-status-awaiting);
+  border-color: var(--color-status-awaiting);
+  opacity: .26;
+}
+.pane-drop-reason {
+  position: relative;
+  max-width: calc(100% - 16px);
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--color-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .sidebar-list::-webkit-scrollbar,
 .home-wrap::-webkit-scrollbar,
@@ -192,23 +250,141 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .section-label { font-size: 11px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .08em; margin: 14px 0 8px; }
 /* cursor: grab——同 .tab，会话条目是拖拽手柄（Sidebar.tsx 场景 B：从「最近会话」
    拖入窗格区）。 */
-.side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: grab; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: none; }
+.side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: grab; user-select: none; }
 .side-item:hover { background: var(--color-elevated); }
 .side-item .sub { color: var(--color-text-faint); font-size: 11px; }
+/* 状态点 + 标题同一行；截断放在 .side-item-title 而不是外层 .side-item 本身
+   （StatusDot.tsx 引入后标题不再是 .side-item 的直接文本子节点，见该组件顶部注释）。 */
+.side-item-row { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.side-item-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .home { padding: 28px 32px; max-width: 980px; margin: 0 auto; }
 .cmd-input { width: 100%; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-text); font-size: 14px; font-family: 'SF Mono', Menlo, monospace; outline: none; }
 .cmd-input:focus { border-color: var(--color-accent); }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; }
 .card { border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-panel); padding: 12px; cursor: default; }
 .card:hover { border-color: var(--color-accent); }
-.card .name { font-weight: 600; font-size: 14px; }
+.card .name { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; min-width: 0; overflow: hidden; }
 .card .sub { color: var(--color-text-faint); font-size: 12px; margin-top: 4px; }
+/* 卡片头部：项目名与「总览」入口按钮同一行两端对齐（Task 12）。按钮尺寸/配色沿用
+   .conv-refresh 同一套惯例（边框按钮，hover 变主题强调色），不单独发明一套。 */
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-overview-btn { flex: none; padding: 3px 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 11px; line-height: 1.4; cursor: default; }
+.card-overview-btn:hover { border-color: var(--color-accent); color: var(--color-text); }
 .thread-list { margin-top: 8px; border-top: 1px solid var(--color-border); padding-top: 6px; }
 .thread-row { display: flex; justify-content: space-between; gap: 8px; padding: 5px 6px; border-radius: 6px; font-size: 12.5px; }
 .thread-row:hover { background: var(--color-elevated); }
+/* 状态点 + 标题的左侧分组，与 .side-item-row 同一处理；.time 仍是右侧独立 flex 项，
+   两者靠 .thread-row 既有的 justify-content:space-between 分列两端。 */
+.thread-row-main { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
 .thread-row .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-row .time { color: var(--color-text-faint); flex: none; }
 .new-conv { color: var(--color-accent-text); }
+
+/* 主页搜索结果（HomePage.tsx 输入框改为过往对话搜索后新增）：按项目分组，组标题
+   复用既有的 .section-label（"最近项目"同一样式），行本身复用既有的 .thread-row/
+   .thread-row-main（与 ThreadRow 视觉上是同一种行），只多一个内联的项目名标签；
+   无匹配时的"运行命令"兜底行复用 .new-conv 的强调色，与"＋ 新对话"同一基调（都是
+   "创建新东西"的行为，用同一种视觉提示）。 */
+.search-results { margin-top: 12px; }
+.search-result-project { flex: none; color: var(--color-text-faint); font-size: 11px; }
+
+/* 状态点（StatusDot.tsx）：Sidebar 会话行、主页项目卡片聚合/展开会话行共用，见设计
+   文档 §7。.status-dot-slot 恒渲染、固定尺寸——状态未知（aggregateStatus 的 'unknown'，
+   或干脆是 undefined）时内部什么都不画，但这块占位始终都在，相邻标题文字不会因为
+   状态出现/消失而左右挪动。 */
+.status-dot-slot { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 10px; height: 10px; }
+.status-dot { position: relative; display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.status-dot-running { background: var(--color-status-running); }
+.status-dot-awaitingInput { background: var(--color-status-awaiting); }
+.status-dot-done { background: var(--color-status-done); }
+/* 转圈动画仅 running 状态出现：套在圆点外一圈的旋转半环。它是否会在元素不可见时继续
+   消耗重绘，完全交给宿主容器既有的 display:none 机制（侧边栏折叠时 <Sidebar/> 整体
+   不挂载；非当前标签时 .home-wrap 是 display:none，均见 App.tsx，本次改动未触碰）——
+   CSS 规范保证 display:none 子树里的动画彻底不跑，不是"暂停仍占用资源"，比这里额外
+   写一条 animation-play-state 规则更彻底，所以没有再叠加那一条。 */
+.status-dot-spinner {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid transparent;
+  border-top-color: var(--color-status-running);
+  animation: status-spin .8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-dot-spinner { animation: none; }
+}
+@keyframes status-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* hooks 安装器设置区手动入口（spec §6）：与 .theme-switcher 同一处"底部设置角"，
+   同一套 margin-top/padding-top/border-top 分隔条写法，视觉上两者依次堆叠、观感统一。 */
+.hooks-control {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+.hooks-control-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--color-text-dim); }
+.hooks-control-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hooks-control-action {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-elevated);
+  color: var(--color-text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: default;
+}
+.hooks-control-action:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
+.hooks-control-action:disabled { opacity: .6; }
+.hooks-control-error { margin-top: 6px; font-size: 11px; color: var(--color-text); word-break: break-word; }
+
+/* hooks 安装提示条（spec §6）：主页顶部，边框而非阴影的既有扁平风格，与 .card 同一基调。
+   flex-wrap 让失败时的错误信息独占一行，不挤压说明文字/按钮。 */
+.hooks-prompt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-elevated);
+  color: var(--color-text);
+  font-size: 12.5px;
+}
+.hooks-prompt-text { flex: 1; min-width: 200px; }
+.hooks-prompt-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.hooks-prompt-install {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+.hooks-prompt-install:hover:not(:disabled) { opacity: .9; }
+.hooks-prompt-install:disabled { opacity: .6; }
+.hooks-prompt-dismiss {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-panel);
+  color: var(--color-text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: default;
+}
+.hooks-prompt-dismiss:hover { border-color: var(--color-accent); color: var(--color-text); }
+.hooks-prompt-error { flex: 0 0 100%; font-size: 11.5px; color: var(--color-text); }
 
 .theme-switcher {
   position: relative;
@@ -358,3 +534,44 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .conv-body::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 .conv-timeline::-webkit-scrollbar-thumb:hover,
 .conv-body::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
+
+/* 总览页方块（SessionBlock.tsx，spec §5.3）：一个会话一个方块，状态决定底色/边框色调，
+   与既有 .card 同一基调（边框+圆角+ panel 底色），只是额外叠一层状态色。全部颜色都从
+   --color-* 主题变量派生（color-mix 混色，不写死色值）——本项目有 28 套主题 × 3 种
+   外观模式，硬编码颜色会在多数主题下显得突兀甚至不可读，这条规则不允许有例外。
+   .session-block-unknown（状态尚未知）不加任何叠色，直接沿用 .session-block 本身的
+   panel/border，不猜一个颜色（与 StatusDot「未知不画点」同一原则）。 */
+.session-block { border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-panel); padding: 10px 12px; cursor: default; }
+.session-block:hover { border-color: var(--color-accent); }
+.session-block-running { background: color-mix(in srgb, var(--color-status-running) 12%, var(--color-panel)); border-color: color-mix(in srgb, var(--color-status-running) 45%, var(--color-border)); }
+.session-block-awaitingInput { background: color-mix(in srgb, var(--color-status-awaiting) 12%, var(--color-panel)); border-color: color-mix(in srgb, var(--color-status-awaiting) 45%, var(--color-border)); }
+.session-block-done { background: color-mix(in srgb, var(--color-status-done) 12%, var(--color-panel)); border-color: color-mix(in srgb, var(--color-status-done) 45%, var(--color-border)); }
+/* 状态点 + 标题同一行，与 .side-item-row / .thread-row-main 同一处理（截断放在标题
+   自己身上，不是外层容器）。 */
+.session-block-head { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.session-block-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
+/* 改名态（Task 9）：与 .session-block-title 同字号/字重，尽量不因切换成 input 而跳动
+   版面；颜色沿用 .cmd-input 同一套变量（边框/底色/文字全部来自主题变量，不写死）。 */
+.session-block-title-input { flex: 1; min-width: 0; padding: 1px 4px; border-radius: 4px; border: 1px solid var(--color-accent); background: var(--color-panel); color: var(--color-text); font: inherit; font-weight: 600; font-size: 13px; outline: none; }
+.session-block-preview { margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-dim); font-size: 12px; }
+.session-block-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
+/* 限定在 .session-block 之内：`.badge` 是一个在 560 行的全局样式表里极易被别处
+   无意撞名的通用类名，而它目前唯一的使用者就是 SessionBlock.tsx 的这排徽章。 */
+.session-block .badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 11px; line-height: 1.6; white-space: nowrap; }
+
+/* 总览页网格与拖拽（OverviewPage.tsx，Task 7）：与 .home-wrap 同一套铺满写法
+   （position: absolute; inset: 0），因为它和 .home-wrap 一样，最终会被 App.tsx 挂在
+   .content（position: relative）下面、与其它标签内容同级切换显示。.overview-canvas
+   是实际做绝对定位排布、也是 ResizeObserver 量宽度的那个元素——宽度就是列数计算和
+   拖拽钳制的依据，量在它身上而不是外层滚动容器，避免竖向滚动条把可用宽度算错。
+   不写死任何色值：方块自身的着色全部由 SessionBlock.tsx 的既有规则负责，这里只管
+   排布与手势，没有引入新的颜色。 */
+.overview-page { position: absolute; inset: 0; overflow-y: auto; padding: 20px; box-sizing: border-box; }
+.overview-canvas { position: relative; }
+.overview-block-wrap { cursor: grab; }
+.overview-block-wrap:active { cursor: grabbing; }
+
+.overview-page::-webkit-scrollbar { width: 8px; }
+.overview-page::-webkit-scrollbar-track { background: transparent; }
+.overview-page::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+.overview-page::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }

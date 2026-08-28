@@ -42,6 +42,30 @@ export function dropIndicatorRect(rect: Rect, side: DropSide): Rect {
   return side === 'left' ? { ...rect, width: half } : { ...rect, left: rect.left + half, width: half }
 }
 
+// 落点语义：'insert'——目标窗格已经有内容（持有 ptyId），拖放在其左/右插入新窗格
+// （既有行为，窗格总数会增加）；'fill'——目标窗格是"空槽"（没有 ptyId，即 ⌘D 新建后
+// 还没选定会话、正在渲染 PanePicker 的那种窗格，见 store/tabs.ts 的 Pane 类型注释）。
+// 空槽本身就是"等待被填入内容的占位"，拖拽落在它上面理应取代它的位置而不是在旁边
+// 再插一个——这是本次修复要补上的设计间隙：此前所有落点都按 'insert' 处理，导致
+// 拖到空槽窗格会把总窗格数意外推高、撞上 320px 最小宽度的上限而被拒绝（诊断记录见
+// .superpowers/pane-fill-report.md）。
+export type DropMode = 'insert' | 'fill'
+
+// 只接受"目标窗格是否已有 ptyId"这一个结构化字段，不 import store/tabs.ts 的 Pane
+// 类型——本模块是纯几何/判定层，store/tabs.ts 已经在 import 它，不能反过来依赖 store。
+// 调用方（TabBar.tsx/Sidebar.tsx）在 resolveDropTarget 解出 paneId 后，自己从当前
+// Tab 的 panes 数组里查出目标窗格传进来。
+export function resolveDropMode(targetPane: { ptyId?: string } | undefined): DropMode {
+  return targetPane && !targetPane.ptyId ? 'fill' : 'insert'
+}
+
+// 落点指示条的矩形，按落点语义选择覆盖范围：'fill' 覆盖整个窗格（空槽没有"左右两侧"
+// 的区分，落点即整个槽位——继续切半会让用户误以为落下去还是"插入"语义，见设计文档
+// 本次修复的 Fix 2）；'insert' 沿用既有的左右半侧切分（dropIndicatorRect）。
+export function dropIndicatorPreviewRect(rect: Rect, mode: DropMode, side: DropSide): Rect {
+  return mode === 'fill' ? rect : dropIndicatorRect(rect, side)
+}
+
 // 把落点 {paneId, side} 换算成该在 panes 数组里插入的下标——场景 A（跨标签移动整个
 // 标签的窗格）与场景 B（侧边栏拖入新建窗格）共用同一份换算。目标窗格不在数组中
 // （理论上不应发生：落点总是从同一份 panes 派生出的插槽里选出的）时退化为追加到末尾。

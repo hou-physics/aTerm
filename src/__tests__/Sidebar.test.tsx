@@ -20,6 +20,25 @@ vi.mock('../ipc', () => ({
   readConversation: vi.fn(),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
+// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。Task 10
+// 起 App.tsx 新挂了 StatusBar，它直接读 useStatusStore/threadStatusKey（不经
+// useThreadStatus/useProjectStatus 这两个既有 selector），这里一并补最小静态桩，否则
+// 渲染 <App/> 会在 StatusBar 内部因缺失导出而抛错。
+vi.mock('../store/status', () => ({
+  statusEventsReady: Promise.resolve(),
+  useThreadStatus: () => undefined,
+  useProjectStatus: () => 'unknown' as const,
+  useStatusStore: (selector: (s: { statuses: Map<string, unknown> }) => unknown) => selector({ statuses: new Map() }),
+  threadStatusKey: (dirName: string, rootKey: string) => `${dirName}::${rootKey}`,
+}))
+// 与上面 store/status 同一理由：这批测试不关心 hooks 安装状态，整个模块换成不触碰真实
+// ipc 调用的空实现（真实行为由 HooksInstall.test.tsx / hooksInstall.test.ts 单独覆盖）。
+vi.mock('../store/hooksInstall', () => ({
+  hooksInstallReady: Promise.resolve(),
+  hooksPhase: () => null,
+  useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
+}))
 vi.mock('../closeRequest', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 
@@ -36,7 +55,7 @@ const TAB_A = { id: 'tab-a', kind: 'term' as const, title: 'A', panes: [{ id: 'p
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
   useHint.setState({ message: null })
-  useDnd.setState({ target: null })
+  useDnd.setState({ target: null, dropMode: null, refusal: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
   document.body.classList.remove('dragging-no-select')
 })
@@ -177,6 +196,70 @@ describe('Sidebar — 从「最近会话」拖入窗格区（设计文档 §5-B 
 
     expect(useDnd.getState().target).toBeNull()
     expect(useTabs.getState().tabs).toBe(before)
+  })
+})
+
+// 拖到空槽窗格（本次修复的主要设计间隙，与 TabBar.test.tsx 同一组背景）：目标窗格
+// 没有 ptyId 时，应该直接在原地用这条会话启动它——"exactly as if it had been chosen
+// through the ⌘D picker"——不新建窗格，不让总窗格数意外增加。
+describe('Sidebar — 拖到空槽窗格：原地启动会话，不新建窗格', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('落在空槽窗格上：该窗格原地启动这条会话，窗格总数不变，不是新建的窗格', async () => {
+    const EMPTY_A = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, EMPTY_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const item = screen.getAllByText('修复登录').map((el) => el.closest('.side-item')).find(Boolean) as HTMLElement
+
+    await drag(item, { x: 10, y: 10 }, { x: 450, y: 50 }) // 落在 a2（空槽）矩形 [300,700) 内
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(2) // 数量不变——不是 insertPaneAt 会给出的 3
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'a2']) // a2 原地被填充，不是被替换成别的 id
+
+    await act(async () => { await Promise.resolve() }) // startPaneTerminal 是 async，flush 一次
+    const filled = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes.find((p) => p.id === 'a2')!
+    expect(filled).toMatchObject({
+      ptyId: 'pty-picked',
+      title: '修复登录',
+      threadKey: 'proj-a:root-a',
+      dirName: 'proj-a',
+      rootKey: 'root-a',
+    })
+    expect(t.activePaneId).toBe('a2')
+  })
+
+  it('宽度只够当前数量、不够 +1：填充仍然成功（按结果数判断，不误判成插入而拒绝）', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 700 })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    const EMPTY_A = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, EMPTY_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const item = screen.getAllByText('修复登录').map((el) => el.closest('.side-item')).find(Boolean) as HTMLElement
+
+    await drag(item, { x: 10, y: 10 }, { x: 450, y: 50 })
+    await act(async () => { await Promise.resolve() }) // startPaneTerminal 是 async，flush 一次
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(2) // 成功填充，不是被拒绝后原样保留的 2
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'a2']) // a2 原地被填充，不是新建的窗格
+    expect(t.panes.find((p) => p.id === 'a2')!.ptyId).toBe('pty-picked') // 真的启动了会话，不是被拒绝
   })
 })
 
@@ -403,7 +486,7 @@ describe('Sidebar — 窗口级兜底：被拖会话项在拖拽中途从 DOM �
 
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve() // 兜底的 endDrag() 被 queueMicrotask 推迟，见 dragSafetyNet.ts 顶部注释
+      await new Promise((r) => setTimeout(r, 0)) // 兜底的 endDrag() 被 setTimeout(fn, 0) 宏任务推迟，见 dragSafetyNet.ts 顶部注释
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
@@ -429,7 +512,7 @@ describe('Sidebar — 窗口级兜底：被拖会话项在拖拽中途从 DOM �
 
     await act(async () => {
       window.dispatchEvent(new Event('blur'))
-      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：setTimeout(fn, 0) 宏任务推迟，不是微任务
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
@@ -452,16 +535,22 @@ describe('Sidebar — 窗口级兜底：被拖会话项在拖拽中途从 DOM �
       fireEvent.pointerUp(item, { clientX: 300, clientY: 50, pointerId: 1 }) // 正常路径收尾，走 endDrag()
     })
 
+    // pointerup/pointercancel 依旧走捕获阶段——这两处没有改动（见 dragSafetyNet.ts）。
     const removedCaptureTypes = removeSpy.mock.calls
       .filter(([, , opts]) => typeof opts === 'object' && opts !== null && opts.capture === true)
       .map(([type]) => type)
-    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel', 'blur']))
+    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel']))
+    // blur 改成非捕获阶段监听（见 dragSafetyNet.ts 顶部注释），摘除时不带 capture:true。
+    const blurRemovedWithoutCapture = removeSpy.mock.calls.some(
+      ([type, , opts]) => type === 'blur' && !(typeof opts === 'object' && opts !== null && opts.capture === true),
+    )
+    expect(blurRemovedWithoutCapture).toBe(true)
 
     // 监听器确实摘掉了：清理之后再有一次原生 pointerup 落在 window 上，不会再产生任何
     // 可观察效果（body class 早已是干净状态，不会被重新弄脏，也不会误触发任何动作）。
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：setTimeout(fn, 0) 宏任务推迟，不是微任务
     })
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
     expect(useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes).toHaveLength(1)

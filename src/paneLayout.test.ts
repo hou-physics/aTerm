@@ -8,7 +8,9 @@ import {
   MAX_PANES,
   MIN_PANE_WIDTH_PX,
   neighborPaneId,
+  paneFitShortfall,
   PANE_BORDER_TOTAL_WIDTH_PX,
+  previewPaneDrop,
   TERM_WRAP_HORIZONTAL_PADDING_PX,
   usablePaneAreaWidth,
 } from './paneLayout'
@@ -194,5 +196,66 @@ describe('decidePaneFit：窄窗口降级判断（设计文档 §8），⌘D 与
 describe('MAX_PANES', () => {
   it('上限为 3', () => {
     expect(MAX_PANES).toBe(3)
+  })
+})
+
+describe('paneFitShortfall：装不下时具体差多少像素（拖拽过程中持续显示的提示用）', () => {
+  it('差额为达到最小宽度所需与实际可用宽度之差', () => {
+    expect(paneFitShortfall(2, 615)).toBe(640 - 615) // 25
+    expect(paneFitShortfall(3, 924)).toBe(960 - 924) // 36
+  })
+  it('已经装得下时钳在 0，不产生负数', () => {
+    expect(paneFitShortfall(2, 700)).toBe(0)
+  })
+  it('paneCount<=0 时没有意义，返回 0', () => {
+    expect(paneFitShortfall(0, 100)).toBe(0)
+    expect(paneFitShortfall(-1, 100)).toBe(0)
+  })
+})
+
+// previewPaneDrop：本次修复（拖到空槽窗格应"填充"而不是"插入"）的核心判断，供
+// TabBar.tsx/Sidebar.tsx 在 pointermove（实时预览）与 pointerup（真正执行）共用。
+describe('previewPaneDrop：拖放是否会被接受，按落点语义（fill/insert）算出真正的结果窗格数', () => {
+  it('fill：结果窗格数等于当前数（不变），哪怕原始测量值只够当前数量、不够 +1', () => {
+    // 原始测量值 700px：够 2 个窗格（usable=675>=640）但不够 3 个（usable=664<960）——
+    // fill 应该按"不变的 2"判断，装得下；如果被误当成 insert（当成 2+1=3）就会错误拒绝，
+    // 这正是本次要修的设计间隙（诊断记录见 .superpowers/pane-fill-report.md）。
+    const result = previewPaneDrop('fill', 2, 1, 700, true, 0)
+    expect(result.resultingCount).toBe(2)
+    expect(result.refused).toBe(false)
+    expect(result.decision).toBe('fits')
+  })
+
+  it('insert：结果窗格数是 currentCount + draggedCount（既有行为不变）', () => {
+    const result = previewPaneDrop('insert', 2, 1, 700, true, 0)
+    expect(result.resultingCount).toBe(3)
+    expect(result.refused).toBe(true) // 700px 不够 3 个窗格
+    expect(result.refusalKind).toBe('too-narrow')
+  })
+
+  it('结果窗格数超过 MAX_PANES：拒绝，reason 是固定文案，不计算 shortfall', () => {
+    const result = previewPaneDrop('insert', 3, 1, 100000, true, 0) // 宽度充裕也不行，数量硬上限优先
+    expect(result.refused).toBe(true)
+    expect(result.refusalKind).toBe('max-panes')
+    expect(result.reason).toBe('最多支持 3 个窗格')
+  })
+
+  it('宽度不够、面板已收起：reason 携带具体差额（与 paneFitShortfall 对应同一份原始测量值 640px）', () => {
+    const result = previewPaneDrop('insert', 1, 1, 640, true, 0)
+    expect(result.refused).toBe(true)
+    expect(result.refusalKind).toBe('too-narrow')
+    expect(result.reason).toBe('窗口太窄，还差 25px')
+  })
+
+  it('宽度不够，但面板未收起、收起后就够：decision 是 collapse-panel，不算拒绝', () => {
+    const result = previewPaneDrop('insert', 1, 1, 600, false, 400) // usable=575，575+400=975>=640
+    expect(result.refused).toBe(false)
+    expect(result.decision).toBe('collapse-panel')
+  })
+
+  it('宽度不够，面板未收起但收起后仍不够：拒绝，差额按"收起后能达到的最大可用宽度"计算', () => {
+    const result = previewPaneDrop('insert', 1, 1, 300, false, 200) // usable=275，275+200=475<640
+    expect(result.refused).toBe(true)
+    expect(result.reason).toBe(`窗口太窄，还差 ${640 - 475}px`) // 165
   })
 })

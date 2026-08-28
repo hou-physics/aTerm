@@ -1,17 +1,11 @@
 import { useState } from 'react'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
+import { matchesQuery, filterProjectsByQuery } from '../sessionSearch'
 import { useSessions } from '../store/sessions'
 import { type Tab, useTabs } from '../store/tabs'
 import { basename, formatRelative } from '../time'
 
 const RECENT_LIMIT = 8
-
-// 子串匹配：不区分大小写，命中任一候选文本即算匹配；query 为空串时视为全部匹配
-// （即未输入过滤词时不做任何过滤）。
-function matches(query: string, ...candidates: string[]): boolean {
-  if (!query) return true
-  return candidates.some((c) => c.toLowerCase().includes(query))
-}
 
 // ⌘D 新建的窗格在选定会话之前显示的选择列表（设计文档 §5-A），现扩展为四段
 // （用户反馈"最近会话不够，要能像主页一样浏览全部项目"）：
@@ -38,18 +32,13 @@ export function PanePicker({ tab, paneId }: { tab: Tab; paneId: string }) {
   const recent = projects
     .flatMap((p) => p.threads.map((t) => ({ p, t })))
     .sort((a, b) => b.t.lastActivityMs - a.t.lastActivityMs)
-    .filter(({ p, t }) => matches(q, t.title, basename(p.cwd)))
+    .filter(({ p, t }) => matchesQuery(q, t.title, basename(p.cwd)))
     .slice(0, RECENT_LIMIT)
 
   // 全部项目：项目名本身命中时保留该项目下全部会话；否则只保留会话标题命中的那些，
-  // 一个会话都没命中的项目整个隐去。
-  const allProjects = projects
-    .map((p) => {
-      const projectMatches = matches(q, basename(p.cwd))
-      const threads = projectMatches ? p.threads : p.threads.filter((t) => matches(q, t.title))
-      return { ...p, threads, projectMatches }
-    })
-    .filter((p) => p.projectMatches || p.threads.length > 0)
+  // 一个会话都没命中的项目整个隐去（见 ../sessionSearch.ts，与 HomePage.tsx 的主页
+  // 搜索框共用同一份实现）。
+  const allProjects = filterProjectsByQuery(projects, q)
 
   const noMatches = q !== '' && recent.length === 0 && allProjects.length === 0
 

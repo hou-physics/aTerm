@@ -90,6 +90,35 @@ describe('deriveUiVars', () => {
     }
   })
 
+  // 状态引擎前端任务（P2b）新增：running/awaitingInput/done 三个状态点颜色，见
+  // derive.ts 的 pickStatusColor。状态点是纯装饰性圆点（不承载文字），4.5 本可以放宽到
+  // WCAG 对图形对象建议的 3.0 下限，但"主色不够时退回高亮变体，仍不够再用既有
+  // boostContrast 推移"这条路径下，全部 28 个内置主题实测都能达到 4.5（全局最低约
+  // 4.56：solarized-light 的 running、ayu-light 的 done），所以直接采用与文字同档的
+  // 4.5，没有用上 3.0 的兜底。
+  it('the three status colours (running/awaiting/done) each clear 4.5 contrast against panel, on every curated theme', () => {
+    const MIN = 4.5
+    for (const t of THEMES) {
+      const vars = deriveUiVars(t)
+      for (const name of ['--color-status-running', '--color-status-awaiting', '--color-status-done'] as const) {
+        const ratio = contrastRatio(vars[name], vars['--color-panel'])
+        expect(ratio, `${t.id} ${name} vs panel`).toBeGreaterThanOrEqual(MIN)
+      }
+    }
+  })
+
+  it('the three status colours are pairwise distinct on every curated theme (never render two states identically)', () => {
+    for (const t of THEMES) {
+      const vars = deriveUiVars(t)
+      const running = vars['--color-status-running'].toLowerCase()
+      const awaiting = vars['--color-status-awaiting'].toLowerCase()
+      const done = vars['--color-status-done'].toLowerCase()
+      expect(running).not.toBe(awaiting)
+      expect(running).not.toBe(done)
+      expect(awaiting).not.toBe(done)
+    }
+  })
+
   it('on-accent is always pure black or pure white', () => {
     for (const t of THEMES) {
       const onAccent = deriveUiVars(t)['--color-on-accent'].toLowerCase()

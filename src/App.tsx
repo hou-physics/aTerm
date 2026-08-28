@@ -8,15 +8,23 @@ import { ConversationPanel } from './components/ConversationPanel'
 import { DragGhost } from './components/DragGhost'
 import { DropIndicator } from './components/DropIndicator'
 import { HomePage } from './components/HomePage'
+import { OverviewPage } from './components/OverviewPage'
 import { Sidebar } from './components/Sidebar'
+import { StatusBar } from './components/StatusBar'
 import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
 import { TerminalLayer } from './components/TerminalLayer'
 import { decidePaneFit, MAX_PANES, neighborPaneId, usablePaneAreaWidth } from './paneLayout'
+import { createTrailingThrottle, type Throttled } from './refreshThrottle'
 import { useHint } from './store/hint'
 import { useLayout } from './store/layout'
 import { useSessions } from './store/sessions'
+import { useStatusStore } from './store/status'
 import { useTabs } from './store/tabs'
+
+// 元数据刷新的最小间隔。15s：足够让底栏在一轮对话内跟上，又不会让 list_projects
+// 的头尾读取变成持续负载。
+const METADATA_REFRESH_MS = 15_000
 
 export default function App() {
   const { tabs, activeId } = useTabs()
@@ -27,13 +35,41 @@ export default function App() {
   // 拖拽入口各自的同类拒绝，共用同一条内联轻提示（store/hint.ts）：不用对话框，
   // 几秒后自行消失（设计文档 §5-A"无对话，内联自消失提示即可"），三处触发、一处
   // 渲染，不写第二套提示机制。
+  const statusVersion = useStatusStore((s) => s.version)
+  const metadataRefreshRef = useRef<Throttled | null>(null)
+  const skipFirstStatusTickRef = useRef(true)
   const hint = useHint((s) => s.message)
   useEffect(() => {
     refresh().catch(console.error)
     const onFocus = () => { refresh().catch(console.error) }
     window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
+
+    // 会话元数据（模型 / effort / 权限模式 / 上下文用量 / 预览行 / 标题）随转录增长
+    // 而变，但上面两个触发点覆盖不到"用户一直待在 aTerm 里面"这个常态——窗口从不
+    // 失焦，元数据就停在启动那一刻（实测：底栏长期显示已经换掉的旧模型）。FSEvents
+    // 推来的 session-status 事件恰好标志"某个转录被写了"，拿它当刷新信号；但必须
+    // 节流：refresh() 会对每个项目的每个转录做头尾读取，而运行中的会话每 120ms 就
+    // 可能推一条事件。
+    const throttled = createTrailingThrottle(() => { refresh().catch(console.error) }, METADATA_REFRESH_MS)
+    metadataRefreshRef.current = throttled
+
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      throttled.cancel()
+      metadataRefreshRef.current = null
+    }
   }, [refresh])
+
+  // statusVersion 是 store 里的单调计数器（不是 statuses 那个每次都换引用的 Map），
+  // 所以这个效应只在确有状态条目更新时才跑。首次挂载那一下跳过——上面的 effect 已经
+  // 刷过一次了，不必紧接着再刷。
+  useEffect(() => {
+    if (skipFirstStatusTickRef.current) {
+      skipFirstStatusTickRef.current = false
+      return
+    }
+    metadataRefreshRef.current?.trigger()
+  }, [statusVersion])
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       // Control+Tab / Control+Shift+Tab：像 Chrome 一样在标签间循环切换（含主页标签），
@@ -80,6 +116,14 @@ export default function App() {
         const tab = tabs.find((t) => t.id === activeId)
         if (tab?.kind === 'term' && tab.activePaneId) {
           void useTabs.getState().closePane(activeId, tab.activePaneId)
+        } else if (tab && tab.kind !== 'home') {
+          // 没有窗格可关、但标签本身可关：总览标签（Task 8 新增的第三种 kind）就是
+          // 这一类。这里的条件与 TabBar.tsx 里 × 按钮的显示条件（`t.kind !== 'home'`）
+          // 逐字相同，是有意为之——"关闭当前标签"这件事有 ⌘W 和 × 两个入口，两者必须
+          // 对"哪些标签可关"给出同一个答案。此前只写了 term 分支，总览标签按 × 能关、
+          // 按 ⌘W 却静默无事发生，两个入口互相矛盾。closeTab 自己对 home 也是空操作
+          // （见 tabs.ts），这里写出 kind !== 'home' 只是把意图显式化。
+          void useTabs.getState().closeTab(tab.id)
         }
       } else if (key === 'd') {
         e.preventDefault()
@@ -143,6 +187,18 @@ export default function App() {
           {tabs.filter((t) => t.kind === 'term').map((t) => (
             <TabPanes key={t.id} tab={t} isActiveTab={activeId === t.id} />
           ))}
+          {/* 总览标签（Task 8）：与上面的 home-wrap/TabPanes 同一策略——非激活标签也
+              常驻挂载，只是 display:none 隐藏，标签切换/窗格变化都不会让它卸载重挂。
+              OverviewPage 自己的根元素（.overview-page）已经是 position:absolute;
+              inset:0（见 App.css），这里的包裹 div 不需要再写任何定位样式，只负责
+              显隐切换；它自己没有 position，浏览器会跳过它去找上一层有定位的祖先
+              （.content），效果与 .home-wrap 直接铺满一致。dirName 恒有值——只有
+              openOverview 会创建 kind==='overview' 的标签，创建时必填 dirName。 */}
+          {tabs.filter((t) => t.kind === 'overview').map((t) => (
+            <div key={t.id} style={{ display: activeId === t.id ? 'block' : 'none' }}>
+              <OverviewPage dirName={t.dirName!} />
+            </div>
+          ))}
           {/* 扁平终端层：与上面各标签的 TabPanes 同级挂载，不嵌在任何一个标签自己的
               子树里——持有 PTY 的窗格，其 <TerminalView> 实例只存在于这一层，按各自
               插槽（.pane-body[data-pane-slot]，在上面的 TabPanes 树里）当前的实测矩形
@@ -157,6 +213,14 @@ export default function App() {
           <DropIndicator containerRef={contentRef} />
           {hint && <div className="pane-hint">{hint}</div>}
         </div>
+        {/* 底部常驻状态栏（spec §5.2，StatusBar.tsx）：`.content` 的同级兄弟，不是它的
+            子节点——`.content` 及其内部子树（`.term-wrap`/`.pane-body`/
+            `.terminal-wrapper`/`.terminal-host`）是 TerminalLayer/TerminalView 两层
+            ResizeObserver 真正测量几何的地方，状态栏绝不能挤进这棵子树，理由同
+            StatusBar.tsx 顶部注释引用的那次"终端底部一行被裁"教训（提交 3d6b0da）。
+            放在这里，`.main` 的 flex 布局会正常地把它算作固定高度的一行，`.content`
+            通过 flex:1 分到剩余高度——这和 `.tabbar` 早已在做的事完全一样。 */}
+        <StatusBar />
       </div>
       <ConversationPanel />
       {/* 跟随光标的拖拽指示（TabBar.tsx/Sidebar.tsx/TabPanes.tsx 三处拖拽源共用，见

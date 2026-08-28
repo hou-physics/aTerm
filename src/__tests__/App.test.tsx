@@ -7,8 +7,31 @@ vi.mock('../ipc', () => ({
   ptyKill: vi.fn(async () => {}),
   listProjects: vi.fn(async () => []),
   readConversation: vi.fn(),
+  // 下面「⌘W 关闭总览标签」那条测试会让 App 渲染出一个 overview 标签，App.tsx 因此
+  // 挂载 OverviewPage，后者会异步补 sub-agent 徽章。给一个永不 resolve 的 promise：
+  // 本文件不关心徽章，也不希望它在断言体跑完之后才落地的 setState 冒出 act 警告。
+  countSubagents: vi.fn(() => new Promise<number>(() => {})),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
+// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。Task 10
+// 起 App.tsx 新挂了 StatusBar，它直接读 useStatusStore/threadStatusKey（不经
+// useThreadStatus/useProjectStatus 这两个既有 selector），这里一并补最小静态桩，否则
+// 渲染 <App/> 会在 StatusBar 内部因缺失导出而抛错。
+vi.mock('../store/status', () => ({
+  statusEventsReady: Promise.resolve(),
+  useThreadStatus: () => undefined,
+  useProjectStatus: () => 'unknown' as const,
+  useStatusStore: (selector: (s: { statuses: Map<string, unknown> }) => unknown) => selector({ statuses: new Map() }),
+  threadStatusKey: (dirName: string, rootKey: string) => `${dirName}::${rootKey}`,
+}))
+// 与上面 store/status 同一理由：这批测试不关心 hooks 安装状态，整个模块换成不触碰真实
+// ipc 调用的空实现（真实行为由 HooksInstall.test.tsx / hooksInstall.test.ts 单独覆盖）。
+vi.mock('../store/hooksInstall', () => ({
+  hooksInstallReady: Promise.resolve(),
+  hooksPhase: () => null,
+  useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
+}))
 // App.tsx 顶层 side-effect 导入 closeRequest.ts 是为了在真实环境里尽早注册"应用关闭前确认"
 // 监听器；替身掉避免它在测试环境里去调用真实的 @tauri-apps/api/event（没有 Tauri 运行时
 // 会抛错），与本文件要验证的 Ctrl+Tab 循环切换无关。closeRequest.ts 自身的行为见
@@ -314,5 +337,35 @@ describe('App — ⌘W 关闭聚焦窗格；标签只剩一个窗格时等同关
       expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')).toBeUndefined()
     })
     expect(useTabs.getState().activeId).toBe('home')
+  })
+
+  // 终审发现：⌘W 此前只写了 `tab.kind === 'term' && tab.activePaneId` 这一条分支。
+  // 总览标签（Task 8）没有窗格，于是 ⌘W 在它上面**静默什么都不做**——而 TabBar 上的
+  // × 按钮对同一个标签是照常关闭的。同一件事的两个入口给出不同结果，这条测试钉住
+  // 它们必须一致。
+  it('总览标签：没有窗格，⌘W 关闭整个标签（与 × 按钮一致）', async () => {
+    const OV = { id: 'tab-ov', kind: 'overview' as const, title: '▦ demo·总览', panes: [], dirName: '-tmp-demo' }
+    useTabs.setState({ tabs: [HOME, OV], activeId: 'tab-ov' })
+    await renderApp()
+
+    await cmdW()
+
+    await waitFor(() => {
+      expect(useTabs.getState().tabs.find((t) => t.id === 'tab-ov')).toBeUndefined()
+    })
+    expect(useTabs.getState().activeId).toBe('home')
+  })
+
+  // 反向钉住另一半：主页标签恒不可关闭，⌘W 落在它身上必须仍然是空操作——上面那条
+  // 修复用的条件是 `kind !== 'home'`，如果哪天被放宽成"不是 term 就关掉"，主页就会
+  // 被 ⌘W 关掉，标签栏会直接失去它。
+  it('主页标签：⌘W 仍然是空操作', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'home' })
+    await renderApp()
+
+    await cmdW()
+
+    await act(async () => { await Promise.resolve() })
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
   })
 })

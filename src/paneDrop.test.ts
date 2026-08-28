@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { dropIndicatorRect, dropInsertionIndex, pointInRect, resolveDropTarget, resolveTabBarInsertIndex, type PaneSlotRect } from './paneDrop'
+import {
+  dropIndicatorPreviewRect,
+  dropIndicatorRect,
+  dropInsertionIndex,
+  pointInRect,
+  resolveDropMode,
+  resolveDropTarget,
+  resolveTabBarInsertIndex,
+  type PaneSlotRect,
+} from './paneDrop'
 
 // 三个并排窗格，各 300px 宽、100px 高，贴着 y=[0,100)（与真实横向分屏布局一致）。
 const THREE: PaneSlotRect[] = [
@@ -83,6 +92,33 @@ describe('pointInRect：光标是否落在某个矩形内（左闭右开、上�
   })
   it('矩形外部不命中', () => {
     expect(pointInRect(0, 0, rect)).toBe(false)
+  })
+})
+
+// 落点语义判定（本次修复 Fix 1）：目标窗格没有 ptyId（⌘D 新建后还没选定会话、正在
+// 渲染 PanePicker 的空槽）时，拖放应该"填充"这个槽位而不是在旁边"插入"新窗格。
+describe('resolveDropMode：目标窗格是否为空槽决定落点语义', () => {
+  it('目标窗格没有 ptyId：fill', () => {
+    expect(resolveDropMode({ ptyId: undefined })).toBe('fill')
+    expect(resolveDropMode({})).toBe('fill')
+  })
+  it('目标窗格已有 ptyId：insert（既有行为）', () => {
+    expect(resolveDropMode({ ptyId: 'pty-1' })).toBe('insert')
+  })
+  it('目标窗格不存在（理论上不应发生）：退化为 insert，不当成空槽处理', () => {
+    expect(resolveDropMode(undefined)).toBe('insert')
+  })
+})
+
+describe('dropIndicatorPreviewRect：落点指示条按落点语义选择覆盖范围', () => {
+  const rect = { top: 0, left: 100, width: 200, height: 50 }
+  it('fill：覆盖整个窗格，不切半，与 side 无关', () => {
+    expect(dropIndicatorPreviewRect(rect, 'fill', 'left')).toEqual(rect)
+    expect(dropIndicatorPreviewRect(rect, 'fill', 'right')).toEqual(rect)
+  })
+  it('insert：与既有 dropIndicatorRect 一致，按 side 切半', () => {
+    expect(dropIndicatorPreviewRect(rect, 'insert', 'left')).toEqual(dropIndicatorRect(rect, 'left'))
+    expect(dropIndicatorPreviewRect(rect, 'insert', 'right')).toEqual(dropIndicatorRect(rect, 'right'))
   })
 })
 

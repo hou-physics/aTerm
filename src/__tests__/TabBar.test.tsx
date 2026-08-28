@@ -7,12 +7,36 @@ vi.mock('../ipc', () => ({
   ptyKill: vi.fn(async () => {}),
   listProjects: vi.fn(async () => []),
   readConversation: vi.fn(),
+  // 下面「总览标签可以在标签栏里排序」那组测试会让 App 渲染出一个 overview 标签，
+  // App.tsx 因此挂载 OverviewPage，后者会异步补 sub-agent 徽章。给一个永不 resolve 的
+  // promise：本文件不关心徽章，也不希望它在断言体跑完之后才落地的 setState 冒出 act 警告。
+  countSubagents: vi.fn(() => new Promise<number>(() => {})),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
+// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。Task 10
+// 起 App.tsx 新挂了 StatusBar，它直接读 useStatusStore/threadStatusKey（不经
+// useThreadStatus/useProjectStatus 这两个既有 selector），这里一并补最小静态桩，否则
+// 渲染 <App/> 会在 StatusBar 内部因缺失导出而抛错。
+vi.mock('../store/status', () => ({
+  statusEventsReady: Promise.resolve(),
+  useThreadStatus: () => undefined,
+  useProjectStatus: () => 'unknown' as const,
+  useStatusStore: (selector: (s: { statuses: Map<string, unknown> }) => unknown) => selector({ statuses: new Map() }),
+  threadStatusKey: (dirName: string, rootKey: string) => `${dirName}::${rootKey}`,
+}))
+// 与上面 store/status 同一理由：这批测试不关心 hooks 安装状态，整个模块换成不触碰真实
+// ipc 调用的空实现（真实行为由 HooksInstall.test.tsx / hooksInstall.test.ts 单独覆盖）。
+vi.mock('../store/hooksInstall', () => ({
+  hooksInstallReady: Promise.resolve(),
+  hooksPhase: () => null,
+  useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
+}))
 vi.mock('../closeRequest', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 
 import App from '../App'
+import { attachDragSafetyNet } from '../dragSafetyNet'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
@@ -22,11 +46,13 @@ import { useTabs } from '../store/tabs'
 const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
 const TAB_A = { id: 'tab-a', kind: 'term' as const, title: 'A', panes: [{ id: 'pane-a', ptyId: 'pty-a', title: 'A' }], activePaneId: 'pane-a' }
 const TAB_B = { id: 'tab-b', kind: 'term' as const, title: 'B', panes: [{ id: 'pane-b', ptyId: 'pty-b', title: 'B' }], activePaneId: 'pane-b' }
+// 总览标签（Task 8 的第三种 kind）：没有窗格，但排在可滚动的标签列表里，可关闭、可排序。
+const OVERVIEW_TAB = { id: 'tab-ov', kind: 'overview' as const, title: '总览页', panes: [], dirName: '-tmp-demo' }
 
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
   useHint.setState({ message: null })
-  useDnd.setState({ target: null, tabBarIndex: null })
+  useDnd.setState({ target: null, dropMode: null, refusal: null, tabBarIndex: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
   document.body.classList.remove('dragging-no-select')
   document.body.classList.remove('dragging-grab')
@@ -311,6 +337,46 @@ describe('TabBar — 标签右键菜单（拆分为独立标签 / 关闭标签�
   })
 })
 
+// 本次修复的排查记录（见 .superpowers/context-menu-portal-report.md）：PaneTitleBar
+// 那一份菜单曾经嵌在拖拽手柄的 DOM 子树里、点不动菜单项（见 PaneDetach.test.tsx 同名
+// 描述块）。这里的排查结论是这处标签栏菜单当时结构上不受影响——渲染在 `.tabbar` 下、
+// 与各 `.tab`（真正的拖拽手柄）是兄弟节点，不是嵌套关系，因此点击一直是好的。菜单
+// portal 到 document.body 之后这个结论继续成立，这里补两条断言把它钉住，并顺带验证
+// TabBar.tsx 新加的 `.context-menu` 早退 guard（纵深防御，即使将来这处嵌套关系被
+// 改坏也能兜住同一类问题）。
+describe('TabBar — 标签右键菜单不是标签拖拽手柄的 DOM 后代（防御性回归，见 context-menu-portal-report）', () => {
+  it('菜单节点 portal 到 document.body，不是任何 .tab 元素的 DOM 后代', async () => {
+    const MULTI = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }], activePaneId: 'p1' }
+    useTabs.setState({ tabs: [HOME, MULTI], activeId: 'tab-a' })
+    await renderApp()
+    const tab = tabEl('2 个对话')
+
+    await act(async () => { fireEvent.contextMenu(tab, { clientX: 50, clientY: 10 }) })
+
+    const menu = document.querySelector('.context-menu') as HTMLElement
+    expect(menu).toBeTruthy()
+    expect(tab.contains(menu)).toBe(false)
+    expect(menu.parentElement).toBe(document.body)
+  })
+
+  it('在菜单项上按下不会触发标签拖拽手柄自己的 pointerdown 逻辑', async () => {
+    const MULTI = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }], activePaneId: 'p1' }
+    useTabs.setState({ tabs: [HOME, MULTI], activeId: 'tab-a' })
+    await renderApp()
+
+    await act(async () => { fireEvent.contextMenu(tabEl('2 个对话'), { clientX: 50, clientY: 10 }) })
+    const menuItem = screen.getByText('拆分为独立标签')
+
+    await act(async () => { fireEvent.pointerDown(menuItem, { clientX: 50, clientY: 10, pointerId: 7 }) })
+
+    // 与 PaneDetach.test.tsx 同名用例同一理由：标签拖拽手柄自己的 pointerdown 一旦
+    // 被触发就会无条件 blockSelect()，这里不该出现。
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+
+    await act(async () => { fireEvent.pointerUp(menuItem, { clientX: 50, clientY: 10, pointerId: 7 }) })
+  })
+})
+
 // 标签拖拽排序（设计文档新增）：与"拖已打开的标签进窗格区"是同一次拖拽手势的两个
 // 落点分支——光标在标签栏上走排序，在窗格区走既有的合并——见 TabBar.tsx 的
 // onTabPointerMove/onTabPointerUp。这里只测标签栏这一处接线；纯数组数学
@@ -369,6 +435,84 @@ describe('TabBar — 标签页拖拽排序（光标在标签栏上时，同一�
     })
 
     expect(useTabs.getState().tabs).toBe(before) // 连数组引用都没变
+  })
+
+  // 终审发现：onTabPointerMove 起手那条守卫此前写的是 `dragTab.kind !== 'term'`，把
+  // 总览标签（Task 8 新增的第三种 kind）连同主页一起判成"无效拖拽源"。但两者的处境
+  // 完全不同：主页恒钉在 .tabbar-pinned 里、设计要求它不可移动，而总览标签就排在可
+  // 滚动的标签列表里，reorderTab（tabs.ts）也只认下标、不认 kind——拖它本该能排序，
+  // 实际却什么都不发生，而且没有任何反馈。守卫改成 `kind === 'home'` 之后，两条落点
+  // 分支各自把关，下面两条测试分别钉住这两半。
+  it('总览标签可以在标签栏里排序（它不是主页，没有理由被整个手势拒绝）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, OVERVIEW_TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },   // 中点 25
+      'tab:tab-a': { left: 50, width: 100 },  // 中点 100
+      'tab:tab-ov': { left: 150, width: 100 }, // 中点 200
+    })
+    const ov = tabEl('总览页')
+
+    await act(async () => {
+      fireEvent.pointerDown(ov, { clientX: 200, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(ov, { clientX: 60, clientY: 10, pointerId: 1 }) // 落在 A 之前
+    })
+    // 与 term 标签同样的反馈：插入指示条 + 跟随光标的 ghost。旧实现两者都不会出现。
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeTruthy()
+    expect(useDragGhost.getState().visible).toBe(true)
+    expect(useDnd.getState().target).toBeNull() // 但绝不是"合并"落点
+
+    await act(async () => {
+      fireEvent.pointerUp(ov, { clientX: 60, clientY: 10, pointerId: 1 })
+    })
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-ov', 'tab-a'])
+  })
+
+  it('总览标签拖进窗格区：不产生合并落点，窗格与顺序都不变（ghost 仍跟手）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, OVERVIEW_TAB], activeId: 'tab-a' })
+    await renderApp()
+    // 标签栏矩形与窗格矩形一起伪造（两份 mock 都 spy 同一个 prototype 方法，只能合成
+    // 一份）：光标必须真的落进某个窗格的矩形里，"没有产生合并落点"才是实现主动拒绝
+    // 的结果，而不是几何上压根没命中任何窗格。
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      let r = { left: 0, top: 0, width: 0, height: 0 }
+      const tabId = this.getAttribute('data-tab-id')
+      if (this.classList.contains('tabbar')) r = { left: 0, top: 0, width: 800, height: 30 }
+      else if (tabId === 'home') r = { left: 0, top: 0, width: 50, height: 26 }
+      else if (tabId === 'tab-a') r = { left: 50, top: 0, width: 100, height: 26 }
+      else if (tabId === 'tab-ov') r = { left: 150, top: 0, width: 100, height: 26 }
+      else if (this.hasAttribute('data-pane-id')) r = { left: 0, top: 100, width: 800, height: 400 }
+      return {
+        ...r, right: r.left + r.width, bottom: r.top + r.height, x: r.left, y: r.top,
+        toJSON() { return {} },
+      } as DOMRect
+    })
+    const ov = tabEl('总览页')
+    const before = useTabs.getState().tabs
+
+    await act(async () => {
+      fireEvent.pointerDown(ov, { clientX: 200, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(ov, { clientX: 240, clientY: 10, pointerId: 1 })  // 先在标签栏上：ghost 起来
+      fireEvent.pointerMove(ov, { clientX: 400, clientY: 300, pointerId: 1 }) // 再移进窗格矩形正中
+    })
+
+    expect(useDnd.getState().target).toBeNull()      // 没有合并落点
+    expect(useDnd.getState().dropMode).toBeNull()
+    expect(document.querySelector('.pane-drop-indicator')).toBeNull()
+    // ghost 已经在标签栏上起来了，进窗格区后必须继续跟手——冻在原地看着像卡死。
+    // dragGhost.move() 是 rAF 节流的（见 store/dragGhost.ts），所以先放一帧再断言。
+    expect(useDragGhost.getState().visible).toBe(true)
+    await act(async () => { await new Promise<void>((r) => { requestAnimationFrame(() => r()) }) })
+    expect(useDragGhost.getState().x).toBe(400)
+
+    await act(async () => {
+      fireEvent.pointerUp(ov, { clientX: 400, clientY: 300, pointerId: 1 })
+    })
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1) // 没被塞进窗格
+    expect(useTabs.getState().tabs).toBe(before) // 顺序也没变（连数组引用都没换）
   })
 
   it('其它标签不能被拖到主页标签前面：插入下标被钳在 1', async () => {
@@ -698,7 +842,7 @@ describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失
 
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve() // 兜底的 endDrag() 被 queueMicrotask 推迟，见 dragSafetyNet.ts 顶部注释
+      await new Promise((r) => setTimeout(r, 0)) // 兜底的 endDrag() 被 setTimeout(fn, 0) 宏任务推迟，见 dragSafetyNet.ts 顶部注释
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
@@ -725,7 +869,7 @@ describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失
 
     await act(async () => {
       window.dispatchEvent(new Event('blur'))
-      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：setTimeout(fn, 0) 宏任务推迟，不是微任务
     })
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
@@ -748,19 +892,80 @@ describe('TabBar — 窗口级兜底：被拖元素在拖拽中途从 DOM 消失
       fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 正常路径收尾，走 endDrag()
     })
 
+    // pointerup/pointercancel 依旧走捕获阶段——这两处没有改动（见 dragSafetyNet.ts）。
     const removedCaptureTypes = removeSpy.mock.calls
       .filter(([, , opts]) => typeof opts === 'object' && opts !== null && opts.capture === true)
       .map(([type]) => type)
-    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel', 'blur']))
+    expect(removedCaptureTypes).toEqual(expect.arrayContaining(['pointerup', 'pointercancel']))
+    // blur 改成非捕获阶段监听（见 dragSafetyNet.ts 顶部注释：捕获阶段对不冒泡的事件
+    // 同样会看到文档树里任意元素的失焦，只有非捕获阶段的 window 监听器才只在 window
+    // 自己是事件目标时才会被命中）——因此这里摘除时不带 capture:true，单独断言一次。
+    const blurRemovedWithoutCapture = removeSpy.mock.calls.some(
+      ([type, , opts]) => type === 'blur' && !(typeof opts === 'object' && opts !== null && opts.capture === true),
+    )
+    expect(blurRemovedWithoutCapture).toBe(true)
 
     // 监听器确实摘掉了：清理之后再有一次原生 pointerup 落在 window 上，不会再产生任何
     // 可观察效果（body class 早已是干净状态，不会被重新弄脏，也不会误触发任何动作）。
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve()
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：setTimeout(fn, 0) 宏任务推迟，不是微任务
     })
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+})
+
+// 上一轮回归（本轮修复，见 .superpowers/drag-blur-fix-report.md）：dragSafetyNet.ts 的
+// blur 兜底曾经用 capture:true 挂在 window 上。捕获阶段对不冒泡的事件同样会先经过
+// window——这意味着文档树里任意元素的 blur（不只是窗口整体失焦）都会被这张网误判成
+// "应当中止拖拽"。pointerdown 上一轮移除了 preventDefault()（见 onTabPointerDown
+// 注释）之后，焦点会正常从此前聚焦的元素（例如 xterm 的隐藏 textarea）移开，产生一次
+// 元素级 blur——这张网在 pointerdown 刚挂上、第一次 pointermove 还没发生之前就先把
+// dragRef 清空了，导致 onTabPointerMove 读到 null 直接 return，拖拽从未真正开始。
+// 三处拖拽源（TabBar/Sidebar/TabPanes）共用同一张网，症状是"所有拖拽都失效"。
+describe('TabBar — 回归：pointerdown 之后任意元素失焦不应中止正在进行的拖拽', () => {
+  it('pointerdown → 文档内某元素 blur（不是 window 失焦）→ pointermove 越过阈值：拖拽仍正常开始并能完成排序', async () => {
+    const TAB_C = { id: 'tab-c', kind: 'term' as const, title: 'C', panes: [{ id: 'pane-c', ptyId: 'pty-c', title: 'C' }], activePaneId: 'pane-c' }
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B, TAB_C], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },
+      'tab:tab-a': { left: 50, width: 100 },
+      'tab:tab-b': { left: 150, width: 100 },
+      'tab:tab-c': { left: 250, width: 100 }, // 中点 300
+    })
+    const c = tabEl('C')
+
+    // 模拟真实场景里 xterm 的隐藏 textarea：pointerdown 之后浏览器把焦点从它上面移开，
+    // 触发一次纯粹的元素级 blur（不冒泡，target 是这个元素，不是 window）。
+    const fakeXtermTextarea = document.createElement('textarea')
+    document.body.appendChild(fakeXtermTextarea)
+    fakeXtermTextarea.focus()
+
+    await act(async () => {
+      fireEvent.pointerDown(c, { clientX: 300, clientY: 10, pointerId: 1 })
+    })
+    await act(async () => {
+      fakeXtermTextarea.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false }))
+      await new Promise((r) => setTimeout(r, 0)) // 安全网内部用 setTimeout(fn, 0) 宏任务延后判断，见 dragSafetyNet.ts
+    })
+    await act(async () => {
+      fireEvent.pointerMove(c, { clientX: 150, clientY: 10, pointerId: 1 }) // 跨过 4px 阈值
+    })
+
+    // 用户可见症状的直接反证：如果安全网被元素 blur 误触发，dragRef 已经被清空，
+    // onTabPointerMove 开头 `if (!drag) return` 会让指示线永远不出现。
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.pointerUp(c, { clientX: 150, clientY: 10, pointerId: 1 })
+    })
+
+    // 断言真实 store 状态（不是 mock 调用记录）：排序确实落地了。
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-c', 'tab-b'])
+    document.body.removeChild(fakeXtermTextarea)
   })
 })
 
@@ -813,5 +1018,428 @@ describe('TabBar — 拖放创建窗格也按修正后的可用宽度判定，�
 
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeUndefined() // 合并成功
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(2)
+  })
+})
+
+// 拖到空槽窗格（本次修复的主要设计间隙）：目标窗格没有 ptyId（⌘D 新建后还没选定
+// 会话，正在渲染 PanePicker）时，拖放应该"填充"取代它的位置而不是像既有行为那样
+// 在旁边"插入"——插入会让总窗格数意外增加，撞上 320px 最小宽度的上限而被拒绝，这
+// 正是诊断（a10a46f）暴露出的问题本身。
+describe('TabBar — 拖已打开的标签落在空槽窗格上：填充而不是插入', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('落在空槽窗格上：整个标签取代空槽的位置，窗格总数不变，pane id/ptyId 原样不变', async () => {
+    const EMPTY_A = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, EMPTY_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await drag(b, { x: 500, y: 10 }, { x: 450, y: 50 }) // 落在 a2（空槽）矩形 [300,700) 内
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(2) // 数量不变——不是 movePanesToTab 会给出的 3
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'pane-b']) // a2 被取代掉，位置不变
+    const moved = t.panes.find((p) => p.id === 'pane-b')!
+    expect(moved.ptyId).toBe('pty-b') // ptyId 原样不变，不是重新 spawn 的
+    expect(t.activePaneId).toBe('pane-b')
+    expect(useTabs.getState().tabs.find((x) => x.id === 'tab-b')).toBeUndefined() // 源标签整体移除
+  })
+
+  it('同一目标标签内：落在实体窗格上仍是插入（数量+1），落在空槽窗格上则是填充（数量不变）', async () => {
+    const MIXED = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, MIXED, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    // 落在 a1（有 ptyId）的右半侧（中点 150）
+    await drag(b, { x: 500, y: 10 }, { x: 250, y: 50 })
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(3) // 插入，数量真的增加了
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'pane-b', 'a2'])
+  })
+
+  it('宽度只够当前数量、不够 +1：填充仍然成功（按结果数判断，不误判成插入而拒绝）', async () => {
+    // 复现诊断记录的场景（.superpowers/pane-fill-report.md）：目标标签已有 2 个窗格
+    // （其一是空槽），原始测量值 700px 够 2 个窗格（usable=675>=640）但不够 3 个
+    // （usable=664<960）——填充按"结果数=2（不变）"判断应该装得下；若被误当成
+    // "插入"（当成 2+1=3）就会被错误拒绝，这正是本次要修的间隙。
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 700 })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    const EMPTY_A = {
+      id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+      panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+      activePaneId: 'a1',
+    }
+    useTabs.setState({ tabs: [HOME, EMPTY_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await drag(b, { x: 500, y: 10 }, { x: 450, y: 50 }) // 落在 a2（空槽）
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes).toHaveLength(2) // 成功填充，不是被拒绝后原样保留的 2
+    expect(t.panes.map((p) => p.id)).toEqual(['a1', 'pane-b'])
+    expect(useTabs.getState().tabs.find((x) => x.id === 'tab-b')).toBeUndefined()
+  })
+})
+
+// 落点指示条按语义切换覆盖范围（Fix 2）：'fill' 覆盖整个窗格，'insert' 沿用既有的
+// 半侧覆盖——container（.content）在 jsdom 里矩形恒为 0，因此指示条的内联 top/left
+// 直接等于目标窗格矩形本身（未经任何偏移），据此断言 width 是否是"整窗格"还是"半
+// 窗格"最直接。
+describe('TabBar — 落点指示条按语义切换覆盖范围（整窗格 / 半窗格）', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  const EMPTY_A = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', title: '新窗格' }],
+    activePaneId: 'a1',
+  }
+
+  it('悬停空槽窗格：指示条覆盖整个窗格宽度（不是切半后的一半）', async () => {
+    useTabs.setState({ tabs: [HOME, EMPTY_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 450, clientY: 50, pointerId: 1 }) // 落在 a2 内
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator).toBeTruthy()
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(false)
+    expect(indicator.style.width).toBe('400px') // a2 的整个宽度
+    expect(indicator.style.left).toBe('300px')
+  })
+
+  it('悬停已有 ptyId 的窗格：指示条只覆盖半个窗格宽度', async () => {
+    useTabs.setState({ tabs: [HOME, EMPTY_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 250, clientY: 50, pointerId: 1 }) // 落在 a1 右半侧（中点 150）
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator).toBeTruthy()
+    expect(indicator.style.width).toBe('150px') // a1 宽度 300 的一半
+    expect(indicator.style.left).toBe('150px')
+  })
+})
+
+// 拖拽过程中实时预览"松手会不会被拒绝"（Fix 3）：此前只有松手后一闪而过 2.2s 的
+// 轻提示，用户反馈"完全没看到就消失了，以为功能坏了"。现在应该在悬停期间就能看出
+// 拒绝状态，且理由持续显示直到光标移开或松手。
+describe('TabBar — 会被拒绝的落点：拖拽过程中即可见，持续显示具体理由（Fix 3）', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('宽度不够：指示条带 refused 样式，理由携带具体差额（与 paneFitShortfall 对应），松手后仍不做任何事', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    useLayout.setState({ panelCollapsed: true, panelWidth: 0 })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 640 })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 640, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 630, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 500, clientY: 50, pointerId: 1 }) // pane-a 右半侧
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator).toBeTruthy()
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(true)
+    expect(document.querySelector('.pane-drop-reason')?.textContent).toBe('窗口太窄，还差 25px')
+
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 500, clientY: 50, pointerId: 1 })
+    })
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy() // 没有被合并
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1)
+    expect(screen.getByText('窗口太窄，放不下新窗格')).toBeTruthy() // 松手后仍有既有的一次性轻提示复盘
+  })
+
+  it('数量超过上限：指示条带 refused 样式，理由是固定文案「最多支持 3 个窗格」', async () => {
+    const TWO_A = { id: 'tab-a', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'a1', ptyId: 'p-a1', title: 'A1' }, { id: 'a2', ptyId: 'p-a2', title: 'A2' }], activePaneId: 'a1' }
+    const TWO_B = { id: 'tab-b', kind: 'term' as const, title: '2 个对话', panes: [{ id: 'b1', ptyId: 'p-b1', title: 'B1' }, { id: 'b2', ptyId: 'p-b2', title: 'B2' }], activePaneId: 'b1' }
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+    useTabs.setState({ tabs: [HOME, TWO_A, TWO_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ a1: { left: 0, width: 300, height: 100 }, a2: { left: 300, width: 300, height: 100 } })
+    const b = screen.getAllByText('2 个对话')[1].closest('.tab') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 900, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 100, clientY: 50, pointerId: 1 })
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(true)
+    expect(document.querySelector('.pane-drop-reason')?.textContent).toBe('最多支持 3 个窗格')
+  })
+
+  it('会成功的落点：不带 refused 样式，也没有理由文案（与拒绝态视觉上不含糊）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(false)
+    expect(document.querySelector('.pane-drop-reason')).toBeNull()
+  })
+})
+
+// 回归测试（Fix 1）：dragSafetyNet.ts 曾经用 queueMicrotask 推迟 endDrag()，理由写的是
+// "推迟到本次事件的捕获+目标+冒泡三个阶段全部跑完之后"——这个假设是错的：HTML 规范要求
+// "每个监听器回调一返回、只要 JS 调用栈已清空，就做一次 microtask checkpoint"，不是
+// "整个派发结束后才做一次"。安全网的 pointerup 监听器挂在 window 上、capture:true，是
+// 捕获阶段最先跑的监听器之一，它一返回，checkpoint 立刻发生——排在 queueMicrotask 里的
+// endDrag() 就在这个 checkpoint 里被调用，此时事件根本还没走到目标/冒泡阶段，组件自己
+// 冒泡阶段的 onTabPointerUp 完全没机会先跑，导致这张"安全网"在每一次正常收尾的拖拽上
+// 都抢先把 dragRef 清空，把合法的 drop 悄悄变成空操作。
+//
+// 这里不能直接用 `fireEvent.pointerUp(标签元素, ...)` 一次性触发（jsdom 的 dispatchEvent
+// 实现不会在捕获阶段监听器返回后插入一次真实的 microtask checkpoint 再继续派发——这正是
+// 这条回归当初能骗过整套已有测试套件的原因，见任务记录）。改为手动拆成两步，用一次
+// `window.dispatchEvent` 只让安全网自己的 window 级监听器单独处理这次 pointerup（此时
+// 事件的目标是 window 本身，不会传导到标签元素，组件自己的处理器完全不会被牵扯进来），
+// 中间插入一次"只 flush 微任务、不 flush 宏任务"的 await（`await Promise.resolve()`），
+// 然后才真正触发标签元素自己的 pointerup（组件冒泡阶段的处理器）——这精确还原了真实
+// 浏览器里"捕获阶段监听器返回 → 立即一次 microtask checkpoint → 之后才轮到目标/冒泡
+// 阶段"的时序，不依赖 jsdom 对 dispatchEvent 内部具体怎么串联捕获/冒泡与微任务队列。
+describe('TabBar — 回归（Fix 1）：安全网的 pointerup 触发不应抢在组件自身的冒泡处理器之前结束拖拽', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('安全网先一步收到 pointerup 并判定 isDragActive=true，随后组件自己的 onTabPointerUp 才跑：drop 仍然正常完成（断言真实 store 状态，不是某个 mock 被调用过）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 落在 pane-a 右半侧
+    })
+    expect(useDnd.getState().target).not.toBeNull()
+
+    // 第一步：只让安全网的 window 级监听器单独处理这次 pointerup，中间只 flush 微任务
+    // ——旧的 queueMicrotask 写法会在这一步就抢跑，同步把 dragRef 清空。
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+      await Promise.resolve()
+    })
+
+    // 第二步：组件自己冒泡阶段的处理器现在才跑——修复前，上一步已经把 dragRef 清空，
+    // 这里会因为 `!drag || !drag.dragging` 直接 early-return，drop 根本不会发生。
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    // flush 一次宏任务：即便安全网还留有尚未触发的 setTimeout（例如上一步已经通过组件
+    // 自己的 endDrag() 摘掉了监听器/取消了计时器），这里确保不会有任何迟到的副作用。
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // 断言真实 store 状态——drop 应当照常完成，与「拖已打开的标签进窗格区」那组用例
+    // 里"落在右半侧"的断言完全一致。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeUndefined()
+    const t = useTabs.getState().tabs.find((t) => t.id === 'tab-a')!
+    expect(t.panes.map((p) => p.id)).toEqual(['pane-a', 'pane-b'])
+    expect(t.panes.find((p) => p.id === 'pane-b')!.ptyId).toBe('pty-b')
+  })
+
+  it('对照组：组件自己的处理器真的完全没跑时（元素在拖拽中途被移出 DOM），安全网仍然独立完成清理——证明这张网的本职功能没有被 Fix 1 破坏', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+    expect(document.body.classList.contains('dragging-no-select')).toBe(true)
+    expect(useDnd.getState().target).not.toBeNull()
+
+    // 被拖的标签节点直接从 DOM 里摘掉——不触发 lostpointercapture、也不触发
+    // pointerup/pointercancel（jsdom 不模拟隐式指针捕获释放），组件自己的
+    // onTabPointerUp 因此彻底没有机会执行。只剩窗口级安全网这一条路可以兜底。
+    b.remove()
+
+    // 只 dispatch window 级事件，绝不触碰组件自己的处理器。
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+      await new Promise((r) => setTimeout(r, 0)) // 见 dragSafetyNet.ts：现在是宏任务，不是微任务
+    })
+
+    expect(document.body.classList.contains('dragging-no-select')).toBe(false)
+    expect(document.body.classList.contains('dragging-grab')).toBe(false)
+    expect(useDnd.getState().target).toBeNull()
+    // 没有完成任何动作——安全网和 lostpointercapture 一样只清理，不识别落点、不下判断。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeTruthy()
+  })
+})
+
+// 回归测试（Fix 2）：dragSafetyNet.ts 的调用方（TabBar.tsx/Sidebar.tsx/TabPanes.tsx）
+// 挂新网前现在会先摘掉 netCleanupRef 里任何仍然挂着的旧网（见 onTabPointerDown 注释），
+// 正常情况下不该再有两张网同时存活。但"万一"这道防线失守（例如未来某次重构不小心漏掉了
+// 这一行），isDragActive() 本身也不能只看共享的 dragRef 是否非空——那样一张属于旧拖拽的
+// 网，只要有任何一次新的拖拽正在进行（dragRef 非空，但指向的是新拖拽），就会把自己误判成
+// "仍然存活"，从而有能力打断这次它根本不认识的新拖拽。这里直接在 dragSafetyNet.ts 的层面
+// 单元测试这条"第二道保险"：isDragActive 必须比较 drag id，不能只判断非空——这正是三处
+// 调用方现在构造 isDragActive 闭包的真实写法（`dragRef.current !== null && dragRef.current.id === dragId`），
+// 不是假设性的写法。
+describe('dragSafetyNet — 回归（Fix 2）：一张属于旧拖拽的网不能结束一次新的拖拽', () => {
+  it('两张网都挂着（模拟旧网泄漏未被摘除）：旧网收到匹配自己 pointerId 的事件时，不会打断新网所属的、仍在进行中的拖拽；新网自己随后正常收尾时机也不受影响', async () => {
+    // 与三处真实调用方完全相同的写法：一个共享的、可变的"当前拖拽"引用 + 每次开始
+    // 拖拽时分配的单调递增 id，isDragActive 同时比较"非空"与"id 相同"两个条件。
+    const dragRef: { current: { id: number } | null } = { current: null }
+    let nextId = 0
+    const endDragCalls: number[] = []
+
+    function startDrag(pointerId: number) {
+      const id = ++nextId
+      dragRef.current = { id }
+      const cleanup = attachDragSafetyNet(
+        pointerId,
+        () => dragRef.current !== null && dragRef.current.id === id,
+        () => {
+          endDragCalls.push(id)
+          dragRef.current = null
+        },
+      )
+      return { id, cleanup }
+    }
+
+    // "旧拖拽"：pointerId=1，网挂上之后没有被正常摘除（模拟泄漏）。
+    const stale = startDrag(1)
+    // "新拖拽"：pointerId=2，覆盖了共享的 dragRef——此刻 dragRef.current.id 是新拖拽的 id。
+    const fresh = startDrag(2)
+    expect(dragRef.current?.id).toBe(fresh.id)
+
+    // 一次匹配旧拖拽 pointerId 的 pointerup（例如某个滞后到达的、与旧拖拽相关的事件）
+    // 落在 window 上——只有旧网会响应（pointerId 过滤），新网不受影响。
+    window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
+    await new Promise((r) => setTimeout(r, 0))
+
+    // 新拖拽必须还活着：旧网的 isDragActive() 因为 id 不匹配而判定为 false，没有调用 endDrag()。
+    expect(dragRef.current).not.toBeNull()
+    expect(dragRef.current?.id).toBe(fresh.id)
+    expect(endDragCalls).toEqual([])
+
+    // 新拖拽随后正常收尾（自己的 pointerId=2），断言这次真正成功——不是"从未被打断"这种
+    // 消极断言，是"完整走完一次生命周期，自己的 endDrag 被调用了恰好一次"。
+    window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 2, bubbles: true, cancelable: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(dragRef.current).toBeNull()
+    expect(endDragCalls).toEqual([fresh.id])
+
+    stale.cleanup()
+    fresh.cleanup()
+  })
+})
+
+// 「＋」新建标签按钮移到标签栏最左侧（用户反馈：标签一多，原先排在最右端的按钮会被
+// 滚动条推出视野）。jsdom 不做真实布局/滚动，测不出"滚动到底也够不着"这类像素级
+// 回归本身（那属于 App.css 的 position: sticky，只能靠人工/真实浏览器验证），这里
+// 断言的是让那份 CSS 生效的前提：DOM 结构上「＋」必须和侧边栏折叠按钮、主页标签
+// 一起落在同一个 .tabbar-pinned 容器里，且顺序是"侧边栏按钮 → 主页标签 → ＋"，
+// 不再是原来"排在全部标签之后"的位置；行为/文案/⌘T 快捷键不变。
+describe('TabBar — 「＋」新建标签按钮固定在标签栏最左侧（紧邻主页标签，不被滚动挤出视野）', () => {
+  it('DOM 结构：侧边栏折叠按钮、主页标签、＋ 三者同属 .tabbar-pinned，且在这个顺序下相邻', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+
+    const pinned = document.querySelector('.tabbar-pinned') as HTMLElement
+    expect(pinned).toBeTruthy()
+    const children = Array.from(pinned.children) as HTMLElement[]
+    expect(children.map((el) => el.className)).toEqual([
+      'sidebar-toggle',
+      expect.stringContaining('tab'), // 主页标签（含 active 时的额外 class）
+      'tab-new',
+    ])
+    expect(children[1].getAttribute('data-tab-id')).toBe('home')
+    expect(children[2].textContent).toBe('＋')
+  })
+
+  it('普通标签（非主页）不在 .tabbar-pinned 里，仍按原顺序排在它后面，可以被横向滚动', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+
+    const pinned = document.querySelector('.tabbar-pinned') as HTMLElement
+    expect(pinned.querySelector('[data-tab-id="tab-a"]')).toBeNull()
+    expect(pinned.querySelector('[data-tab-id="tab-b"]')).toBeNull()
+    const tabbar = document.querySelector('.tabbar') as HTMLElement
+    const topLevelOrder = Array.from(tabbar.children).map((el) => el.className)
+    expect(topLevelOrder[0]).toBe('tabbar-pinned')
+    // ＋ 已经不在 .tabbar 的直接子节点里单独出现（它现在是 .tabbar-pinned 内部的一员）
+    expect(topLevelOrder.some((c) => c === 'tab-new')).toBe(false)
+  })
+
+  it('点击「＋」的行为不变：新建一个空白终端标签并成为激活标签', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    const before = useTabs.getState().tabs.length
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('.tab-new') as HTMLElement)
+      await Promise.resolve()
+    })
+
+    expect(useTabs.getState().tabs.length).toBe(before + 1)
+    expect(useTabs.getState().activeId).not.toBe('tab-a')
+  })
+
+  it('标题/快捷键提示文案不变：仍是「新建终端标签 (⌘T)」', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+
+    expect((document.querySelector('.tab-new') as HTMLElement).title).toBe('新建终端标签 (⌘T)')
   })
 })

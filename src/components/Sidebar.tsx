@@ -2,19 +2,25 @@ import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent 
 import { resumeThread } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
-import { DRAG_THRESHOLD_PX, dropInsertionIndex, resolveDropTarget } from '../paneDrop'
+import { DRAG_THRESHOLD_PX, dropInsertionIndex, resolveDropMode, resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
-import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
+import { previewPaneDrop } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { useSessions } from '../store/sessions'
+import { useThreadStatus } from '../store/status'
 import { useTabs } from '../store/tabs'
 import { basename, formatRelative } from '../time'
+import { HooksControl } from './HooksInstall'
+import { StatusDot } from './StatusDot'
 import { ThemeSwitcher } from './ThemeSwitcher'
 
-type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
+// id：每次 pointerdown 分配的单调递增拖拽序号，见 onItemPointerDown 与
+// dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释——isDragActive() 靠它辨认
+// "自己是不是仍然对应当前这次拖拽"，不是只看 dragRef.current 是否非空。
+type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number; id: number }
 
 // 从侧边栏「最近会话」拖入（设计文档 §5-B 场景 B）：落点解析、上限/窄窗口降级判断、
 // 轻提示三处都复用与 TabBar.tsx 场景 A 完全相同的纯函数/store（paneDrop.ts、
@@ -38,6 +44,8 @@ export function Sidebar() {
   // 窗口级兜底监听器的卸载函数，见 dragSafetyNet.ts 顶部注释与 TabBar.tsx 同名字段
   // 的注释（不塞进 DragState，理由相同）。
   const netCleanupRef = useRef<(() => void) | null>(null)
+  // 每次 pointerdown 递增一次，赋给这次拖拽的 DragState.id——见 onItemPointerDown。
+  const nextDragIdRef = useRef(0)
 
   // 拖拽清理的唯一入口，与 TabBar.tsx 的 endDrag 同一理由——这里格外关键：「最近会话」
   // 列表在 window focus 时 refresh()，可能把正被拖拽的那一条会话挤出前 12 条，使其
@@ -55,6 +63,8 @@ export function Sidebar() {
     netCleanupRef.current = null
     dragRef.current = null
     useDnd.getState().setTarget(null)
+    useDnd.getState().setDropMode(null)
+    useDnd.getState().setRefusal(null)
     useDragGhost.getState().end()
   }, [])
 
@@ -68,15 +78,29 @@ export function Sidebar() {
   }, [endDrag])
 
   const onItemPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => {
+    // 纵深防御，与 TabPanes.tsx/TabBar.tsx 同一理由：这个组件目前没有右键菜单
+    // （「最近会话」条目不挂 onContextMenu），这条分支现在恒不命中；保留它是为了不让
+    // 三处拖拽源的这层防御出现"漏了一处"的不对称，也不给将来在这里加菜单的人埋雷
+    // （见 .superpowers/context-menu-portal-report.md）。
+    if ((e.target as HTMLElement).closest('.context-menu')) return
     // 屏蔽文本选择，只加 body class，不调用 e.preventDefault()——与 TabBar.tsx 的
     // onTabPointerDown 同一理由/同一时机（见 store/dragGhost.ts 的 blockSelect()
     // 注释）：真正的默认动作抑制挪到了下面 onItemPointerMove 里，只在跨过阈值后才
     // 调用，不影响随后仍会正常触发的合成 click，普通点击会话条目的行为不变。
     useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId }
-    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。
-    netCleanupRef.current = attachDragSafetyNet(e.pointerId, () => dragRef.current !== null, endDrag)
+    const dragId = ++nextDragIdRef.current
+    dragRef.current = { p, t, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId, id: dragId }
+    // 挂新网前先摘掉任何仍然挂着的旧网——见 TabBar.tsx onTabPointerDown 同名注释，
+    // 三处拖拽源同一套保险。
+    netCleanupRef.current?.()
+    // 窗口级兜底：见上方 endDrag 注释与 dragSafetyNet.ts。isDragActive 额外比较
+    // dragId，见上方 DragState.id 注释。
+    netCleanupRef.current = attachDragSafetyNet(
+      e.pointerId,
+      () => dragRef.current !== null && dragRef.current.id === dragId,
+      endDrag,
+    )
   }, [endDrag])
 
   const onItemPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -95,6 +119,8 @@ export function Sidebar() {
     // 落点恒为 null，指示条也不出现，这种情况下也不显示拖拽指示（没有地方可以放）。
     if (!activeTab || activeTab.kind !== 'term') {
       useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
       return
     }
     if (!drag.ghostStarted) {
@@ -103,7 +129,22 @@ export function Sidebar() {
     } else {
       useDragGhost.getState().move(e.clientX, e.clientY)
     }
-    useDnd.getState().setTarget(resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY))
+    const target = resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY)
+    useDnd.getState().setTarget(target)
+    // 实时预览这次拖放会不会被接受（Fix 3），与 TabBar.tsx 同一理由：与
+    // onItemPointerUp 真正执行时共用同一份 previewPaneDrop，指示与实际落点行为
+    // 永远一致。拖入永远是"新开一个窗格"，draggedCount 恒为 1。
+    if (!target) {
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
+      return
+    }
+    const targetPane = activeTab.panes.find((p) => p.id === target.paneId)
+    const mode = resolveDropMode(targetPane)
+    useDnd.getState().setDropMode(mode)
+    const layout = useLayout.getState()
+    const preview = previewPaneDrop(mode, activeTab.panes.length, 1, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    useDnd.getState().setRefusal(preview.refused ? { reason: preview.reason! } : null)
   }, [])
 
   const onItemPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -123,38 +164,44 @@ export function Sidebar() {
     const { tabs, activeId } = useTabs.getState()
     const activeTab = tabs.find((x) => x.id === activeId)
     if (!activeTab || activeTab.kind !== 'term') return
-    const nextCount = activeTab.panes.length + 1
-    if (nextCount > MAX_PANES) {
-      useHint.getState().show('最多支持 3 个窗格')
-      return
-    }
+    // 目标窗格没有 ptyId（空槽）：直接在原地用这条会话启动它——恰好就是它自己的
+    // PanePicker 会做的事（"exactly as if it had been chosen through the ⌘D
+    // picker"），不新建窗格；否则是既有的"插入新窗格"行为。与 onItemPointerMove 的
+    // 实时预览共用同一份 resolveDropMode/previewPaneDrop，判断保持一致。
+    const targetPane = activeTab.panes.find((p) => p.id === target.paneId)
+    const mode = resolveDropMode(targetPane)
     const layout = useLayout.getState()
-    // 与 TabBar.tsx 的合并落点同一处修复：getContentWidth() 的原始测量值先经
-    // usablePaneAreaWidth 换算成真正分给 nextCount 个窗格内容区的可用宽度，
-    // 再喂给 decidePaneFit——与 ⌘D（App.tsx）保持同一套判定，不会互相矛盾。
-    const decision = decidePaneFit(
-      nextCount,
-      usablePaneAreaWidth(getContentWidth(), nextCount),
-      layout.panelCollapsed,
-      layout.panelWidth,
-    )
-    if (decision === 'refuse') {
-      useHint.getState().show('窗口太窄，放不下新窗格')
+    // 与 TabBar.tsx 的合并落点同一处修复：getContentWidth() 的原始测量值由
+    // previewPaneDrop 内部按结果窗格数换算成真正可用宽度——与 ⌘D（App.tsx）保持
+    // 同一套判定，不会互相矛盾。
+    const preview = previewPaneDrop(mode, activeTab.panes.length, 1, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    if (preview.refused) {
+      useHint.getState().show(preview.refusalKind === 'max-panes' ? '最多支持 3 个窗格' : '窗口太窄，放不下新窗格')
       return
     }
-    if (decision === 'collapse-panel') layout.togglePanel()
-    const insertAt = dropInsertionIndex(activeTab.panes.map((x) => x.id), target)
-    const paneId = useTabs.getState().insertPaneAt(activeTab.id, insertAt)
-    if (!paneId) return // 上面已经校验过上限，这里只是防御性兜底，理论上不会命中
+    if (preview.decision === 'collapse-panel') layout.togglePanel()
     const { p, t } = drag
-    void useTabs.getState().startPaneTerminal(activeTab.id, paneId, {
+    const sessionArgs = {
       title: t.title,
       cwd: p.cwd,
       inject: `claude --resume ${t.resumeSessionId}`,
       threadKey: `${p.dirName}:${t.rootKey}`,
       dirName: p.dirName,
       rootKey: t.rootKey,
-    })
+    }
+    if (mode === 'fill' && targetPane) {
+      // startPaneTerminal 只补 ptyId/title 等字段，不touch activePaneId（PanePicker
+      // 自己调用它时那块窗格通常已经是焦点）——这里的落点未必是当前焦点窗格，显式
+      // 聚焦一次，与"插入"分支（insertPaneAt 内部已经把新窗格设为焦点）保持同一个
+      // "新内容进来的窗格立即成为焦点"的直觉。
+      useTabs.getState().focusPane(activeTab.id, targetPane.id)
+      void useTabs.getState().startPaneTerminal(activeTab.id, targetPane.id, sessionArgs)
+      return
+    }
+    const insertAt = dropInsertionIndex(activeTab.panes.map((x) => x.id), target)
+    const paneId = useTabs.getState().insertPaneAt(activeTab.id, insertAt)
+    if (!paneId) return // 上面已经校验过上限，这里只是防御性兜底，理论上不会命中
+    void useTabs.getState().startPaneTerminal(activeTab.id, paneId, sessionArgs)
   }, [endDrag])
 
   // 指针捕获被浏览器隐式释放时补发的退出路径——见上方 endDrag 注释描述的真实触发
@@ -177,23 +224,54 @@ export function Sidebar() {
       <div className="sidebar-list">
         <div className="section-label">最近会话</div>
         {recent.map(({ p, t }) => (
-          <div
+          <SidebarItem
             key={`${p.dirName}:${t.rootKey}`}
-            className="side-item"
-            title={t.title}
-            onPointerDown={(e) => onItemPointerDown(e, p, t)}
+            p={p}
+            t={t}
+            onPointerDown={onItemPointerDown}
             onPointerMove={onItemPointerMove}
             onPointerUp={onItemPointerUp}
-            onPointerCancel={onItemPointerUp}
             onLostPointerCapture={onItemLostPointerCapture}
-            onClick={() => onItemClick(p, t)}
-          >
-            {t.title}
-            <div className="sub">{basename(p.cwd)} · {formatRelative(t.lastActivityMs)}</div>
-          </div>
+            onClick={onItemClick}
+          />
         ))}
       </div>
+      <HooksControl />
       <ThemeSwitcher />
     </>
+  )
+}
+
+// 拆成独立组件只是为了让 useThreadStatus 能合法地按每条「最近会话」分别调用一次
+// （Rules of Hooks：不能在 Sidebar 自己的 .map() 循环体内调用 hook，见 HomePage.tsx
+// 里 ProjectCard/ThreadRow 同样的拆分理由）。拖拽/指针相关的所有状态与清理逻辑仍然
+// 全部留在 Sidebar 里，这里只透传回调，不复制任何一处判断。
+function SidebarItem({ p, t, onPointerDown, onPointerMove, onPointerUp, onLostPointerCapture, onClick }: {
+  p: ProjectInfo
+  t: ThreadInfo
+  onPointerDown: (e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => void
+  onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => void
+  onPointerUp: (e: ReactPointerEvent<HTMLDivElement>) => void
+  onLostPointerCapture: () => void
+  onClick: (p: ProjectInfo, t: ThreadInfo) => void
+}) {
+  const status = useThreadStatus(p.dirName, t.rootKey)
+  return (
+    <div
+      className="side-item"
+      title={t.title}
+      onPointerDown={(e) => onPointerDown(e, p, t)}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onLostPointerCapture={onLostPointerCapture}
+      onClick={() => onClick(p, t)}
+    >
+      <span className="side-item-row">
+        <StatusDot status={status} />
+        <span className="side-item-title">{t.title}</span>
+      </span>
+      <div className="sub">{basename(p.cwd)} · {formatRelative(t.lastActivityMs)}</div>
+    </div>
   )
 }

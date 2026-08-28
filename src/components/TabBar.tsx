@@ -9,9 +9,9 @@ import {
 } from 'react'
 import { newTerminal } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
-import { DRAG_THRESHOLD_PX, pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
+import { DRAG_THRESHOLD_PX, pointInRect, resolveDropMode, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
-import { decidePaneFit, MAX_PANES, usablePaneAreaWidth } from '../paneLayout'
+import { previewPaneDrop } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
@@ -19,7 +19,10 @@ import { useLayout } from '../store/layout'
 import { type Tab, useTabs } from '../store/tabs'
 import { ContextMenu } from './ContextMenu'
 
-type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number }
+// id：每次 pointerdown 分配的单调递增拖拽序号，见下方 nextDragIdRef 与 onTabPointerDown
+// 注释——dragSafetyNet.ts 的 isDragActive() 靠它辨认"自己是不是仍然对应当前这次拖拽"，
+// 不是只看 dragRef.current 是否非空。
+type DragState = { tabId: string; startX: number; startY: number; dragging: boolean; ghostStarted: boolean; pointerId: number; id: number }
 
 // 把窗格拖出成独立标签、松手时落在标签栏上（设计文档 §5-C，TabPanes.tsx 的
 // PaneTitleBar 是拖拽源）应插入的位置指示：一条竖线，与 DropIndicator.tsx 的
@@ -76,6 +79,9 @@ export function TabBar() {
   // （不塞进 DragState 里）：endDrag() 需要先调用它再清空 dragRef，顺序反过来的话
   // 兜底监听器里读 dragRef.current 的 isDragActive() 就会先一步看到 null。
   const netCleanupRef = useRef<(() => void) | null>(null)
+  // 每次 pointerdown 递增一次，赋给这次拖拽的 DragState.id——见 onTabPointerDown 与
+  // dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释。
+  const nextDragIdRef = useRef(0)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
 
   // 拖拽清理的唯一入口：pointerup/pointercancel（同一个 onTabPointerUp）、
@@ -94,6 +100,8 @@ export function TabBar() {
     netCleanupRef.current = null
     dragRef.current = null
     useDnd.getState().setTarget(null)
+    useDnd.getState().setDropMode(null)
+    useDnd.getState().setRefusal(null)
     useDnd.getState().setTabBarIndex(null)
     useDragGhost.getState().end()
   }, [])
@@ -110,6 +118,12 @@ export function TabBar() {
   const onTabPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, tabId: string) => {
     // 关闭按钮自己的点击语义（stopPropagation + closeTab）不参与拖拽判定，原样放行。
     if ((e.target as HTMLElement).closest('.tab-close')) return
+    // 纵深防御，与 TabPanes.tsx 的 PaneTitleBar 同一理由：标签右键菜单本身已经
+    // portal 到 document.body（见 ContextMenu.tsx），本就不是这个 `.tab` 元素的
+    // DOM 后代，这条分支目前不会被真的命中（本文件的菜单原本渲染在 `.tabbar` 下，
+    // 与各 `.tab` 是兄弟节点，不是嵌套关系——见 .superpowers/context-menu-portal-
+    // report.md 的排查记录）；保留它是防止将来这层关系改变时同一类问题重演。
+    if ((e.target as HTMLElement).closest('.context-menu')) return
     // 屏蔽文本选择（用户反馈"拖拽会顺带选中相邻文字"）：只加 body class，不调用
     // e.preventDefault()——上一轮在这里无条件 preventDefault 是回归的根源（见
     // store/dragGhost.ts 的 blockSelect() 注释）：真正的默认动作抑制挪到了下面
@@ -118,10 +132,22 @@ export function TabBar() {
     // 随后的原生 click 照常触发。
     useDragGhost.getState().blockSelect()
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId }
+    const dragId = ++nextDragIdRef.current
+    dragRef.current = { tabId, startX: e.clientX, startY: e.clientY, dragging: false, ghostStarted: false, pointerId: e.pointerId, id: dragId }
+    // 挂新网前先摘掉任何仍然挂着的旧网：正常情况下不该有残留（endDrag() 是唯一出口，
+    // 每次拖拽结束都会摘网），这里是防止极端时序下旧网泄漏、永远留在 window 上的
+    // 第二道保险。见 dragSafetyNet.ts 顶部注释。
+    netCleanupRef.current?.()
     // 窗口级兜底：见 dragSafetyNet.ts 顶部注释。在这里（拖拽开始的唯一入口）挂上，
     // 在 endDrag()（拖拽结束的唯一出口）里摘掉，二者是同一对，不会有挂了忘摘的情况。
-    netCleanupRef.current = attachDragSafetyNet(e.pointerId, () => dragRef.current !== null, endDrag)
+    // isDragActive 不只看 dragRef.current 是否非空，还要求它的 id 与这次拖拽自己的
+    // dragId 一致——万一上面这道"先摘旧网"的保险还是没能防住某张旧网存活下来，它也
+    // 不会把一次更新的拖拽（属于不同 dragId）误判成自己仍然存活，从而打断新拖拽。
+    netCleanupRef.current = attachDragSafetyNet(
+      e.pointerId,
+      () => dragRef.current !== null && dragRef.current.id === dragId,
+      endDrag,
+    )
   }, [endDrag])
 
   const onTabPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -140,8 +166,17 @@ export function TabBar() {
     // 主页标签既没有窗格可合并、自己也不可被拖动排序（设计要求恒排第一）——整个手势
     // 在这里就判定为无效目标，索性连落点都不解析、指示条/ghost 也不出现（"no visual
     // churn"），而不是等到 pointerup 才悄悄拒绝。
-    if (!dragTab || dragTab.kind !== 'term') {
+    //
+    // 这里问的必须是"是不是主页标签"，不能是"是不是 term 标签"：总览标签（Task 8 新增
+    // 的第三种 kind）没有窗格，但它和普通标签一样排在可滚动的标签列表里，reorderTab
+    // （tabs.ts）对它完全适用——它只认下标、不认 kind。此前这一行写成
+    // `kind !== 'term'`，整个手势在起步就被判无效，拖动总览标签什么都不会发生，也没有
+    // 任何反馈。两条落点分支现在分别把关：标签栏排序对总览开放（下面），拖进窗格区
+    // 合并仍然只对 term 开放（再下面）。
+    if (!dragTab || dragTab.kind === 'home') {
       useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
       useDnd.getState().setTabBarIndex(null)
       return
     }
@@ -154,8 +189,11 @@ export function TabBar() {
     const tabBarRect = getTabBarRect()
     if (tabBarRect && pointInRect(e.clientX, e.clientY, tabBarRect)) {
       const rawIndex = resolveTabBarInsertIndex(getTabRects(), e.clientX)
-      useDnd.getState().setTabBarIndex(Math.max(1, rawIndex)) // 不能插到主页标签前面
+      const clampedIndex = Math.max(1, rawIndex) // 不能插到主页标签前面
+      useDnd.getState().setTabBarIndex(clampedIndex)
       useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
       if (!drag.ghostStarted) {
         drag.ghostStarted = true
         useDragGhost.getState().start(dragTab.title, e.clientX, e.clientY)
@@ -165,11 +203,28 @@ export function TabBar() {
       return
     }
     useDnd.getState().setTabBarIndex(null)
-    // 光标落在窗格区：还原成既有的"合并进当前激活标签的窗格区"这条行为。拖的正是
-    // 当前激活标签本身时（"拖到自己标签的窗格区"）依旧是设计文档明确要求的空操作
-    // ——这条判定只在这个分支里生效，不影响上面标签栏排序那条分支。
+    // 光标落在窗格区：这条分支是"把拖拽源的窗格合并进当前激活标签"，只有 term 标签
+    // 有窗格可搬——总览标签在上面那条标签栏分支里是可以排序的，但拖到窗格区上没有
+    // 任何可落的语义（movePanesToTab/fillEmptyPane 对它都是空操作，见 tabs.ts 里
+    // 那两处 `sourceTab.kind !== 'term'` 的判定）。在这里清掉落点状态、不出 ghost、
+    // 不出指示条，与主页标签在整个手势上的"no visual churn"是同一种处理，只是范围
+    // 限于这一条分支。松手路径（onTabPointerUp）里既有的同一条判定继续兜底。
+    if (dragTab.kind !== 'term') {
+      useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
+      // 但 ghost 一旦已经在标签栏上起来了就得继续跟手（不是冻在原地——那看着像卡
+      // 死）。它只在拖拽源是总览标签、且用户从标签栏一路拖进窗格区时才会走到这里；
+      // 主页标签根本不会起 ghost，所以那条路径不受影响。
+      if (drag.ghostStarted) useDragGhost.getState().move(e.clientX, e.clientY)
+      return
+    }
+    // 拖的正是当前激活标签本身时（"拖到自己标签的窗格区"）依旧是设计文档明确要求的
+    // 空操作——这条判定只在这个分支里生效，不影响上面标签栏排序那条分支。
     if (dragTab.id === activeId) {
       useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
       return
     }
     if (!drag.ghostStarted) {
@@ -179,7 +234,23 @@ export function TabBar() {
       useDragGhost.getState().move(e.clientX, e.clientY)
     }
     const activeTab = tabs.find((t) => t.id === activeId)
-    useDnd.getState().setTarget(resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY))
+    const target = resolveDropTarget(getPaneSlotRects(activeTab), e.clientX, e.clientY)
+    useDnd.getState().setTarget(target)
+    // 实时预览这次拖放会不会被接受（Fix 3：不能等到 pointerup 才让用户知道）——按
+    // 落点语义（目标窗格是否是空槽，见 paneDrop.ts 的 resolveDropMode）算出真正的
+    // 结果窗格数，与 onTabPointerUp 真正执行时共用同一份 previewPaneDrop，保证"指示
+    // 说能放"与"松手确实能放"永远一致。
+    if (!target || !activeTab) {
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
+      return
+    }
+    const targetPane = activeTab.panes.find((p) => p.id === target.paneId)
+    const mode = resolveDropMode(targetPane)
+    useDnd.getState().setDropMode(mode)
+    const layout = useLayout.getState()
+    const preview = previewPaneDrop(mode, activeTab.panes.length, dragTab.panes.length, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    useDnd.getState().setRefusal(preview.refused ? { reason: preview.reason! } : null)
   }, [])
 
   const onTabPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
@@ -208,28 +279,29 @@ export function TabBar() {
     const sourceTab = tabs.find((t) => t.id === drag.tabId)
     const targetTab = tabs.find((t) => t.id === activeId)
     if (!sourceTab || sourceTab.kind !== 'term' || !targetTab || targetTab.kind !== 'term') return
-    const nextCount = targetTab.panes.length + sourceTab.panes.length
-    if (nextCount > MAX_PANES) {
-      useHint.getState().show('最多支持 3 个窗格')
-      return
-    }
+    // 目标窗格没有 ptyId（空槽，⌘D 新建后还没选定会话）：这次拖放是"填充"，取代它的
+    // 位置，结果窗格数不变；否则是既有的"插入"行为。与 onTabPointerMove 的实时预览
+    // 共用同一份 resolveDropMode/previewPaneDrop，保证判断一致（见那边的注释）。
+    const targetPane = targetTab.panes.find((p) => p.id === target.paneId)
+    const mode = resolveDropMode(targetPane)
     const layout = useLayout.getState()
-    // getContentWidth() 量出的是包含内边距/分隔条/窗格边框开销的原始宽度，与 ⌘D
-    // （App.tsx）同一份 usablePaneAreaWidth 换算成真正分给 nextCount 个窗格内容区的
-    // 可用宽度之后再喂给 decidePaneFit——否则这条拖放路径会比 ⌘D 更容易"误判装得下"
+    // getContentWidth() 量出的是包含内边距/分隔条/窗格边框开销的原始宽度，previewPaneDrop
+    // 内部按结果窗格数换算成真正可用宽度——否则这条拖放路径会比 ⌘D 更容易"误判装得下"
     // （见本次修复说明）。
-    const decision = decidePaneFit(
-      nextCount,
-      usablePaneAreaWidth(getContentWidth(), nextCount),
-      layout.panelCollapsed,
-      layout.panelWidth,
-    )
-    if (decision === 'refuse') {
-      useHint.getState().show('窗口太窄，放不下新窗格')
+    const preview = previewPaneDrop(mode, targetTab.panes.length, sourceTab.panes.length, getContentWidth(), layout.panelCollapsed, layout.panelWidth)
+    if (preview.refused) {
+      // 轻提示文案沿用既有两句固定文案（不是 preview.reason 里带具体差额的那句实时
+      // 提示——那句已经在拖拽过程中持续显示过了，这里的一次性轻提示只是复盘同一个
+      // 结论，保持与 ⌘D/既有拖放行为一致的措辞）。
+      useHint.getState().show(preview.refusalKind === 'max-panes' ? '最多支持 3 个窗格' : '窗口太窄，放不下新窗格')
       return
     }
-    if (decision === 'collapse-panel') layout.togglePanel()
-    useTabs.getState().movePanesToTab(drag.tabId, activeId, target)
+    if (preview.decision === 'collapse-panel') layout.togglePanel()
+    if (mode === 'fill' && targetPane) {
+      useTabs.getState().fillEmptyPane(drag.tabId, activeId, targetPane.id)
+    } else {
+      useTabs.getState().movePanesToTab(drag.tabId, activeId, target)
+    }
   }, [endDrag])
 
   // 指针捕获被浏览器隐式释放时补发的退出路径（例如被拖的标签因为其它原因中途移出
@@ -253,9 +325,14 @@ export function TabBar() {
     [setActive],
   )
 
-  // 标签右键菜单：主页标签没有可拆的窗格、也不可关闭（closeTab 本身对 home 是
-  // 空操作），因此不弹出菜单——不是"弹出一个空菜单"，是右键在主页标签上和右键在
-  // 已被 contextMenu.ts 全局拦截、终端区域之外的其它空白处一样，什么都不出现。
+  // 标签右键菜单（「拆分为独立标签」/「关闭标签」）只对 term 标签弹出。两种被排除的
+  // 标签理由不同，各自成立：
+  // - 主页：两项都不适用（没有窗格可拆；closeTab 对 home 本就是空操作）；
+  // - 总览：「拆分为独立标签」不适用（panes 恒为空数组），「关闭标签」其实适用——但
+  //   关闭它已经有 × 按钮和 ⌘W 两个入口，为它单独弹一个只剩一项、且与 × 完全重复的
+  //   菜单没有增益。终审复核过这一处，判定保持现状；这不是遗漏。
+  // 排除的表现是"什么都不出现"，不是"弹出一个空菜单"——右键在这些标签上，和右键在
+  // 已被 contextMenu.ts 全局拦截、终端区域之外的其它空白处一样。
   const onTabContextMenu = useCallback((e: ReactMouseEvent<HTMLDivElement>, tab: Tab) => {
     if (tab.kind !== 'term') return
     e.preventDefault()
@@ -264,43 +341,61 @@ export function TabBar() {
 
   const contextMenuTab = contextMenu ? tabs.find((t) => t.id === contextMenu.tabId) : undefined
 
+  // 单个标签自身的渲染——主页标签（钉在标签栏最左侧那组固定元素里）与其余可滚动的
+  // 标签共用同一份 JSX/事件接线，不重复写两遍，只是挂载的位置不同（见下方
+  // .tabbar-pinned 与 restTabs.map）。
+  const renderTab = (t: Tab) => (
+    <div
+      key={t.id}
+      data-tab-id={t.id}
+      className={`tab ${t.id === activeId ? 'active' : ''}`}
+      onPointerDown={(e) => onTabPointerDown(e, t.id)}
+      onPointerMove={onTabPointerMove}
+      onPointerUp={onTabPointerUp}
+      onPointerCancel={onTabPointerUp}
+      onLostPointerCapture={onTabLostPointerCapture}
+      onClick={() => onTabClick(t.id)}
+      onContextMenu={(e) => onTabContextMenu(e, t)}
+    >
+      <span className="tab-title">{t.kind === 'home' ? '⌂' : t.title}</span>
+      {t.kind !== 'home' && (
+        <span className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(t.id) }}>×</span>
+      )}
+    </div>
+  )
+
+  // 主页标签恒为 tabs[0]（设计要求：既不能被顶替，也不可被拖动排序，见 reorderTab/
+  // detachPaneToNewTab 里对 insertAt 的钳位），因此这里可以放心地把它和「＋」一起
+  // 从可滚动的标签列表里摘出来，放进下面的 .tabbar-pinned。
+  const [homeTab, ...restTabs] = tabs
+
   return (
     <div className="tabbar">
-      <button
-        type="button"
-        className="sidebar-toggle"
-        onClick={() => toggleSidebar()}
-        title={sidebarCollapsed ? '展开侧边栏 (⌘B)' : '折叠侧边栏 (⌘B)'}
-      >
-        {sidebarCollapsed ? '›' : '‹'}
-      </button>
-      {tabs.map((t) => (
-        <div
-          key={t.id}
-          data-tab-id={t.id}
-          className={`tab ${t.id === activeId ? 'active' : ''}`}
-          onPointerDown={(e) => onTabPointerDown(e, t.id)}
-          onPointerMove={onTabPointerMove}
-          onPointerUp={onTabPointerUp}
-          onPointerCancel={onTabPointerUp}
-          onLostPointerCapture={onTabLostPointerCapture}
-          onClick={() => onTabClick(t.id)}
-          onContextMenu={(e) => onTabContextMenu(e, t)}
+      {/* 「＋」新建标签按钮固定在标签栏最左侧、紧邻主页标签（用户反馈：标签一多，
+          原先排在最右端的按钮会被滚动条推出视野，必须先把标签栏滚到底才能新建
+          标签）。与侧边栏折叠按钮、主页标签一起放进同一个 position: sticky 容器
+          （见 App.css 的 .tabbar-pinned 注释），三者作为一个整体钉住，其余标签从
+          它们下面滚过去，不会互相重叠。行为/文案/⌘T 快捷键均未改动。 */}
+      <div className="tabbar-pinned">
+        <button
+          type="button"
+          className="sidebar-toggle"
+          onClick={() => toggleSidebar()}
+          title={sidebarCollapsed ? '展开侧边栏 (⌘B)' : '折叠侧边栏 (⌘B)'}
         >
-          <span className="tab-title">{t.kind === 'home' ? '⌂' : t.title}</span>
-          {t.kind !== 'home' && (
-            <span className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(t.id) }}>×</span>
-          )}
-        </div>
-      ))}
-      <button
-        type="button"
-        className="tab-new"
-        onClick={() => void newTerminal()}
-        title="新建终端标签 (⌘T)"
-      >
-        ＋
-      </button>
+          {sidebarCollapsed ? '›' : '‹'}
+        </button>
+        {homeTab && renderTab(homeTab)}
+        <button
+          type="button"
+          className="tab-new"
+          onClick={() => void newTerminal()}
+          title="新建终端标签 (⌘T)"
+        >
+          ＋
+        </button>
+      </div>
+      {restTabs.map(renderTab)}
       <button
         type="button"
         className="panel-toggle"

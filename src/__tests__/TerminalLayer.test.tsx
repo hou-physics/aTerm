@@ -10,6 +10,25 @@ vi.mock('../ipc', () => ({
   readConversation: vi.fn(),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+// 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
+// 空实现（真实的合并/聚合行为由 status.test.ts / StatusDot 相关测试单独覆盖）。Task 10
+// 起 App.tsx 新挂了 StatusBar，它直接读 useStatusStore/threadStatusKey（不经
+// useThreadStatus/useProjectStatus 这两个既有 selector），这里一并补最小静态桩，否则
+// 渲染 <App/> 会在 StatusBar 内部因缺失导出而抛错。
+vi.mock('../store/status', () => ({
+  statusEventsReady: Promise.resolve(),
+  useThreadStatus: () => undefined,
+  useProjectStatus: () => 'unknown' as const,
+  useStatusStore: (selector: (s: { statuses: Map<string, unknown> }) => unknown) => selector({ statuses: new Map() }),
+  threadStatusKey: (dirName: string, rootKey: string) => `${dirName}::${rootKey}`,
+}))
+// 与上面 store/status 同一理由：这批测试不关心 hooks 安装状态，整个模块换成不触碰真实
+// ipc 调用的空实现（真实行为由 HooksInstall.test.tsx / hooksInstall.test.ts 单独覆盖）。
+vi.mock('../store/hooksInstall', () => ({
+  hooksInstallReady: Promise.resolve(),
+  hooksPhase: () => null,
+  useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
+}))
 // App.tsx 顶层 side-effect 导入，替身掉的理由与 App.test.tsx 完全一致（见该文件注释）。
 vi.mock('../closeRequest', () => ({}))
 // 与 App.test.tsx 不同：这里刻意不把 TerminalView 替身成 () => null，而是渲染一个可
