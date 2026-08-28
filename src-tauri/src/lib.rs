@@ -99,6 +99,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(pty::PtyManager::default())
+        .manage(sessions::subagents::SubagentCache::default())
         .manage(ExitConfirmed(AtomicBool::new(false)))
         .on_window_event(|window, event| {
             // 只关心主窗口（本应用只有一个窗口，label 固定为 "main"）；显式判断而非依赖
@@ -127,6 +128,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             sessions::scan::list_projects,
             sessions::conversation::read_conversation,
+            sessions::subagents::count_subagents,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
