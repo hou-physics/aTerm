@@ -18,6 +18,8 @@
 - 测试**不得触碰真实 `~/.claude`**，一律使用 tempfile 临时目录。
 - 上下文徽章**显示绝对值**（如 `上下文 107k`），**不显示百分比**：上下文窗口大小无法从 transcript 还原（记录中 `message.model` 为 `claude-opus-5`，不含 `[1m]` 后缀；`context_management` 与 `quotaLimits` 均不含窗口大小），猜测的百分比会误导。
 - 所有颜色取自主题 CSS 变量，**不硬编码色值**。
+- **本仓库未安装 jest-dom**：断言一律用 `expect(x).toBeTruthy()` / `expect(x).toBeNull()` / `expect(el?.classList.contains('c')).toBe(true)`，不要用 `toBeInTheDocument` / `toHaveClass` / `toHaveValue`（Task 6 实测：计划原稿用了这些匹配器，实现者必须重写）。
+- 状态 store 条目的时间字段名是 `updatedAtMs`，不是 `updatedMs`。
 - 复用既有实现，不重造：`src/time.ts` 的 `formatRelative`、`src/components/StatusDot.tsx`（已含转圈动画与 `prefers-reduced-motion` 处理）。
 - 拖拽类状态沿用项目既有的两动作范式：拖拽过程中 `setX` 只改内存，`pointerup` 时 `commitX` 才持久化；读取持久值的路径上做钳制。
 - 子代理模型：**不得使用 fable**。
@@ -724,39 +726,39 @@ const thread = {
 describe('SessionBlock（spec §5.3）', () => {
   it('渲染标题、预览行与三枚常驻徽章', () => {
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
-    expect(screen.getByText('重构解析器')).toBeInTheDocument()
-    expect(screen.getByText('正在核查解析器字段')).toBeInTheDocument()
-    expect(screen.getByText('Opus 5')).toBeInTheDocument()
-    expect(screen.getByText('5 分钟前')).toBeInTheDocument()
-    expect(screen.getByText('上下文 107k')).toBeInTheDocument()
+    expect(screen.getByText('重构解析器')).toBeTruthy()
+    expect(screen.getByText('正在核查解析器字段')).toBeTruthy()
+    expect(screen.getByText('Opus 5')).toBeTruthy()
+    expect(screen.getByText('5 分钟前')).toBeTruthy()
+    expect(screen.getByText('上下文 107k')).toBeTruthy()
   })
 
   it('sub-agent 数为 0 时不显示 ⑂ 徽章（spec：有才显示）', () => {
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
-    expect(screen.queryByText(/⑂/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/⑂/)).toBeNull()
   })
 
   it('sub-agent 数大于 0 时显示 ⑂n', () => {
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={86} onOpen={() => {}} />)
-    expect(screen.getByText('⑂ 86')).toBeInTheDocument()
+    expect(screen.getByText('⑂ 86')).toBeTruthy()
   })
 
   it('缺失的字段不渲染空徽章', () => {
     const bare = { ...thread, model: null, contextTokens: null, preview: null }
     render(<SessionBlock thread={bare} dirName="proj" subagentCount={0} onOpen={() => {}} />)
-    expect(screen.queryByText(/上下文/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/上下文/)).toBeNull()
   })
 
   it('整块带上状态类名，供 CSS 着色（spec §5.3：底色与边框随状态）', () => {
     // 状态由组件自己经 useThreadStatus 求得，不作为 prop 传入：SessionBlock 本身
     // 就是「每项一个组件」，正是 Sidebar.tsx:246 那条 Rules of Hooks 注释的解法。
     useStatusStore.setState({
-      statuses: new Map([[threadStatusKey('proj', 'r1'), { status: 'running', updatedMs: Date.now() }]]),
+      statuses: new Map([[threadStatusKey('proj', 'r1'), { status: 'running', updatedAtMs: Date.now() }]]),
     })
     const { container } = render(
       <SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />
     )
-    expect(container.querySelector('.session-block')).toHaveClass('session-block-running')
+    expect(container.querySelector('.session-block')?.classList.contains('session-block-running')).toBe(true)
   })
 })
 ```
@@ -986,7 +988,7 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
   it('双击标题进入编辑态', async () => {
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
     await userEvent.dblClick(screen.getByText('重构解析器'))
-    expect(screen.getByRole('textbox')).toHaveValue('重构解析器')
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('重构解析器')
   })
 
   it('Enter 提交重命名并持久化', async () => {
@@ -994,7 +996,7 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.dblClick(screen.getByText('重构解析器'))
     await userEvent.clear(screen.getByRole('textbox'))
     await userEvent.type(screen.getByRole('textbox'), '我的重构任务{Enter}')
-    expect(screen.getByText('我的重构任务')).toBeInTheDocument()
+    expect(screen.getByText('我的重构任务')).toBeTruthy()
     expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('我的重构任务')
   })
 
@@ -1002,7 +1004,7 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
     await userEvent.dblClick(screen.getByText('重构解析器'))
     await userEvent.type(screen.getByRole('textbox'), '不该被保存{Escape}')
-    expect(screen.getByText('重构解析器')).toBeInTheDocument()
+    expect(screen.getByText('重构解析器')).toBeTruthy()
     expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
   })
 
@@ -1021,7 +1023,7 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.dblClick(screen.getByText('旧名字'))
     await userEvent.clear(screen.getByRole('textbox'))
     await userEvent.type(screen.getByRole('textbox'), '   {Enter}')
-    expect(screen.getByText('重构解析器')).toBeInTheDocument()
+    expect(screen.getByText('重构解析器')).toBeTruthy()
     expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
   })
 
@@ -1029,8 +1031,8 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={3} onOpen={() => {}} />)
     await userEvent.dblClick(screen.getByText('重构解析器'))
     await userEvent.type(screen.getByRole('textbox'), '{Enter}')
-    expect(screen.getByText('⑂ 3')).toBeInTheDocument()
-    expect(screen.getByText('Opus 5')).toBeInTheDocument()
+    expect(screen.getByText('⑂ 3')).toBeTruthy()
+    expect(screen.getByText('Opus 5')).toBeTruthy()
   })
 })
 ```
@@ -1165,18 +1167,18 @@ describe('sub-agent 徽章异步补齐（不阻塞首屏）', () => {
     vi.mocked(ipc.countSubagents).mockReturnValue(new Promise((r) => { resolveCount = r }))
     render(<OverviewPage dirName="proj" />)
     // 首屏：方块已在，徽章未到
-    expect(await screen.findByText('重构解析器')).toBeInTheDocument()
-    expect(screen.queryByText(/⑂/)).not.toBeInTheDocument()
+    expect(await screen.findByText('重构解析器')).toBeTruthy()
+    expect(screen.queryByText(/⑂/)).toBeNull()
     // 计数返回后徽章出现
     resolveCount(7)
-    expect(await screen.findByText('⑂ 7')).toBeInTheDocument()
+    expect(await screen.findByText('⑂ 7')).toBeTruthy()
   })
 
   it('计数失败时静默略过该徽章，其它方块不受影响', async () => {
     vi.mocked(ipc.countSubagents).mockRejectedValue(new Error('读文件失败'))
     render(<OverviewPage dirName="proj" />)
-    expect(await screen.findByText('重构解析器')).toBeInTheDocument()
-    expect(screen.queryByText(/⑂/)).not.toBeInTheDocument()
+    expect(await screen.findByText('重构解析器')).toBeTruthy()
+    expect(screen.queryByText(/⑂/)).toBeNull()
   })
 
   it('组件卸载后到达的响应不写 state（沿用 ConversationPanel 的陈旧响应守卫）', async () => {
