@@ -8,8 +8,14 @@ pub struct ParsedMeta {
     pub title: Option<String>,
     pub cwd: Option<String>,
     pub last_ts_ms: Option<i64>,
+    /// 末条非 <synthetic> assistant 记录的 message.model。
     pub model: Option<String>,
+    /// 与 model 同一条记录的 input + cache_creation + cache_read。
+    /// 该记录没有 usage 或合计为 0 时为 None——绝不回退到更早的记录，
+    /// 否则徽章会把新模型名和旧一轮的用量拼在一起。
     pub context_tokens: Option<u64>,
+    /// 最近一条含文本块的 assistant 记录的正文，可能比 model 更早一轮
+    /// （agentic 会话里最新一轮常是纯工具调用，没有文本块）。
     pub preview: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
@@ -154,8 +160,12 @@ pub fn parse_meta(head: &[String], tail: &[String]) -> ParsedMeta {
         }
     }
 
-    // model / context_tokens / preview / effort / permission_mode：倒序遍历尾部窗口，
-    // 每个字段“第一个命中即定、已定则不再覆盖”，保证反映最新一条记录。
+    // model / context_tokens / preview / effort / permission_mode：倒序遍历尾部窗口。
+    // effort/permission_mode/preview 各自独立地“第一个命中即定”。model 与
+    // context_tokens 则必须绑定同一条记录一起落定：一旦找到最新的、带 model 的
+    // 非 <synthetic> assistant 记录，context_tokens 就取自那一条的 usage——哪怕它
+    // 没有 usage 或合计为 0（此时 context_tokens 停在 None），也绝不再向更早的
+    // 记录回退取值，否则徽号会把新模型名和旧一轮的 token 用量错配在一起。
     for v in parsed_tail.iter().rev() {
         if m.effort.is_none() {
             m.effort = v.get("effort").and_then(|x| x.as_str()).map(str::to_string);
@@ -168,10 +178,10 @@ pub fn parse_meta(head: &[String], tail: &[String]) -> ParsedMeta {
                 let model = msg.get("model").and_then(|m| m.as_str());
                 if model != Some(SYNTHETIC_MODEL) {
                     if m.model.is_none() {
-                        m.model = model.map(str::to_string);
-                    }
-                    if m.context_tokens.is_none() {
-                        m.context_tokens = msg.get("usage").and_then(context_tokens_of);
+                        if let Some(model) = model {
+                            m.model = Some(model.to_string());
+                            m.context_tokens = msg.get("usage").and_then(context_tokens_of);
+                        }
                     }
                     if m.preview.is_none() {
                         m.preview = msg.get("content").and_then(preview_of);
@@ -428,5 +438,32 @@ mod tests {
         assert_eq!(meta.model, None);
         assert_eq!(meta.context_tokens, None);
         assert_eq!(meta.preview, None);
+    }
+
+    #[test]
+    fn context_tokens_stays_none_when_newest_assistant_has_no_usage_key() {
+        // 最新一条 assistant 记录带 model 但没有 usage 字段（比如纯工具调用轮次）；
+        // 更早一条记录确实有 usage。context_tokens 必须停在 None，绝不能悄悄
+        // 从更早那条记录“借用”用量，否则徽章会把新模型名和旧一轮的 token 数拼在一起。
+        let tail = vec![
+            assistant_line("claude-fable-5", 1, 2, 3, "更早的回答"),
+            r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"最新回答"}]}}"#.to_string(),
+        ];
+        let meta = parse_meta(&[], &tail);
+        assert_eq!(meta.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(meta.context_tokens, None, "不应回退到更早记录的 usage");
+    }
+
+    #[test]
+    fn context_tokens_stays_none_when_newest_assistant_usage_sums_to_zero() {
+        // 最新一条 assistant 记录的 usage 三项合计为 0；更早一条记录有非零 usage。
+        // 同上：context_tokens 必须与 model 绑定同一条记录，停在 None，不回退。
+        let tail = vec![
+            assistant_line("claude-fable-5", 1, 2, 3, "更早的回答"),
+            assistant_line("claude-opus-5", 0, 0, 0, "最新回答"),
+        ];
+        let meta = parse_meta(&[], &tail);
+        assert_eq!(meta.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(meta.context_tokens, None, "不应回退到更早记录的 usage");
     }
 }
