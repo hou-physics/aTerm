@@ -24,11 +24,39 @@ V3.1（侧栏/主页交互）与 V3.2（菜单栏、多窗口）不在本文范�
 
 以下**全部已在本机核实**，不是推断：
 
-**2.1 `claude --session-id <uuid>` 可用，且转录文件就叫这个名字。**
-实测：`claude --session-id ebd067d4-… -p "hi"` 生成
-`~/.claude/projects/<dir>/ebd067d4-….jsonl`。探针产物已清理。
-这意味着**不需要**"监听 FSEvents 猜哪个是刚建的会话"这类子系统——起进程前我们自己
-决定 uuid 即可，同项目并发开多个新对话也不会互相混淆。
+**2.1 `claude --session-id <uuid>` 在 `-p` 模式下决定转录文件名；交互模式待真机确认。**
+
+已实测确立：
+
+- `claude --session-id ebd067d4-… -p "hi"` 生成
+  `~/.claude/projects/<dir>/ebd067d4-….jsonl`（两次一致）。
+- 交互模式**懒落盘**：启动后不发消息就不创建转录文件。这与设计相容——对账器找不到
+  就返回 null，下一轮刷新再试。
+
+**未能在 shell 里确立**：交互模式是否遵守该 flag。5 次探针（`script(1)` 分配 pty、
+stdin 来自管道）均未在任何位置生成转录——包括那次 claude 明明已经处理并回答了消息的
+探针（输出里有 `running stop hook` / `Crunched for 4s · done`）。真实交互会话必然写
+转录，因此**失真的是探针夹具，不是这个 flag**：stdin 来自管道而非 pty，claude 极可能
+据此判定为非交互并整个跳过转录持久化。aTerm 用 portable-pty 给出的是真 pty，与该夹具
+不同，无法用它证伪。
+
+**处置**：本设计**假定**交互模式遵守该 flag，但把验证前置为实施计划的 Task 1，在真机
+aTerm 里一次性确认；同时预先写好退路（下方 2.1-fallback）。这个假定被推翻时的损失是
+有界的——见下。
+
+**2.1-fallback：若真机确认交互模式不遵守 `--session-id`**
+
+改动只波及"窗格如何得知自己的 sessionId"这一步，**`resolvePaneIdentity` 与
+`reconcilePanes` 两个核心件逐字不变**。退路方案：
+
+- 窗格记录 spawn 时刻 `spawnedAtMs`，以及 spawn 前该项目已存在的全部 session id 快照；
+- 对账时取"该项目中 `sessionIds` 含有快照之外的新 id、且 `lastActivityMs > spawnedAtMs`"
+  的那条链，认领其 session id 写回 `pane.sessionId`，此后走完全相同的对账路径；
+- 并发歧义（同项目同刷新窗口内开了两个新对话）用**独占认领**消解：已被别的窗格认领的
+  session id 直接跳过。
+
+代价是多一份快照状态与一个认领表，且并发时可能在一轮刷新内认错（下一轮自我纠正）。
+比 `--session-id` 方案差，但可用。**不要在 Task 1 未出结论前实现它**——两条路只走一条。
 
 **2.2 第 8、9 条是同一个根因。**
 `actions.ts` 的 `newConversation` 用 `inject: 'claude'` 起终端，**不传**
@@ -402,7 +430,7 @@ export function formatDroppedPaths(paths: string[]): string   // join(' ') + 尾
 
 | 风险 | 影响 | 处置 |
 |---|---|---|
-| `--session-id` 在交互模式下行为与 `-p` 不同 | §3 全盘失效 | 实现第一步就在真机交互模式下验一次，失败则整节回退到 FSEvents 方案并重新评估 |
+| `--session-id` 在交互模式下行为与 `-p` 不同 | §3.3(b) 失效（**不是** §3 全盘——对账器两条路通用） | 已降级为"假定成立、Task 1 真机验证"，退路见 §2.1-fallback。5 次 shell 探针均因夹具失真而无结论，不要再在 shell 里重试 |
 | 对账器每次 refresh 遍历全部 threads | 会话极多时的开销 | 每 15s 一次、只对 `sessionId` 非空的窗格（通常 0–3 个）执行；量级远低于 `refresh()` 本身的文件读取 |
 | `TerminalView.tsx` 是受保护文件 | 改坏终端 | 改动面严格限定为「常量 → store 订阅」一处；已获用户明确许可 |
 | IME 可能是 xterm 上游缺陷 | 第 6 条做不出来 | 已在 §6 写明时间盒与"如实报告并移出"的退出条件 |
