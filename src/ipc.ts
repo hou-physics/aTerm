@@ -64,3 +64,7 @@ export const uninstallHooks = () => invoke<UninstallOutcome>('uninstall_hooks')
 // 不需要在这里额外分辨。
 export const countSubagents = (dirName: string, sessionId: string) =>
   invoke<number>('count_subagents', { dirName, sessionId })
+
+/** 在访达中打开一个文件夹。后端只接受已存在的目录，失败时 reject 的是可直接展示给
+ *  用户的中文错误字符串（与 installHooks 等命令同一约定）。 */
+export const revealInFinder = (path: string) => invoke<void>('reveal_in_finder', { path })

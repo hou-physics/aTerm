@@ -20,7 +20,11 @@
 // 之后，手柄根本收不到事件，就不会记录起点、也就不会触发拖拽——原生 mousedown/文本
 // 选择行为不受影响（没有调用 preventDefault，只是不让事件继续冒泡）。
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { blockKey, useOverviewStore } from '../store/overview'
+import { blockKey } from '../store/overview'
+import { useLibrary } from '../store/library'
+import { useSessions } from '../store/sessions'
+import { useTabs } from '../store/tabs'
+import { displayTitle as computeDisplayTitle } from '../sessionList'
 import { useThreadStatus } from '../store/status'
 import type { ThreadInfo } from '../ipc'
 import { formatRelative } from '../time'
@@ -34,11 +38,14 @@ export function SessionBlock({ thread, dirName, subagentCount, onOpen }: {
   onOpen: () => void
 }) {
   const status = useThreadStatus(dirName, thread.rootKey)
-  // 自定义名字（Task 4 的 store）：只读展示，有就显示，没有就退回记录里的原始标题。
+  // 显示名（优先级：用户别名 > 真实标题 > 「新对话」，见 sessionList.ts 顶部注释）：
+  // 别名现由 store/library.ts 持有；没有别名时不能直接退回 thread.title——后端在
+  // 会话尚无真实标题时把 title 填成 session id 前 8 位，titled: false 是这个情况的
+  // 标记，直接渲染会在总览页方块里露出一串十六进制。
   const key = blockKey(dirName, thread.rootKey)
-  const customName = useOverviewStore((s) => s.names[key])
-  const rename = useOverviewStore((s) => s.rename)
-  const displayTitle = customName ?? thread.title
+  const aliases = useLibrary((s) => s.aliases)
+  const rename = useLibrary((s) => s.rename)
+  const displayTitle = computeDisplayTitle(thread, dirName, aliases)
   const model = shortModelName(thread.model)
   const ctx = formatContextTokens(thread.contextTokens)
 
@@ -64,6 +71,11 @@ export function SessionBlock({ thread, dirName, subagentCount, onOpen }: {
   const commit = () => {
     setEditing(false)
     rename(key, draft)
+    // 改名要立刻生效，不能等挂载/聚焦/状态事件那 15 秒节流的下一轮刷新——纯内存
+    // 操作，只扫用户已打开的那几个窗格，开销可忽略（与 Sidebar.tsx 的
+    // onRenameSubmit 同一理由）。rename() 的 set() 是同步的，这里读到的
+    // useLibrary.getState().aliases 已经是改名后的新值。
+    useTabs.getState().reconcilePanes(useSessions.getState().projects, useLibrary.getState().aliases)
   }
 
   const cancel = () => {

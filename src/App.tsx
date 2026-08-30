@@ -21,6 +21,7 @@ import { decidePaneFit, MAX_PANES, neighborPaneId, usablePaneAreaWidth } from '.
 import { createTrailingThrottle, type Throttled } from './refreshThrottle'
 import { useHint } from './store/hint'
 import { useLayout } from './store/layout'
+import { useLibrary } from './store/library'
 import { useSessions } from './store/sessions'
 import { useStatusStore } from './store/status'
 import { useTabs } from './store/tabs'
@@ -42,6 +43,7 @@ export default function App() {
   const metadataRefreshRef = useRef<Throttled | null>(null)
   const skipFirstStatusTickRef = useRef(true)
   const hint = useHint((s) => s.message)
+  const hintAction = useHint((s) => s.action)
   // 文件拖放（spec §5）落点：光标当前悬停在哪个窗格上，drop 完成或拖拽离开时清空。
   // 见下面新增的 onDragDropEvent effect。
   const [dropPaneId, setDropPaneId] = useState<string | null>(null)
@@ -51,7 +53,7 @@ export default function App() {
   // 这个 UI 状态 store。
   const refreshAndReconcile = useCallback(async () => {
     await refresh()
-    useTabs.getState().reconcilePanes(useSessions.getState().projects)
+    useTabs.getState().reconcilePanes(useSessions.getState().projects, useLibrary.getState().aliases)
   }, [refresh])
   useEffect(() => {
     refreshAndReconcile().catch(console.error)
@@ -255,7 +257,29 @@ export default function App() {
           {/* 拖放落点指示（设计文档 §5-B）：与 TerminalLayer 同级、渲染顺序在其之后，
               半透明色块因此总是画在终端包裹层之上，不需要额外的 z-index 博弈。 */}
           <DropIndicator containerRef={contentRef} />
-          {hint && <div className="pane-hint">{hint}</div>}
+          {/* 撤销按钮（Task 8，主页「隐藏项目」）：.pane-hint 整体保持 pointer-events:none
+              （它浮在终端上方，不该拦截终端的点击），只有这个按钮单独放开
+              （.pane-hint-action，见 App.css）——漏了会让按钮完全点不动，且没有任何
+              报错，鼠标事件直接穿过去。点击后立即清空 message/action：与 store/hint.ts
+              的定时清空是同一次"关闭这条提示"，只是触发时机从"超时"变成"用户主动点了
+              撤销"，两者都必须把 message 与 action 一起清空。 */}
+          {hint && (
+            <div className="pane-hint">
+              {hint}
+              {hintAction && (
+                <button
+                  type="button"
+                  className="pane-hint-action"
+                  onClick={() => {
+                    hintAction.onClick()
+                    useHint.setState({ message: null, action: null })
+                  }}
+                >
+                  {hintAction.label}
+                </button>
+              )}
+            </div>
+          )}
         </div>
         {/* 底部常驻状态栏（spec §5.2，StatusBar.tsx）：`.content` 的同级兄弟，不是它的
             子节点——`.content` 及其内部子树（`.term-wrap`/`.pane-body`/

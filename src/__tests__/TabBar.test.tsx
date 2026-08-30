@@ -58,7 +58,9 @@ const OVERVIEW_TAB = { id: 'tab-ov', kind: 'overview' as const, title: '总览�
 
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
-  useHint.setState({ message: null })
+  // Task 8 给 useHint 加了 action 字段（见 store/hint.ts），setState 是浅合并，这里一并
+  // 重置，不留一个字段没被清空。
+  useHint.setState({ message: null, action: null })
   useDnd.setState({ target: null, dropMode: null, refusal: null, tabBarIndex: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
   document.body.classList.remove('dragging-no-select')
@@ -1001,7 +1003,7 @@ describe('TabBar — 拖放创建窗格也按修正后的可用宽度判定，�
     })
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1)
     expect(getByText('窗口太窄，放不下新窗格')).toBeTruthy()
-    await act(async () => { useHint.setState({ message: null }) }) // 清掉这次提示，不干扰下面对同一条提示的断言
+    await act(async () => { useHint.setState({ message: null, action: null }) }) // 清掉这次提示，不干扰下面对同一条提示的断言
 
     // 拖放合并（把 tab-b 并进 tab-a）同样是 nextCount=2，理应给出同一个结论——修正前
     // 这里会因为用原始 clientWidth 而误判"刚好装得下"，与 ⌘D 的判断相矛盾。
@@ -1397,7 +1399,11 @@ describe('dragSafetyNet — 回归（Fix 2）：一张属于旧拖拽的网不�
 // 回归本身（那属于 App.css 的 position: sticky，只能靠人工/真实浏览器验证），这里
 // 断言的是让那份 CSS 生效的前提：DOM 结构上「＋」必须和侧边栏折叠按钮、主页标签
 // 一起落在同一个 .tabbar-pinned 容器里，且顺序是"侧边栏按钮 → 主页标签 → ＋"，
-// 不再是原来"排在全部标签之后"的位置；行为/文案/⌘T 快捷键不变。
+// 不再是原来"排在全部标签之后"的位置。
+// 位置不变，但 V3.1a Task 5 起点击行为/文案已改——＋ 不再直接新建空终端，而是弹出
+// 会话选择器（⌘T 仍是直接新建空终端的快捷路径，两者分工不同）；选择器本身的完整
+// 行为覆盖见 TabBarPlus.test.tsx，这里只保留"点了会弹出选择器、而不是立刻建标签"
+// 与"title 文案已更新"这两条，避免和那边重复。
 describe('TabBar — 「＋」新建标签按钮固定在标签栏最左侧（紧邻主页标签，不被滚动挤出视野）', () => {
   it('DOM 结构：侧边栏折叠按钮、主页标签、＋ 三者同属 .tabbar-pinned，且在这个顺序下相邻', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
@@ -1429,7 +1435,7 @@ describe('TabBar — 「＋」新建标签按钮固定在标签栏最左侧（�
     expect(topLevelOrder.some((c) => c === 'tab-new')).toBe(false)
   })
 
-  it('点击「＋」的行为不变：新建一个空白终端标签并成为激活标签', async () => {
+  it('点击「＋」不再直接新建终端，而是弹出会话选择器（选完之后才建标签，见 TabBarPlus.test.tsx）', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
     await renderApp()
     const before = useTabs.getState().tabs.length
@@ -1439,14 +1445,16 @@ describe('TabBar — 「＋」新建标签按钮固定在标签栏最左侧（�
       await Promise.resolve()
     })
 
-    expect(useTabs.getState().tabs.length).toBe(before + 1)
-    expect(useTabs.getState().activeId).not.toBe('tab-a')
+    // 选择器出现（固定第一项「新终端（zsh）」），但这一下本身不该已经新建标签。
+    expect(screen.queryByText('新终端（zsh）')).toBeTruthy()
+    expect(useTabs.getState().tabs.length).toBe(before)
+    expect(useTabs.getState().activeId).toBe('tab-a')
   })
 
-  it('标题/快捷键提示文案不变：仍是「新建终端标签 (⌘T)」', async () => {
+  it('标题提示文案已更新为「新建标签」（不再写 ⌘T——点击行为已与 ⌘T 不同）', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
     await renderApp()
 
-    expect((document.querySelector('.tab-new') as HTMLElement).title).toBe('新建终端标签 (⌘T)')
+    expect((document.querySelector('.tab-new') as HTMLElement).title).toBe('新建标签')
   })
 })

@@ -140,7 +140,7 @@ type TabsState = {
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
   setPaneWidths(tabId: string, widths: number[]): void
-  reconcilePanes(projects: ProjectInfo[]): void
+  reconcilePanes(projects: ProjectInfo[], aliases: Record<string, string>): void
 }
 
 export const useTabs = create<TabsState>((set, get) => ({
@@ -519,7 +519,7 @@ export const useTabs = create<TabsState>((set, get) => ({
   // 身份完全未变时返回同一个 tabs 引用（no-op，不产生新对象），与本文件既有惯例
   // 一致（moveArrayItem、movePanesToTab 拖到自己标签时都是这样）——这个 action 每
   // 15 秒被调用一次，制造新引用会让整棵标签树无谓重渲染。
-  reconcilePanes: (projects) => {
+  reconcilePanes: (projects, aliases) => {
     set((s) => {
       let changed = false
       const tabs = s.tabs.map((tab) => {
@@ -527,17 +527,18 @@ export const useTabs = create<TabsState>((set, get) => ({
         let tabChanged = false
         const panes = tab.panes.map((pane) => {
           if (!pane.sessionId) return pane
-          const id = resolvePaneIdentity(projects, pane.sessionId)
+          const id = resolvePaneIdentity(projects, pane.sessionId, aliases)
           if (!id) return pane
-          // title 只在 resolvePaneIdentity 给出时才采纳（titled 为真）；否则保留窗格
-          // 现有标题（「新对话」），不要写入 uuid 前 8 位的回退值。
-          const nextTitle = id.title ?? pane.title
+          // resolvePaneIdentity 现在用 displayTitle 算 title：别名 > 真实标题 >
+          // 「新对话」，三档都给出有意义的字符串——title 恒有值，不再是"给不出就
+          // 保留旧标题"的可缺省字段，因此不再需要 `id.title ?? pane.title` 这层
+          // 兜底（旧实现见本文件 git 历史）。
           if (
             pane.dirName === id.dirName && pane.rootKey === id.rootKey &&
-            pane.threadKey === id.threadKey && pane.title === nextTitle
+            pane.threadKey === id.threadKey && pane.title === id.title
           ) return pane
           tabChanged = true
-          return { ...pane, dirName: id.dirName, rootKey: id.rootKey, threadKey: id.threadKey, title: nextTitle }
+          return { ...pane, dirName: id.dirName, rootKey: id.rootKey, threadKey: id.threadKey, title: id.title }
         })
         if (!tabChanged) return tab
         changed = true

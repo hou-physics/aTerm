@@ -6,13 +6,18 @@
 // 用户发出第一句话后它翻成那条消息的 uuid——只记 rootKey 的窗格会绑对一瞬间，随即
 // 再次失联。
 import type { ProjectInfo } from './ipc'
+import { displayTitle } from './sessionList'
 
-export type PaneIdentity = { dirName: string; rootKey: string; threadKey: string; title?: string }
+export type PaneIdentity = { dirName: string; rootKey: string; threadKey: string; title: string }
 
 /** 在 projects 里按 sessionId 找到它当前所属的链，算出该窗格此刻应有的身份。
  *  找不到（转录尚未落盘、或用户在窗格里退出 claude 后跑了别的命令）返回 null，
  *  调用方保持窗格原样，不清空已有身份。 */
-export function resolvePaneIdentity(projects: ProjectInfo[], sessionId: string): PaneIdentity | null {
+export function resolvePaneIdentity(
+  projects: ProjectInfo[],
+  sessionId: string,
+  aliases: Record<string, string>,
+): PaneIdentity | null {
   for (const project of projects) {
     for (const thread of project.threads) {
       if (!thread.sessionIds.includes(sessionId)) continue
@@ -22,17 +27,14 @@ export function resolvePaneIdentity(projects: ProjectInfo[], sessionId: string):
         // 与 actions.ts 的 resumeThread 逐字相同的拼法。rootKey 只在单个项目目录内
         // 唯一（见 scan.rs 按目录分组），跨项目必须以「项目:会话」复合键去重。
         threadKey: `${project.dirName}:${thread.rootKey}`,
-        // 只在有真实标题时给出。titled 为 false 时 thread.title 是 session_id 前 8 位
-        // 的回退值（见 scan.rs），采纳它会把标签标题从「新对话」变成一串 uuid。
-        //
-        // 契约：title 有值时保证非空——src-tauri/src/sessions/parser.rs 的三条 title
-        // 路径都带 !is_empty() / trim() 非空守卫，titled === true 蕴含 title 非空，
-        // 生产中不存在 `titled: true, title: ''` 这个状态。下游 store/tabs.ts 的
-        // reconcilePanes 用 `id.title ?? pane.title` 采纳这里给出的值：既然 title
-        // 有值就非空，`??` 与 `||` 在此处等价；选 `??` 是因为语义本就是「字段缺省
-        // 则保留旧标题」，不是「遇到假值就回退」，用 `??` 如实表达这个意图，而不是
-        // 为了规避一个实际不会出现的空串。
-        title: thread.titled ? thread.title : undefined,
+        // 与侧栏「最近会话」/主页/总览用的是同一个优先级函数：别名 > 真实标题 >
+        // 「新对话」（见 sessionList.ts 顶部注释）。标签标题此前完全不认识别名——
+        // 这条 title 只走 thread.titled 的真实标题，是本次要修的 bug 本身（用户
+        // 原话：「重命名之后的标签不会改变命名，但是在项目栏里面，确实它改变
+        // 了」）。titled 为 false 且没有别名时，displayTitle 给的是「新对话」，
+        // 不是 session_id 前 8 位的回退值——这一点与旧实现保持一致，只是现在改由
+        // displayTitle 统一负责，不在这里单独判断。
+        title: displayTitle(thread, project.dirName, aliases),
       }
     }
   }

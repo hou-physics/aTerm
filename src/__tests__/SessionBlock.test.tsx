@@ -1,8 +1,11 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { act, render, screen, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionBlock } from '../components/SessionBlock'
-import { blockKey, useOverviewStore } from '../store/overview'
+import { blockKey } from '../store/overview'
+import { useLibrary } from '../store/library'
+import { useSessions } from '../store/sessions'
+import { useTabs } from '../store/tabs'
 import { threadStatusKey, useStatusStore } from '../store/status'
 import { makeThread } from './factories'
 
@@ -51,6 +54,13 @@ describe('SessionBlock（spec §5.3）', () => {
     expect(screen.queryByText(/上下文/)).toBeNull()
   })
 
+  it('未命名会话显示「新对话」而不是标题前 8 位（后端 title 回退值，titled: false 是标记）', () => {
+    const untitled = makeThread({ rootKey: 'r2', title: 'ebd067d4', titled: false })
+    render(<SessionBlock thread={untitled} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    expect(screen.getByText('新对话')).toBeTruthy()
+    expect(screen.queryByText('ebd067d4')).toBeNull()
+  })
+
   it('整块带上状态类名，供 CSS 着色（spec §5.3：底色与边框随状态）', () => {
     // 状态由组件自己经 useThreadStatus 求得，不作为 prop 传入：SessionBlock 本身
     // 就是「每项一个组件」，正是 Sidebar.tsx:246 那条 Rules of Hooks 注释的解法。
@@ -91,7 +101,7 @@ describe('SessionBlock —— 双击分工（标题 vs 空白区，为 Task 9 �
 
 describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期以双击标题实现）', () => {
   beforeEach(() => {
-    useOverviewStore.setState({ order: {}, positions: {}, names: {} })
+    useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
   })
 
   it('双击标题进入编辑态', async () => {
@@ -106,7 +116,7 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.clear(screen.getByRole('textbox'))
     await userEvent.type(screen.getByRole('textbox'), '我的重构任务{Enter}')
     expect(screen.getByText('我的重构任务')).toBeTruthy()
-    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('我的重构任务')
+    expect(useLibrary.getState().aliases[blockKey('proj', 'r1')]).toBe('我的重构任务')
   })
 
   it('Esc 取消，保留原标题且不写入 store', async () => {
@@ -114,7 +124,7 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.dblClick(screen.getByText('重构解析器'))
     await userEvent.type(screen.getByRole('textbox'), '不该被保存{Escape}')
     expect(screen.getByText('重构解析器')).toBeTruthy()
-    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
+    expect(useLibrary.getState().aliases[blockKey('proj', 'r1')]).toBeUndefined()
   })
 
   it('失焦视为提交', async () => {
@@ -123,17 +133,17 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.clear(screen.getByRole('textbox'))
     await userEvent.type(screen.getByRole('textbox'), '失焦提交')
     await userEvent.tab()
-    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('失焦提交')
+    expect(useLibrary.getState().aliases[blockKey('proj', 'r1')]).toBe('失焦提交')
   })
 
   it('输入全空白视为清除自定义名，回退到默认标题', async () => {
-    useOverviewStore.getState().rename(blockKey('proj', 'r1'), '旧名字')
+    useLibrary.getState().rename(blockKey('proj', 'r1'), '旧名字')
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
     await userEvent.dblClick(screen.getByText('旧名字'))
     await userEvent.clear(screen.getByRole('textbox'))
     await userEvent.type(screen.getByRole('textbox'), '   {Enter}')
     expect(screen.getByText('重构解析器')).toBeTruthy()
-    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
+    expect(useLibrary.getState().aliases[blockKey('proj', 'r1')]).toBeUndefined()
   })
 
   it('重命名后徽章与状态点仍在，不因进出编辑态而丢失', async () => {
@@ -142,6 +152,60 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.type(screen.getByRole('textbox'), '{Enter}')
     expect(screen.getByText('⑂ 3')).toBeTruthy()
     expect(screen.getByText('Opus 5')).toBeTruthy()
+  })
+})
+
+// 改名的第二个入口（总览页方块，双击标题）也要在提交后立刻触发一次对账——与
+// Sidebar.tsx 的 onRenameSubmit 同一理由，不能只挂在 15 秒节流的刷新上。这里不渲染
+// 整个 App/TabBar，直接在 useTabs 里种一个绑定同一 sessionId 的已打开窗格，断言
+// commit() 之后 store 里的窗格与标签标题立刻反映新别名——这是 store 层面真实可观察
+// 的状态，不是"函数被调用过"这种只证明接线、不证明效果的断言。
+describe('SessionBlock —— 改名后立即对账：已打开的对应标签标题跟着变', () => {
+  const originalTabs = useTabs.getState().tabs
+  const originalActiveId = useTabs.getState().activeId
+  const originalProjects = useSessions.getState().projects
+
+  beforeEach(() => {
+    useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
+    useTabs.setState({
+      tabs: [
+        { id: 'home', kind: 'home', title: '主页', panes: [] },
+        {
+          id: 'tab-1', kind: 'term', title: '重构解析器', activePaneId: 'pane-1',
+          panes: [{ id: 'pane-1', ptyId: 'pty-1', title: '重构解析器', sessionId: thread.sessionIds[0] }],
+        },
+      ],
+      activeId: 'tab-1',
+    })
+    useSessions.setState({
+      projects: [{ dirName: 'proj', cwd: '/tmp/proj', lastActivityMs: 1, threads: [thread] }],
+      loading: false,
+    })
+  })
+
+  afterEach(async () => {
+    // 与 Sidebar.test.tsx 同一惯例：这一刻仍挂载着上一条用例的 SessionBlock（RTL 的
+    // 自动 cleanup 挂在文件顶层的 afterEach，比这个嵌套在 describe 里的 afterEach
+    // 晚执行——见 vitest/jest 的 afterEach 由内向外顺序），下面的 setState 会触发它
+    // 重渲染，包一层 act() 避免"更新未包裹"的噪音。
+    await act(async () => {
+      useTabs.setState({ tabs: originalTabs, activeId: originalActiveId })
+      useSessions.setState({ projects: originalProjects, loading: false })
+      // 必须清掉这里种下的别名——不清的话会漏到后面不属于本 describe 的用例里（真实
+      // 踩过一次：后面「编辑态下 input 的 pointerdown 不冒泡」那条用例断言
+      // screen.getByText('重构解析器')，被这里残留的别名悄悄顶掉）。
+      useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
+    })
+  })
+
+  it('提交重命名后，绑定同一 sessionId 的已打开窗格与标签标题立刻更新', async () => {
+    render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    await userEvent.dblClick(screen.getByText('重构解析器'))
+    await userEvent.clear(screen.getByRole('textbox'))
+    await userEvent.type(screen.getByRole('textbox'), '会话改名了{Enter}')
+
+    expect(useTabs.getState().tabs[1].panes[0].title).toBe('会话改名了')
+    expect(useTabs.getState().tabs[1].title).toBe('会话改名了')
   })
 })
 

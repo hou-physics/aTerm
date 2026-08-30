@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../ipc', () => ({
   ptySpawn: vi.fn(async () => 'pty-9'),
@@ -8,7 +8,11 @@ vi.mock('../ipc', () => ({
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 
-import { newConversationSpec, randomUuidV4 } from '../actions'
+import { newConversationSpec, randomUuidV4, resumeThread } from '../actions'
+import { useLibrary } from '../store/library'
+import { blockKey } from '../store/overview'
+import { useTabs } from '../store/tabs'
+import { makeThread } from './factories'
 
 describe('newConversationSpec', () => {
   it('注入命令里的 session id 与返回的 sessionId 是同一个', () => {
@@ -89,5 +93,67 @@ describe('randomUuidV4 的回退路径（crypto.randomUUID 缺失时）', () => 
       expect(spec.inject).toBe(`claude --session-id ${spec.sessionId}`)
       expect(spec.sessionId.length).toBe(36)
     })
+  })
+})
+
+describe('resumeThread 也带上 sessionId', () => {
+  it('传给 openTerminal 的参数里含 sessionId，且等于 resumeSessionId', async () => {
+    // 为什么需要：被 resume 的链如果此前没有用户消息，rootKey 就等于 session_id；
+    // 用户发出第一句话后 rootKey 翻成那条消息的 uuid，此时窗格若没有 sessionId
+    // 就再也对不上账，永久失联。resumeSessionId 必在该链的 sessionIds 里。
+    const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
+    await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', resumeSessionId: 's-newest' }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's-newest' }))
+    spy.mockRestore()
+  })
+})
+
+// 终审必修 1：resumeThread 是四个「打开会话」入口共用的唯一写入点（侧栏双击、主页
+// ThreadRow、搜索结果行、＋ 选择器都经它）。titled 为 false 时 t.title 是
+// session_id 前 8 位（scan.rs 的回退值）——此前这里直接透传 t.title，标签标题会
+// 永久停在一串十六进制上：对账（reconcilePanes，store/tabs.ts）要等到下一次刷新或
+// 改名才会追上，指望不上它兜底修正窗格创建这一刻的标题。这里必须在写入的一刻就截断。
+describe('resumeThread 的标题回退——不把 session_id 前 8 位当标题传给 openTerminal', () => {
+  it('titled 为 false 时，openTerminal 收到的 title 是「新对话」，不是那串十六进制', async () => {
+    const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
+    await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', title: 'ebd067d4', titled: false }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ title: '新对话' }))
+    spy.mockRestore()
+  })
+
+  it('titled 为 true 时，openTerminal 仍收到真实标题', async () => {
+    const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
+    await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', title: '修登录', titled: true }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ title: '修登录' }))
+    spy.mockRestore()
+  })
+})
+
+// 本次要修的 bug 本身（用户原话：把一个已改名的会话关掉标签、重新打开，标签标题
+// 显示的还是真实标题，要等到下一次对账才追上）：resumeThread 是四个「打开会话」
+// 入口共用的唯一写入点（见上方「终审必修 1」注释），此前只做
+// `t.titled ? t.title : '新对话'`，完全不认识别名。这里改用 displayTitle，别名要在
+// 写入的这一刻就生效，不能指望 reconcilePanes 兜底追上。
+describe('resumeThread 认识别名——打开标签的那一刻直接显示别名，不必等对账追上', () => {
+  afterEach(() => {
+    useLibrary.setState({ aliases: {} })
+  })
+
+  it('该会话已有别名时，openTerminal 收到的 title 是别名，不是真实标题', async () => {
+    useLibrary.setState({ aliases: { [blockKey('-tmp-a', 'r1')]: '我的登录任务' } })
+    const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
+    await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', title: '修登录', titled: true }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ title: '我的登录任务' }))
+    spy.mockRestore()
+  })
+
+  // 上上轮刚修好的回归保护（见上方「resumeThread 的标题回退」describe）：本轮改的
+  // 正是同一个写入点，必须确认没有连带弄丢它——titled 为 false 且没有别名时，仍是
+  // 「新对话」，不是 session_id 前 8 位。
+  it('未命名会话且无别名时，openTerminal 收到的 title 仍是「新对话」，不是 session_id 前 8 位', async () => {
+    const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
+    await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', title: 'ebd067d4', titled: false }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ title: '新对话' }))
+    spy.mockRestore()
   })
 })

@@ -1,10 +1,13 @@
-// 总览页 store：排序快照（spec §5.2）、方块位置、自定义命名。持久化部分（positions/
-// names）按 src/store/theme.ts 的既有写法——模块加载时从 localStorage 读一次
-// （try/catch 包住，坏数据回退为默认空值），写入集中在各自的 persist 辅助函数里，
-// 不引入持久化库。order 不落盘，纯内存（同 tabs.ts 的 paneWidths、status.ts 的
-// statuses）：它只需要在"应用这次运行期间、这个项目保持打开"这段时间里不重排，
-// spec §5.2 的"打开时按最后活动时间排序"本身就意味着每次全新启动重新打开都应该
-// 按当前最新活跃度重算一次，而不是回放一份可能是几天前的陈旧快照。
+// 总览页 store：排序快照（spec §5.2）、方块位置。持久化部分（positions）按
+// src/store/theme.ts 的既有写法——模块加载时从 localStorage 读一次（try/catch 包住，
+// 坏数据回退为默认空值），写入集中在 persist 辅助函数里，不引入持久化库。order 不
+// 落盘，纯内存（同 tabs.ts 的 paneWidths、status.ts 的 statuses）：它只需要在"应用
+// 这次运行期间、这个项目保持打开"这段时间里不重排，spec §5.2 的"打开时按最后活动
+// 时间排序"本身就意味着每次全新启动重新打开都应该按当前最新活跃度重算一次，而不是
+// 回放一份可能是几天前的陈旧快照。
+//
+// 自定义命名已搬到 store/library.ts（三处列表面共用）；readJson/persist 两个持久化
+// 辅助函数在这里导出供 library.ts 复用，不要在那边复制第二份。
 import { create } from 'zustand'
 
 /** 方块身份键：`${dirName}::${rootKey}`，与 status.ts 的 threadStatusKey 同一拼接
@@ -17,9 +20,8 @@ export type ThreadForOrder = { rootKey: string; lastActivityMs: number }
 export type Position = { x: number; y: number }
 
 const POSITIONS_KEY = 'aterm.overview.positions'
-const NAMES_KEY = 'aterm.overview.names'
 
-function readJson<T>(key: string, fallback: T): T {
+export function readJson<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key)
     if (raw === null) return fallback
@@ -31,7 +33,7 @@ function readJson<T>(key: string, fallback: T): T {
   }
 }
 
-function persist(key: string, value: unknown) {
+export function persist(key: string, value: unknown) {
   try {
     localStorage.setItem(key, JSON.stringify(value))
   } catch { /* 忽略持久化失败（如隐私模式下 localStorage 不可用） */ }
@@ -42,8 +44,6 @@ type OverviewState = {
   order: Record<string, string[]>
   /** 方块在画布上的位置，按 blockKey 存。 */
   positions: Record<string, Position>
-  /** 用户自定义的方块标题，按 blockKey 存；未出现的 key 使用默认标题。 */
-  names: Record<string, string>
   /** 打开某个项目（dirName）的总览时调用：已有快照则保留既有顺序，只做「移除已
    * 消失的 key」+「新出现的 key 按最后活动时间新→旧追加到末尾」；无快照则整体按
    * lastActivityMs 降序建立（spec §5.2「打开时按最后活动时间排序，打开期间不自动
@@ -58,9 +58,6 @@ type OverviewState = {
    * 纯内存操作：order 本就不持久化，这里不涉及 localStorage。对没有快照的
    * dirName 也是安全的空操作。 */
   clearOrder(dirName: string): void
-  /** 重命名；空白名字（含全空白）视为清除，行为等同 clearName，不落盘空标题。 */
-  rename(key: string, name: string): void
-  clearName(key: string): void
 }
 
 function buildInitialOrder(threads: ThreadForOrder[], dirName: string): string[] {
@@ -70,12 +67,10 @@ function buildInitialOrder(threads: ThreadForOrder[], dirName: string): string[]
 }
 
 const initialPositions = readJson<Record<string, Position>>(POSITIONS_KEY, {})
-const initialNames = readJson<Record<string, string>>(NAMES_KEY, {})
 
 export const useOverviewStore = create<OverviewState>((set, get) => ({
   order: {},
   positions: initialPositions,
-  names: initialNames,
   captureOrder: (dirName, threads) => {
     const existing = get().order[dirName]
     let nextForDir: string[]
@@ -102,25 +97,5 @@ export const useOverviewStore = create<OverviewState>((set, get) => ({
     const next = { ...get().order }
     delete next[dirName]
     set({ order: next })
-  },
-  rename: (key, name) => {
-    // 一律先 trim，再判空——空白规则因此在这个方法里是统一的一条，而不是"全空白特殊
-    // 处理成清除、非空的两侧填充却原样留着"。此前只对全空白做了特判：`"  我的任务  "`
-    // 会带着两侧空格落盘，之后每次渲染都带着那对空格显示，而且用户再也无法从 UI 上
-    // 看出多出来的是什么、更没法删掉它。
-    const trimmed = name.trim()
-    if (trimmed === '') {
-      get().clearName(key)
-      return
-    }
-    const nextNames = { ...get().names, [key]: trimmed }
-    persist(NAMES_KEY, nextNames)
-    set({ names: nextNames })
-  },
-  clearName: (key) => {
-    const nextNames = { ...get().names }
-    delete nextNames[key]
-    persist(NAMES_KEY, nextNames)
-    set({ names: nextNames })
   },
 }))

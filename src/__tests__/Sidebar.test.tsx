@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
 // App.tsx 挂载时会用真实的 useSessions().refresh() 覆盖任何提前用 setState 种下的
 // projects（refresh 内部把 listProjects() 的结果原样写回 store）——所以这里直接在
@@ -50,10 +50,13 @@ vi.mock('@tauri-apps/api/webview', () => ({
 
 import { makeThread } from './factories'
 import App from '../App'
+import * as ipc from '../ipc'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
+import { useLibrary } from '../store/library'
+import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
 
 const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
@@ -61,9 +64,14 @@ const TAB_A = { id: 'tab-a', kind: 'term' as const, title: 'A', panes: [{ id: 'p
 
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
-  useHint.setState({ message: null })
+  // Task 8 给 useHint 加了 action 字段（见 store/hint.ts），setState 是浅合并，这里一并
+  // 重置，不留一个字段没被清空。
+  useHint.setState({ message: null, action: null })
   useDnd.setState({ target: null, dropMode: null, refusal: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
+  // 必须重置：与 SidebarList.test.tsx 同一理由，aliases/removedSessions 不清会在
+  // 用例之间互相污染。
+  useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
   document.body.classList.remove('dragging-no-select')
 })
 
@@ -101,8 +109,13 @@ async function drag(el: HTMLElement, from: { x: number; y: number }, to: { x: nu
   })
 }
 
-describe('Sidebar — 小幅移动的点击仍然正常触发 resumeThread（不误判为拖拽）', () => {
-  it('pointerdown/move(<4px)/up 之后的原生 click 照常打开该会话', async () => {
+// Task 6 起单击只选中、双击才打开（防误触）——这条用例原先断言"小幅移动后的单击
+// 仍照常打开会话"，现在单击本就不打开任何会话，那份断言不再成立。改成断言双击：
+// 低于阈值的这点抖动同样不该被误判为拖拽（suppressClickRef 不会被设成 true），
+// 双击因此仍能正常命中 resumeThread——这正是本用例标题想守住的那件事，只是承载它
+// 的手势从单击换成了双击。
+describe('Sidebar — 小幅移动的双击仍然正常触发 resumeThread（不误判为拖拽）', () => {
+  it('pointerdown/move(<4px)/up 之后的原生 dblclick 照常打开该会话', async () => {
     await renderApp() // activeId 默认 home
     const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
 
@@ -110,12 +123,143 @@ describe('Sidebar — 小幅移动的点击仍然正常触发 resumeThread（不
       fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
       fireEvent.pointerMove(item, { clientX: 11, clientY: 10, pointerId: 1 }) // 1px，低于阈值
       fireEvent.pointerUp(item, { clientX: 11, clientY: 10, pointerId: 1 })
-      fireEvent.click(item)
+      fireEvent.doubleClick(item)
     })
 
     // resumeThread 命中不了任何已开的窗格，走 openTerminal：新开一个标签
     expect(useTabs.getState().tabs).toHaveLength(2)
     expect(useTabs.getState().tabs[1]).toMatchObject({ kind: 'term', title: '修复登录' })
+  })
+})
+
+// 终审必修 1：本分支给 resumeThread 补了 sessionId 之后，reconcilePanes 才开始处理
+// 双击打开出来的窗格——titled 为 false 时若仍直传 t.title，标签标题会永久停在
+// session_id 前 8 位上（见 actions.ts 的 resumeThread 头顶注释）：对账要等到下一次
+// 刷新或改名才会追上，指望不上它兜底纠正窗格创建这一刻的标题。
+describe('Sidebar — 终审必修 1：双击打开 titled 为 false 的会话', () => {
+  it('新开标签的标题是「新对话」，不是那串十六进制', async () => {
+    // 与顶部注释同一理由：数据必须在 App 挂载触发的那次 refresh() 之前就位——
+    // 挂载后再 useSessions.setState 会被随后的刷新悄悄覆盖回 mock 里的固定数据。
+    vi.mocked(ipc.listProjects).mockResolvedValueOnce([{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: [makeThread({ rootKey: 'r-unt', title: 'ebd067d4', titled: false, resumeSessionId: 's-unt' })],
+    }])
+    await renderApp() // activeId 默认 home
+    const item = screen.getByText('新对话').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.doubleClick(item)
+    })
+
+    expect(useTabs.getState().tabs).toHaveLength(2)
+    expect(useTabs.getState().tabs[1]).toMatchObject({ kind: 'term', title: '新对话' })
+    expect(useTabs.getState().tabs[1].panes[0].title).toBe('新对话')
+  })
+})
+
+// 本次修复的主诉求（用户原话：「重命名之后的标签不会改变命名，但是在项目栏里面，
+// 确实它改变了」）：右键改名后，已经打开的那个标签标题此前完全不会跟着变——
+// resolvePaneIdentity 完全不认识别名，标签标题这条链只走 thread.titled 的真实标题
+// （见 paneReconcile.ts 顶部注释、store/tabs.ts 的 reconcilePanes）。这里连开带改，
+// 直接复现用户报告的原始现象；改名的操作方式与 SidebarMenu.test.tsx「重命名：回车
+// 提交后显示新名字」保持一致，只是这里额外断言标签栏，且不等待任何节流刷新——
+// onRenameSubmit 之后必须同步生效（15 秒的节流刷新只覆盖挂载/聚焦/状态事件三个
+// 入口，改名不是这三者之一）。
+describe('Sidebar — 改名后已打开的标签标题立刻跟着变（不必等 15 秒节流刷新）', () => {
+  it('先打开该会话的标签，再在侧栏改名：标签标题立刻变成新名字', async () => {
+    await renderApp() // activeId 默认 home，seed 数据是「修复登录」/ proj-a / root-a
+    const sidebarList = document.querySelector('.sidebar-list') as HTMLElement
+    const item = within(sidebarList).getByText('修复登录').closest('.side-item') as HTMLElement
+
+    // 打开它——resumeThread 带 sessionId，是 reconcilePanes 认得这个窗格的前提
+    // （见上方「终审必修 1」注释）。
+    fireEvent.doubleClick(item)
+    const tabbar = document.querySelector('.tabbar') as HTMLElement
+    await waitFor(() => expect(within(tabbar).getByText('修复登录')).toBeTruthy())
+
+    fireEvent.contextMenu(within(sidebarList).getByText('修复登录'))
+    fireEvent.click(screen.getByText('重命名'))
+    const input = within(sidebarList).getByDisplayValue('修复登录') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '我的登录任务' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    // 不等待任何节流刷新——onRenameSubmit 之后应同步生效。
+    await waitFor(() => expect(within(tabbar).getByText('我的登录任务')).toBeTruthy())
+    expect(within(tabbar).queryByText('修复登录')).toBeNull()
+  })
+
+  it('清除别名（提交空白）后，已打开标签的标题退回真实标题', async () => {
+    await renderApp()
+    const sidebarList = document.querySelector('.sidebar-list') as HTMLElement
+    const item = within(sidebarList).getByText('修复登录').closest('.side-item') as HTMLElement
+    fireEvent.doubleClick(item)
+    const tabbar = document.querySelector('.tabbar') as HTMLElement
+    await waitFor(() => expect(within(tabbar).getByText('修复登录')).toBeTruthy())
+
+    // 先改一个别名。
+    fireEvent.contextMenu(within(sidebarList).getByText('修复登录'))
+    fireEvent.click(screen.getByText('重命名'))
+    fireEvent.change(within(sidebarList).getByDisplayValue('修复登录'), { target: { value: '临时别名' } })
+    fireEvent.keyDown(within(sidebarList).getByDisplayValue('临时别名'), { key: 'Enter' })
+    await waitFor(() => expect(within(tabbar).getByText('临时别名')).toBeTruthy())
+
+    // 再提交空白，清除别名——library.rename() 里全空白视为清除（见 store/library.ts）。
+    fireEvent.contextMenu(within(sidebarList).getByText('临时别名'))
+    fireEvent.click(screen.getByText('重命名'))
+    const input = within(sidebarList).getByDisplayValue('临时别名') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '   ' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    await waitFor(() => expect(within(tabbar).getByText('修复登录')).toBeTruthy())
+    expect(within(tabbar).queryByText('临时别名')).toBeNull()
+  })
+})
+
+// 用户报的现象本身（区别于上面「已打开的标签立刻跟着变」那组——那组测的是对账
+// 追上*已经打开*的窗格；这里测的是打开的那一刻）：把一个已改名的会话关掉标签、
+// 重新打开，标签标题此前会先短暂显示真实标题，要等到下一次对账（挂载/聚焦/状态
+// 事件节流，可能很久）才追上。resumeThread（actions.ts，被这里的双击复用）此前
+// 只做 `t.titled ? t.title : '新对话'`，不认识别名——这是本次要修的四个写入点之一。
+describe('Sidebar — 改名后关闭标签、重新打开，标签标题直接就是别名（不必等任何对账）', () => {
+  it('关闭已改名会话的标签、重新打开：新标签的标题立刻就是别名', async () => {
+    await renderApp() // activeId 默认 home，seed 数据是「修复登录」/ proj-a / root-a
+    const sidebarList = document.querySelector('.sidebar-list') as HTMLElement
+    const item = within(sidebarList).getByText('修复登录').closest('.side-item') as HTMLElement
+
+    // 打开它。
+    fireEvent.doubleClick(item)
+    const tabbar = document.querySelector('.tabbar') as HTMLElement
+    await waitFor(() => expect(within(tabbar).getByText('修复登录')).toBeTruthy())
+
+    // 改名。
+    fireEvent.contextMenu(within(sidebarList).getByText('修复登录'))
+    fireEvent.click(screen.getByText('重命名'))
+    const input = within(sidebarList).getByDisplayValue('修复登录') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '我的登录任务' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(within(tabbar).getByText('我的登录任务')).toBeTruthy())
+
+    // 关闭这个标签——mock 里 ptyIsAlive 恒为 false，closeTab 不会弹确认对话框，
+    // 直接同步移除。
+    const openedTabId = useTabs.getState().tabs[1].id
+    await act(async () => {
+      await useTabs.getState().closeTab(openedTabId)
+    })
+    expect(useTabs.getState().tabs).toHaveLength(1) // 只剩主页
+
+    // 重新打开——侧栏此刻仍显示别名（列表本身早就认识别名，这不是本次要修的部分）。
+    const itemAgain = within(sidebarList).getByText('我的登录任务').closest('.side-item') as HTMLElement
+    // act(async) 只是把 openTerminal 内部 `await ptyEventsReady`/`await ptySpawn` 这两个
+    // 微任务 flush 掉（与「终审必修 1」那条用例同一写法）——不是在等任何对账：resolvePaneIdentity
+    // /reconcilePanes 全程没被调用一次，标题是 resumeThread 写入的那一刻就定好的。
+    await act(async () => {
+      fireEvent.doubleClick(itemAgain)
+    })
+
+    // 不等待任何节流刷新/对账：resumeThread 写入的这一刻标题就必须是别名。
+    expect(useTabs.getState().tabs).toHaveLength(2)
+    expect(useTabs.getState().tabs[1]).toMatchObject({ kind: 'term', title: '我的登录任务' })
+    expect(useTabs.getState().tabs[1].panes[0].title).toBe('我的登录任务')
   })
 })
 
@@ -203,6 +347,65 @@ describe('Sidebar — 从「最近会话」拖入窗格区（设计文档 §5-B 
 
     expect(useDnd.getState().target).toBeNull()
     expect(useTabs.getState().tabs).toBe(before)
+  })
+})
+
+// 终审必修 4：拖入窗格是第三个直接构造 sessionArgs 的写入点（不经 actions.ts 的
+// resumeThread），此前唯独它缺 sessionId——从侧栏拖出来的窗格发出第一句话、
+// rootKey 翻转之后 reconcilePanes 找不到它，永久失联。
+describe('Sidebar — 终审必修 4：拖入窗格的 sessionArgs 带上 sessionId', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('拖入窗格：pane.sessionId 等于 resumeSessionId（此前该字段整个缺失）', async () => {
+    // 与「双击打开 titled 为 false」那条用例同一理由：数据必须在挂载触发的
+    // refresh() 之前就位，这里顺带给出一个已知的 resumeSessionId 方便精确断言。
+    vi.mocked(ipc.listProjects).mockResolvedValueOnce([{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: [makeThread({ rootKey: 'r-drag', title: '拖拽会话', resumeSessionId: 's-drag-1' })],
+    }])
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('拖拽会话').closest('.side-item') as HTMLElement
+
+    await drag(item, { x: 10, y: 10 }, { x: 300, y: 50 })
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    const newPane = t.panes[1]
+    await act(async () => { await Promise.resolve() }) // startPaneTerminal 是 async，flush 一次
+    const updated = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes.find((p) => p.id === newPane.id)!
+    expect(updated.sessionId).toBe('s-drag-1')
+    expect(updated.threadKey).toBe('-tmp-a:r-drag')
+  })
+
+  // 补一条 Fix 1 的回归：拖拽幽灵标签是 Sidebar.tsx 第二个标题写入点（见上一次提交），
+  // 与本提交同一个拖拽路径，这里一并锁住，不单开一个几乎重复的 describe。
+  it('拖拽指示（幽灵标签）显示「新对话」，不是 session_id 前 8 位', async () => {
+    vi.mocked(ipc.listProjects).mockResolvedValueOnce([{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: [makeThread({ rootKey: 'r-unt', title: 'ebd067d4', titled: false, resumeSessionId: 's-unt' })],
+    }])
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('新对话').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(document.querySelector('.drag-ghost')?.textContent).toBe('新对话')
+
+    await act(async () => {
+      fireEvent.pointerUp(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
   })
 })
 
@@ -366,15 +569,19 @@ describe('Sidebar — 拖拽期间屏蔽文本选择并显示跟随光标的拖�
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
     expect(document.querySelector('.drag-ghost')).toBeNull()
-    expect(useTabs.getState().tabs).toHaveLength(2) // 普通点击行为不变，仍正常打开会话
+    // Task 6 起单击只选中、不打开：这点低于阈值的抖动没有被误判为拖拽，click 没被
+    // suppressClickRef 吞掉——仍正常落地为一次选中（不再是"仍正常打开会话"）。
+    expect(useTabs.getState().tabs).toHaveLength(1)
+    expect(item.classList.contains('side-item-selected')).toBe(true)
   })
 })
 
 // 指针捕获丢失时的清理（review 发现：三个拖拽源此前只在 pointerup/pointercancel 上
 // 清理，元素若在拖拽中途被移出 DOM，浏览器会静默释放指针捕获、只发 lostpointercapture
 // 而不补发 pointerup）。这里格外贴合真实场景——「最近会话」列表在 window focus 时
-// refresh()，可能把正被拖拽的那一条会话挤出前 12 条，使其 DOM 节点消失；侧边栏本身
-// 也会在 ⌘B 折叠时整个卸载（见 App.tsx 的 `{!sidebarCollapsed && <Sidebar/>}`），
+// refresh()，可能把正被拖拽的那一条会话从列表里挤出去（例如期间被标记为已移除），
+// 使其 DOM 节点消失；侧边栏本身也会在 ⌘B 折叠时整个卸载（见 App.tsx 的
+// `{!sidebarCollapsed && <Sidebar/>}`），
 // 后一种场景直接用于验证下面"组件卸载"那个用例。
 describe('Sidebar — 指针捕获丢失或组件卸载时同样清理拖拽状态（不会永久卡住 body class）', () => {
   const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
@@ -589,7 +796,7 @@ describe('Sidebar — 拖放创建窗格也按修正后的可用宽度判定，�
     })
     expect(useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes).toHaveLength(1)
     expect(getByText('窗口太窄，放不下新窗格')).toBeTruthy()
-    await act(async () => { useHint.setState({ message: null }) }) // 清掉这次提示，不干扰下面对同一条提示的断言
+    await act(async () => { useHint.setState({ message: null, action: null }) }) // 清掉这次提示，不干扰下面对同一条提示的断言
 
     // 从「最近会话」拖入同样是 nextCount=2，理应给出同一个结论——修正前这里会因为用
     // 原始 clientWidth 而误判"刚好装得下"，与 ⌘D 的判断相矛盾。
@@ -611,5 +818,72 @@ describe('Sidebar — 拖放创建窗格也按修正后的可用宽度判定，�
     await drag(item, { x: 10, y: 10 }, { x: 655, y: 50 }) // 落在 pane-a 矩形右半侧
 
     expect(useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes).toHaveLength(2) // 新建成功
+  })
+})
+
+// Fix 1（本轮）：refresh() 要对每个项目的每个转录做头尾读取（见 App.tsx
+// METADATA_REFRESH_MS 附近注释），是有实际耗时的异步扫描，扫描期间 projects 仍是
+// 初始的 []。空态判断若只看 projects.some(...)，会把"正在加载"误判成"尚未发现
+// 会话"——而首次启动恰好落在这个窗口期。这里锁住：loading 为 true 时，两句空态
+// 文案（"尚未发现…" / "已从列表移除全部…"）都不该出现。
+describe('Sidebar — 空态判断需要参考 loading，不能把"正在扫描"误判为"没有会话"', () => {
+  it('loading 为 true 且 projects 为空时，两句空态文案都不应出现', async () => {
+    // 显式钉住起点：projects 是本用例想测的那个精确前提（[]），不依赖 store 在
+    // 用例之间不被重置这件事——useSessions 不像 useTabs/useHint 等 store 那样在
+    // 顶部 beforeEach 里被重置，留着上一条用例的残余数据会让下面的断言看运气。
+    useSessions.setState({ projects: [], loading: false })
+    // 用一个手动控制的 pending promise 卡住 refresh()，让 loading 在断言时仍是
+    // true——默认 mock 是立即 resolve 的 async 函数，一次 microtask flush 就会
+    // 结束，来不及观察到 loading:true 这个中间态。
+    let resolveList: ((v: Awaited<ReturnType<typeof ipc.listProjects>>) => void) | null = null
+    vi.mocked(ipc.listProjects).mockImplementationOnce(() => new Promise((resolve) => { resolveList = resolve }))
+
+    await renderApp()
+
+    expect(useSessions.getState().loading).toBe(true) // 前提：refresh() 确实还没结束
+    expect(useSessions.getState().projects).toEqual([])
+    // 必须限定在 `.sidebar-list` 容器内查——HomePage.tsx 的空态复用了完全相同的
+    // 中文文案（同一惯例），不限定容器会连带匹配到 HomePage 里那一份，产生「找到
+    // 多个元素」的误报，而不是这条用例真正想测的东西。
+    const sidebarList = document.querySelector('.sidebar-list') as HTMLElement
+    expect(within(sidebarList).queryByText('尚未发现 Claude Code 会话（~/.claude/projects 为空）')).toBeNull()
+    expect(within(sidebarList).queryByText('已从列表移除全部会话（不是没有会话——可以用 ⌘D 找到它们）')).toBeNull()
+
+    // 收尾：把挂起的 promise resolve 掉，不让它悬着影响之后的用例。
+    await act(async () => { resolveList?.([]) })
+  })
+})
+
+// 补一条缺失的回归测试：拖入窗格路径（构造 sessionArgs 那处，Sidebar.tsx:219）的
+// 标题回退此前没有任何断言覆盖——「终审必修 4」那条用例用的是 titled 默认为 true
+// 的会话，且只断言了 sessionId/threadKey。这里用 titled 为 false 的会话走完整的
+// 拖入窗格流程，断言落地窗格的 title 是「新对话」，不是 ThreadInfo.title 存的那串
+// session id 前 8 位十六进制。
+describe('Sidebar — 拖入窗格：pane.title 回退为「新对话」', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('titled 为 false 的会话拖入窗格：落地窗格的 title 是「新对话」，不是 session id 前 8 位', async () => {
+    vi.mocked(ipc.listProjects).mockResolvedValueOnce([{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: [makeThread({ rootKey: 'r-untitled-drag', title: 'ebd067d4', titled: false, resumeSessionId: 's-untitled-drag' })],
+    }])
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('新对话').closest('.side-item') as HTMLElement
+
+    await drag(item, { x: 10, y: 10 }, { x: 300, y: 50 })
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    const newPane = t.panes[1]
+    await act(async () => { await Promise.resolve() }) // startPaneTerminal 是 async，flush 一次
+    const updated = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes.find((p) => p.id === newPane.id)!
+    expect(updated.title).toBe('新对话')
   })
 })

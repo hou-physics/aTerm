@@ -49,7 +49,7 @@ function mockCanvasWidth(width: number) {
 
 beforeEach(() => {
   localStorage.clear()
-  useOverviewStore.setState({ order: {}, positions: {}, names: {} })
+  useOverviewStore.setState({ order: {}, positions: {} })
   useSessions.setState({ projects: [], loading: false })
   // 见上面 vi.mock('../ipc', ...) 处的注释：显式钉一次默认实现，不依赖 afterEach 的
   // vi.restoreAllMocks() 对纯 vi.fn() 到底会不会保留上一次设的返回值。默认给一个永不
@@ -135,7 +135,6 @@ describe('OverviewPage', () => {
     useOverviewStore.setState({
       order: { [DIR]: [key] },
       positions: { [key]: { x: 5000, y: 40 } },
-      names: {},
     })
     mockCanvasWidth(600)
     setProject([thread('a', 'A', 100)])
