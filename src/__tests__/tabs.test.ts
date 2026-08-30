@@ -11,7 +11,7 @@ import * as ipc from '../ipc'
 import { resumeThread } from '../actions'
 import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
 import type { ThreadInfo } from '../ipc'
-import { HOME_TAB, makePane, makeTermTab } from './factories'
+import { HOME_TAB, makePane, makeTermTab, makeThread } from './factories'
 import { MAX_PANES } from '../paneLayout'
 import { useOverviewStore } from '../store/overview'
 
@@ -67,8 +67,8 @@ describe('useTabs', () => {
     expect(missing).toBe(false)
   })
   it('resumeThread：相同 rootKey 在不同项目下不互相误切，各自独立开标签', async () => {
-    const threadA: ThreadInfo = { rootKey: 'r1', resumeSessionId: 'sid-a', title: '会话A', cwd: '/proj-a', lastActivityMs: 0, fileCount: 1 }
-    const threadB: ThreadInfo = { rootKey: 'r1', resumeSessionId: 'sid-b', title: '会话B', cwd: '/proj-b', lastActivityMs: 0, fileCount: 1 }
+    const threadA: ThreadInfo = makeThread({ rootKey: 'r1' })
+    const threadB: ThreadInfo = makeThread({ rootKey: 'r1' })
 
     await resumeThread('proj-a', '/proj-a', threadA)
     await resumeThread('proj-b', '/proj-b', threadB)

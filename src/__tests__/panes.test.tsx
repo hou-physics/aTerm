@@ -17,6 +17,7 @@ vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: v
 import { TabPanes } from '../components/TabPanes'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
+import { makeThread } from './factories'
 
 beforeEach(() => {
   useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
@@ -169,7 +170,7 @@ describe('TabPanes — 未选定会话的窗格显示选择器（设计文档 §
           dirName: 'proj-a',
           cwd: '/home/proj-a',
           lastActivityMs: 100,
-          threads: [{ rootKey: 'root-a', resumeSessionId: 'sid-a', title: '修复登录', cwd: '/home/proj-a', lastActivityMs: 100, fileCount: 1 }],
+          threads: [makeThread({ rootKey: 'root-a', title: '修复登录' })],
         },
       ],
     })

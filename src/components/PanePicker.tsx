@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { newConversationSpec } from '../actions'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { matchesQuery, filterProjectsByQuery } from '../sessionSearch'
 import { useSessions } from '../store/sessions'
@@ -56,7 +57,7 @@ export function PanePicker({ tab, paneId }: { tab: Tab; paneId: string }) {
 
   const startNewConversationIn = (p: ProjectInfo) => {
     setPickingProject(false)
-    void useTabs.getState().startPaneTerminal(tabId, paneId, { title: '新对话', cwd: p.cwd, inject: 'claude' })
+    void useTabs.getState().startPaneTerminal(tabId, paneId, newConversationSpec(p.cwd))
   }
   const startNewConversation = () => {
     if (defaultProject) startNewConversationIn(defaultProject)

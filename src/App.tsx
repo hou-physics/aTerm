@@ -2,7 +2,7 @@ import './ptyBuffer'
 import './closeRequest'
 import './contextMenu'
 import './App.css'
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { newTerminal } from './actions'
 import { ConversationPanel } from './components/ConversationPanel'
 import { DragGhost } from './components/DragGhost'
@@ -14,6 +14,9 @@ import { StatusBar } from './components/StatusBar'
 import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
 import { TerminalLayer } from './components/TerminalLayer'
+import { paneAtPoint, resolveDropWrite, toLogicalPoint, writableDropPaneId } from './fileDrop'
+import { ptyWrite } from './ipc'
+import { getPaneSlotRects } from './paneDropDom'
 import { decidePaneFit, MAX_PANES, neighborPaneId, usablePaneAreaWidth } from './paneLayout'
 import { createTrailingThrottle, type Throttled } from './refreshThrottle'
 import { useHint } from './store/hint'
@@ -39,9 +42,20 @@ export default function App() {
   const metadataRefreshRef = useRef<Throttled | null>(null)
   const skipFirstStatusTickRef = useRef(true)
   const hint = useHint((s) => s.message)
+  // 文件拖放（spec §5）落点：光标当前悬停在哪个窗格上，drop 完成或拖拽离开时清空。
+  // 见下面新增的 onDragDropEvent effect。
+  const [dropPaneId, setDropPaneId] = useState<string | null>(null)
+  // refresh() 有三个触发点（挂载、window focus、statusVersion 变化时的节流刷新），
+  // 每一处刷新之后都必须对账——否则新对话的身份会在其中某些路径上永远补不上。
+  // 不把对账塞进 useSessions.refresh 内部：那会让一个纯数据 store 反向依赖 tabs
+  // 这个 UI 状态 store。
+  const refreshAndReconcile = useCallback(async () => {
+    await refresh()
+    useTabs.getState().reconcilePanes(useSessions.getState().projects)
+  }, [refresh])
   useEffect(() => {
-    refresh().catch(console.error)
-    const onFocus = () => { refresh().catch(console.error) }
+    refreshAndReconcile().catch(console.error)
+    const onFocus = () => { refreshAndReconcile().catch(console.error) }
     window.addEventListener('focus', onFocus)
 
     // 会话元数据（模型 / effort / 权限模式 / 上下文用量 / 预览行 / 标题）随转录增长
@@ -50,7 +64,7 @@ export default function App() {
     // 推来的 session-status 事件恰好标志"某个转录被写了"，拿它当刷新信号；但必须
     // 节流：refresh() 会对每个项目的每个转录做头尾读取，而运行中的会话每 120ms 就
     // 可能推一条事件。
-    const throttled = createTrailingThrottle(() => { refresh().catch(console.error) }, METADATA_REFRESH_MS)
+    const throttled = createTrailingThrottle(() => { refreshAndReconcile().catch(console.error) }, METADATA_REFRESH_MS)
     metadataRefreshRef.current = throttled
 
     return () => {
@@ -58,7 +72,7 @@ export default function App() {
       throttled.cancel()
       metadataRefreshRef.current = null
     }
-  }, [refresh])
+  }, [refreshAndReconcile])
 
   // statusVersion 是 store 里的单调计数器（不是 statuses 那个每次都换引用的 Map），
   // 所以这个效应只在确有状态条目更新时才跑。首次挂载那一下跳过——上面的 effect 已经
@@ -175,6 +189,36 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
   }, [])
+  // 文件拖放（spec §5）：Tauri 接管了原生拖放，webview 的 HTML5 drop 不会触发，
+  // 必须走 onDragDropEvent。它给的是真实文件系统路径，比 DataTransfer 更可靠。
+  // 落点写进"光标底下那个窗格"而非当前聚焦窗格——分屏下用户明确瞄准了某一个。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let disposed = false
+    void import('@tauri-apps/api/webview').then(async ({ getCurrentWebview }) => {
+      const un = await getCurrentWebview().onDragDropEvent((e) => {
+        const payload = e.payload
+        if (payload.type === 'leave') { setDropPaneId(null); return }
+        // 'enter' / 'over' / 'drop' 三者都带 position；只有 enter/drop 带 paths。
+        const { x, y } = toLogicalPoint(payload.position, window.devicePixelRatio)
+        const { tabs, activeId } = useTabs.getState()
+        const tab = tabs.find((t) => t.id === activeId)
+        const panes = tab?.panes ?? []
+        // writableDropPaneId 把还没选定会话（无 ptyId、仍显示 PanePicker）的窗格从
+        // 候选里剔除——悬停高亮与真正写入用的是同一条规则，不会出现"高亮了但放下去
+        // 没反应"的分歧（此前的缺陷：paneAtPoint 单凭几何命中，不知道 ptyId）。
+        const paneId = writableDropPaneId(panes, paneAtPoint(getPaneSlotRects(tab), x, y))
+        if (payload.type !== 'drop') { setDropPaneId(paneId); return }
+        setDropPaneId(null)
+        const write = resolveDropWrite(panes, paneId, payload.paths)
+        if (!write) return // 落在窗格区之外、窗格不可写、或 paths 为空：整个忽略
+        void ptyWrite(write.ptyId, write.text)
+      })
+      if (disposed) un() // 卸载竞态：await 期间组件已卸载时立即注销
+      else unlisten = un
+    }).catch(() => {}) // 非 Tauri 环境（测试/浏览器预览）下该模块的 IPC 调用会 reject，静默降级
+    return () => { disposed = true; unlisten?.() }
+  }, [])
   return (
     <div className="app">
       {!sidebarCollapsed && <aside className="sidebar"><Sidebar /></aside>}
@@ -185,7 +229,7 @@ export default function App() {
             <HomePage />
           </div>
           {tabs.filter((t) => t.kind === 'term').map((t) => (
-            <TabPanes key={t.id} tab={t} isActiveTab={activeId === t.id} />
+            <TabPanes key={t.id} tab={t} isActiveTab={activeId === t.id} dropPaneId={dropPaneId} />
           ))}
           {/* 总览标签（Task 8）：与上面的 home-wrap/TabPanes 同一策略——非激活标签也
               常驻挂载，只是 display:none 隐藏，标签切换/窗格变化都不会让它卸载重挂。

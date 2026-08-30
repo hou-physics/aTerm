@@ -196,3 +196,37 @@ describe('layout store — timelineCollapsed（时间线区域整体折叠，与
     expect(useLayout.getState().timelineCollapsed).toBe(false)
   })
 })
+
+describe('layout store — wheelMultiplier', () => {
+  it('首次启动、本地无偏好时默认 1.5', async () => {
+    mockLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().wheelMultiplier).toBe(1.5)
+  })
+
+  it('已持久化的值优先于默认值', async () => {
+    mockLocalStorage({ 'aterm-wheel-multiplier': '2.5' })
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().wheelMultiplier).toBe(2.5)
+  })
+
+  it('setWheelMultiplier 钳制到 [1, 6] 并持久化', async () => {
+    const ls = mockLocalStorage()
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().setWheelMultiplier(0.2)
+    expect(useLayout.getState().wheelMultiplier).toBe(1)
+    expect(ls.setItem).toHaveBeenCalledWith('aterm-wheel-multiplier', '1')
+    useLayout.getState().setWheelMultiplier(99)
+    expect(useLayout.getState().wheelMultiplier).toBe(6)
+    useLayout.getState().setWheelMultiplier(2.5)
+    expect(useLayout.getState().wheelMultiplier).toBe(2.5)
+  })
+
+  it('持久化的值是坏数据时退回默认值，不产生 NaN 倍率', async () => {
+    // NaN 倍率会让 createWheelAmplifier 的 carry 变成 NaN，从此再也不补发任何事件——
+    // 表现为"滚轮突然完全失去加速"，且没有任何报错。
+    mockLocalStorage({ 'aterm-wheel-multiplier': 'abc' })
+    const { useLayout } = await import('../store/layout')
+    expect(useLayout.getState().wheelMultiplier).toBe(1.5)
+  })
+})

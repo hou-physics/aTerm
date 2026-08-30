@@ -18,6 +18,14 @@ pub struct ThreadInfo {
     pub preview: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    /// 本链上所有 jsonl 文件的 session id，按时间升序（与 file_count 同源）。前端的
+    /// 窗格对账靠它把"我起进程时用 --session-id 指定的那个 id"映射回当前的 root_key
+    /// ——root_key 会在首条用户消息出现时翻一次，不能作为窗格的稳定身份。
+    pub session_ids: Vec<String>,
+    /// 本链是否已有真实标题。false 表示 `title` 是 session_id 前 8 位的回退值（见下方
+    /// scan_projects 里 title 的 unwrap_or_else），前端据此决定要不要采纳它——采纳了
+    /// 会把标签标题变成一串 uuid。
+    pub titled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -83,8 +91,10 @@ pub fn scan_projects(projects_dir: &Path) -> Vec<ProjectInfo> {
         let mut threads: Vec<ThreadInfo> = groups.into_iter().map(|(key, mut fs)| {
             fs.sort_by_key(|fm| fm.meta.last_ts_ms.unwrap_or(fm.mtime_ms));
             let newest = fs.last().unwrap();
-            let title = fs.iter().rev().find_map(|fm| fm.meta.title.clone())
-                .unwrap_or_else(|| newest.session_id.chars().take(8).collect());
+            let title_opt = fs.iter().rev().find_map(|fm| fm.meta.title.clone());
+            let titled = title_opt.is_some();
+            let title = title_opt.unwrap_or_else(|| newest.session_id.chars().take(8).collect());
+            let session_ids: Vec<String> = fs.iter().map(|fm| fm.session_id.clone()).collect();
             let cwd = fs.iter().rev().find_map(|fm| fm.meta.cwd.clone()).unwrap_or_default();
             ThreadInfo {
                 root_key: key,
@@ -97,6 +107,8 @@ pub fn scan_projects(projects_dir: &Path) -> Vec<ProjectInfo> {
                 preview: newest.meta.preview.clone(),
                 effort: newest.meta.effort.clone(),
                 permission_mode: newest.meta.permission_mode.clone(),
+                session_ids,
+                titled,
             }
         }).collect();
         threads.sort_by_key(|t| std::cmp::Reverse(t.last_activity_ms));
@@ -188,5 +200,57 @@ mod tests {
         assert_eq!(t.preview.as_deref(), Some("预览文本"));
         assert_eq!(t.effort.as_deref(), Some("max"));
         assert_eq!(t.permission_mode.as_deref(), Some("plan"));
+    }
+
+    /// 只有 assistant 记录、没有任何 user 消息的会话文件——对应"新对话刚建、用户还
+    /// 没发第一句话"。此时 parse_meta 取不到标题，ThreadInfo.titled 必须为 false。
+    fn write_untitled_session(dir: &std::path::Path, sid: &str, ts: &str) {
+        let l = format!(r#"{{"type":"assistant","uuid":"{sid}-a","timestamp":"{ts}","sessionId":"{sid}","cwd":"/tmp/fake-proj","message":{{"role":"assistant","model":"claude-opus-5"}}}}"#);
+        fs::write(dir.join(format!("{sid}.jsonl")), format!("{l}\n")).unwrap();
+    }
+
+    #[test]
+    fn session_ids_lists_whole_chain_in_time_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("-tmp-fake-proj");
+        fs::create_dir(&proj).unwrap();
+        // 同一条链的两个文件：A 早、B 晚
+        write_session(&proj, S_A, "u-root", "修复登录 bug", "2026-08-20T10:00:00.000Z");
+        write_session(&proj, S_B, "u-root", "修复登录 bug", "2026-08-21T09:00:00.000Z");
+
+        let out = scan_projects(tmp.path());
+        let t = &out[0].threads[0];
+        assert_eq!(t.session_ids, vec![S_A.to_string(), S_B.to_string()],
+            "必须按时间升序列出链上全部 session id——前端靠它把自己指定的 id 映射回当前 root_key");
+        assert_eq!(t.session_ids.len() as u32, t.file_count,
+            "session_ids 与 file_count 必须同源，否则两者会各自漂移");
+    }
+
+    #[test]
+    fn titled_false_when_chain_has_no_user_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("-tmp-fake-proj");
+        fs::create_dir(&proj).unwrap();
+        write_untitled_session(&proj, S_C, "2026-08-22T10:00:00.000Z");
+
+        let out = scan_projects(tmp.path());
+        let t = &out[0].threads[0];
+        assert_eq!(t.titled, false, "没有 user 消息就没有真实标题");
+        assert_eq!(t.title, S_C.chars().take(8).collect::<String>(),
+            "此时 title 是 session_id 前 8 位的回退值——前端必须靠 titled 才能分辨，不能采纳它");
+        assert_eq!(t.session_ids, vec![S_C.to_string()]);
+    }
+
+    #[test]
+    fn titled_true_when_chain_has_a_real_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("-tmp-fake-proj");
+        fs::create_dir(&proj).unwrap();
+        write_session(&proj, S_A, "u-root", "修复登录 bug", "2026-08-20T10:00:00.000Z");
+
+        let out = scan_projects(tmp.path());
+        let t = &out[0].threads[0];
+        assert_eq!(t.titled, true);
+        assert_eq!(t.title, "修复登录 bug");
     }
 }

@@ -12,8 +12,6 @@ import { createWheelAmplifier, wheelDeltaToLines } from '../wheel'
 
 // alt-screen（Claude Code 等 TUI）下滚轮换算的放大倍数，便于调参。
 const ALT_WHEEL_MULTIPLIER = 3
-// 应用自己接管鼠标上报（如 Claude TUI）时，每个真实滚轮事件额外补发 (n-1) 个合成事件的倍数，便于调参。
-const ALT_WHEEL_MOUSE_MULTIPLIER = 3
 
 // xterm 的主题现在直接来自 src/themes 里挑选出的真实 Theme（见 buildXtermTheme），不再是
 // 这里手写的两档硬编码色值——这样终端配色与全站 UI 配色（见 App.css / themes/derive.ts）
@@ -65,7 +63,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
 
     // alt-screen 下 xterm 把滚轮转成方向键序列发给应用，scrollSensitivity 不生效，默认体验很慢很粘；
     // 这里接管滚轮事件自己换算成方向键，实现加速。
-    const amplifyMouseWheel = createWheelAmplifier(ALT_WHEEL_MOUSE_MULTIPLIER)
+    const amplifyMouseWheel = createWheelAmplifier(useLayout.getState().wheelMultiplier)
     term.attachCustomWheelEventHandler((ev) => {
       if (term.buffer.active.type !== 'alternate') return true
       if (term.modes.mouseTrackingMode !== 'none') {
@@ -95,7 +93,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       const cellH = (el.clientHeight || rows * 17) / rows
       const wheelAmp =
         term.buffer.active.type !== 'alternate' ? 'off' :
-        term.modes.mouseTrackingMode !== 'none' ? `mouse×${ALT_WHEEL_MOUSE_MULTIPLIER}` :
+        term.modes.mouseTrackingMode !== 'none' ? `mouse×${useLayout.getState().wheelMultiplier}` :
         `keys×${ALT_WHEEL_MULTIPLIER}`
       term.write(
         `\r\n\x1b[90m[aTerm 诊断] buffer=${term.buffer.active.type} mouse=${term.modes.mouseTrackingMode} ` +

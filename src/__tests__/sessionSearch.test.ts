@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { filterProjectsByQuery, matchesQuery } from '../sessionSearch'
 import type { ProjectInfo } from '../ipc'
+import { makeThread } from './factories'
 
 describe('matchesQuery：大小写不敏感子串匹配', () => {
   it('空 query 视为全部匹配', () => {
@@ -26,14 +27,14 @@ const PROJECTS: ProjectInfo[] = [
   {
     dirName: 'p1', cwd: '/Users/x/phineuro', lastActivityMs: 0,
     threads: [
-      { rootKey: 'u1', resumeSessionId: 's1', title: '修复登录流程', cwd: '/Users/x/phineuro', lastActivityMs: 2, fileCount: 1 },
-      { rootKey: 'u2', resumeSessionId: 's2', title: '写测试', cwd: '/Users/x/phineuro', lastActivityMs: 1, fileCount: 1 },
+      makeThread({ title: '修复登录流程' }),
+      makeThread({ title: '写测试' }),
     ],
   },
   {
     dirName: 'p2', cwd: '/Users/x/aterm', lastActivityMs: 0,
     threads: [
-      { rootKey: 'a1', resumeSessionId: 's3', title: '重构分屏布局', cwd: '/Users/x/aterm', lastActivityMs: 3, fileCount: 1 },
+      makeThread({ title: '重构分屏布局' }),
     ],
   },
 ]

@@ -266,11 +266,13 @@ function PaneItem({
   pane,
   width,
   showTitlebar,
+  dropPaneId,
 }: {
   tab: Tab
   pane: Pane
   width: number
   showTitlebar: boolean
+  dropPaneId?: string | null
 }) {
   const focused = tab.activePaneId === pane.id
 
@@ -287,7 +289,7 @@ function PaneItem({
 
   return (
     <div
-      className={`pane${showTitlebar && focused ? ' pane-focused' : ''}`}
+      className={`pane${showTitlebar && focused ? ' pane-focused' : ''}${pane.id === dropPaneId ? ' pane-drop-target' : ''}`}
       style={{ flexGrow: width, flexShrink: 0, flexBasis: 0 }}
       onPointerDownCapture={onPointerDownCapture}
       // 拖放落点解析（设计文档 §5-B）的稳定查询锚点：与只在持有 PTY 时才出现的
@@ -319,7 +321,15 @@ function PaneItem({
 // 这棵子树里，而是扁平挂载在 TerminalLayer.tsx（与本组件同级，见该文件顶部注释），
 // 按上面这些插槽的实测矩形绝对定位覆盖上去——这样"标签是否激活"只影响布局与显隐，
 // 不再影响 xterm 实例本身是否存在，为将来"把窗格拖进另一个标签"铺路。
-export function TabPanes({ tab, isActiveTab }: { tab: Tab; isActiveTab: boolean }) {
+export function TabPanes({
+  tab,
+  isActiveTab,
+  dropPaneId,
+}: {
+  tab: Tab
+  isActiveTab: boolean
+  dropPaneId?: string | null
+}) {
   const rowRef = useRef<HTMLDivElement>(null)
   const widths = tab.paneWidths ?? equalPaneWidths(tab.panes.length)
   const showTitlebar = tab.panes.length > 1
@@ -333,6 +343,7 @@ export function TabPanes({ tab, isActiveTab }: { tab: Tab; isActiveTab: boolean 
         pane={pane}
         width={widths[i] ?? 1 / tab.panes.length}
         showTitlebar={showTitlebar}
+        dropPaneId={dropPaneId}
       />,
     )
     if (i < tab.panes.length - 1) {

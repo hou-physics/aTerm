@@ -12,9 +12,11 @@ vi.mock('../ipc', () => ({
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 
+import * as ipc from '../ipc'
 import { PanePicker } from '../components/PanePicker'
 import { useSessions } from '../store/sessions'
 import { type Tab, useTabs } from '../store/tabs'
+import { makeThread } from './factories'
 
 const PROJECTS = [
   {
@@ -22,8 +24,8 @@ const PROJECTS = [
     cwd: '/home/proj-a',
     lastActivityMs: 1000,
     threads: [
-      { rootKey: 'a1', resumeSessionId: 'sid-a1', title: '修复登录流程', cwd: '/home/proj-a', lastActivityMs: 1000, fileCount: 1 },
-      { rootKey: 'a2', resumeSessionId: 'sid-a2', title: '写单元测试', cwd: '/home/proj-a', lastActivityMs: 900, fileCount: 1 },
+      makeThread({ title: '修复登录流程' }),
+      makeThread({ rootKey: 'a2', title: '写单元测试' }),
     ],
   },
   {
@@ -31,7 +33,7 @@ const PROJECTS = [
     cwd: '/home/proj-b',
     lastActivityMs: 800,
     threads: [
-      { rootKey: 'b1', resumeSessionId: 'sid-b1', title: '重构支付模块', cwd: '/home/proj-b', lastActivityMs: 800, fileCount: 1 },
+      makeThread({ title: '重构支付模块' }),
     ],
   },
 ]
@@ -111,7 +113,7 @@ describe('PanePicker — 搜索框过滤最近会话与全部项目（大小写�
           dirName: 'proj-mixed',
           cwd: '/home/CamelCase',
           lastActivityMs: 500,
-          threads: [{ rootKey: 'm1', resumeSessionId: 'sid-m1', title: 'fix Login Bug', cwd: '/home/CamelCase', lastActivityMs: 500, fileCount: 1 }],
+          threads: [makeThread({ title: 'fix Login Bug' })],
         },
       ],
     })
@@ -163,6 +165,32 @@ describe('PanePicker — 「新对话」默认项目解析', () => {
     })
     // 不应出现"选择项目"二次选择列表
     expect(screen.queryByText('选择项目')).toBeNull()
+  })
+
+  // 回归用例（Task 1 评审补测）：PanePicker 此前自己写死 `inject: 'claude'`，绕过了
+  // 身份绑定——上面两个用例只断言 ptyId/title，改回写死值也不会报错。这里锁住
+  // startNewConversationIn 真的走了 newConversationSpec：spawn 命令里带 --session-id，
+  // 且窗格上记的 sessionId 与 inject 里的那个 uuid 必须是同一个（不能只各自非空）。
+  it('「新对话」注入 --session-id，且窗格记录的 sessionId 与注入命令里的 uuid 一致', async () => {
+    const tab = makeTab(
+      [{ id: 'p1', ptyId: 'pty-1', title: '窗格甲', dirName: 'proj-a', rootKey: 'a1', threadKey: 'proj-a:a1' }, { id: 'p2', title: '新窗格' }],
+      'p2',
+    )
+    useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }, tab], activeId: 'tab-1' })
+    render(<PanePicker tab={tab} paneId="p2" />)
+
+    fireEvent.click(screen.getByText('新对话'))
+
+    await vi.waitFor(() => {
+      expect(ipc.ptySpawn).toHaveBeenCalledWith(
+        expect.objectContaining({ inject: expect.stringMatching(/^claude --session-id [0-9a-f-]{36}$/) }),
+      )
+    })
+
+    const pane = useTabs.getState().tabs.find((x) => x.id === 'tab-1')!.panes.find((p) => p.id === 'p2')!
+    expect(pane.sessionId).toBeTruthy()
+    const call = vi.mocked(ipc.ptySpawn).mock.calls[0][0] as { inject: string }
+    expect(call.inject).toBe(`claude --session-id ${pane.sessionId}`)
   })
 
   it('来源窗格没有 dirName（如普通 zsh 终端）时，点击「新对话」改为列出全部项目供选择', async () => {

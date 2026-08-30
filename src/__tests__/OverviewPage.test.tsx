@@ -4,6 +4,7 @@ import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { BLOCK_WIDTH_PX } from '../overviewLayout'
 import { blockKey, useOverviewStore } from '../store/overview'
 import { useSessions } from '../store/sessions'
+import { makeThread } from './factories'
 
 // OverviewPage 渲染 SessionBlock（Task 6），后者内部会调 useThreadStatus，其所在模块
 // store/status.ts 在 import 时就会触发一次真实的模块级注册（listen('session-status', ...)
@@ -26,9 +27,7 @@ import * as ipc from '../ipc'
 const DIR = 'proj'
 
 function thread(rootKey: string, title: string, lastActivityMs: number): ThreadInfo {
-  return {
-    rootKey, resumeSessionId: `s-${rootKey}`, title, cwd: '/tmp/demo', lastActivityMs, fileCount: 1,
-  }
+  return makeThread({ rootKey, resumeSessionId: `s-${rootKey}`, title, cwd: '/tmp/demo', lastActivityMs, fileCount: 1 })
 }
 
 function setProject(threads: ThreadInfo[]) {

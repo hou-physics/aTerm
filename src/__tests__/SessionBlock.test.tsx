@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionBlock } from '../components/SessionBlock'
 import { blockKey, useOverviewStore } from '../store/overview'
 import { threadStatusKey, useStatusStore } from '../store/status'
+import { makeThread } from './factories'
 
 // SessionBlock 内部会调 useThreadStatus，其所在模块 store/status.ts 在 import 时就会
 // 触发一次真实的模块级注册（listen('session-status', ...) + getSessionStatuses()，见
@@ -14,12 +15,11 @@ import { threadStatusKey, useStatusStore } from '../store/status'
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 vi.mock('../ipc', () => ({ getSessionStatuses: vi.fn(async () => []) }))
 
-const thread = {
-  rootKey: 'r1', resumeSessionId: 's1', title: '重构解析器', cwd: '/tmp/demo',
-  lastActivityMs: Date.now() - 5 * 60_000, fileCount: 1,
+const thread = makeThread({
+  rootKey: 'r1', title: '重构解析器',
+  lastActivityMs: Date.now() - 5 * 60_000,
   model: 'claude-opus-5', contextTokens: 106_797, preview: '正在核查解析器字段',
-  effort: 'xhigh', permissionMode: 'acceptEdits',
-}
+})
 
 beforeEach(() => {
   useStatusStore.setState({ statuses: new Map() })

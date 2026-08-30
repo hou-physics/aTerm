@@ -67,4 +67,34 @@ describe('createWheelAmplifier', () => {
     target.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true }))
     expect(invocationCount).toBe(1)
   })
+
+  it('小数倍率靠余量累积逼近——1.5 倍在 10 次真实事件后总补发 5 次', () => {
+    const target = document.createElement('div')
+    const amplify = createWheelAmplifier(1.5)
+    let invocationCount = 0
+    target.addEventListener('wheel', (e) => {
+      invocationCount++
+      amplify(target, e as WheelEvent)
+    })
+    for (let i = 0; i < 10; i++) {
+      target.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true }))
+    }
+    // 10 次真实 + 5 次补发 = 15。改动前的实现会补发 10 次（每次都进一次循环体），
+    // 得到 20——这个用例正是用来钉住那个差别的。
+    expect(invocationCount).toBe(15)
+  })
+
+  it('小数倍率在单次事件上不四舍五入——第一次不补发，第二次才补发', () => {
+    const target = document.createElement('div')
+    const amplify = createWheelAmplifier(1.5)
+    let invocationCount = 0
+    target.addEventListener('wheel', (e) => {
+      invocationCount++
+      amplify(target, e as WheelEvent)
+    })
+    target.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true }))
+    expect(invocationCount).toBe(1)
+    target.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true }))
+    expect(invocationCount).toBe(3) // 第二次真实事件 + 它带出的 1 次补发
+  })
 })

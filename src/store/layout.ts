@@ -18,6 +18,8 @@ type LayoutState = {
   timelineCollapsed: boolean
   setTimelineCollapsed(v: boolean): void
   commitTimelineCollapsed(): void
+  wheelMultiplier: number
+  setWheelMultiplier(n: number): void
 }
 
 const SIDEBAR_KEY = 'aterm-sidebar-collapsed'
@@ -141,6 +143,26 @@ function persistTimelineCollapsed(v: boolean) {
   try { localStorage.setItem(TIMELINE_COLLAPSED_KEY, v ? '1' : '0') } catch { /* 忽略持久化失败 */ }
 }
 
+const WHEEL_MULTIPLIER_KEY = 'aterm-wheel-multiplier'
+// Claude TUI 自己接管鼠标上报时，每个真实滚轮事件的放大倍数。原为 3，用户反馈过快。
+// 滑块 UI 留到 V3.2（届时会有设置入口）；值先进 store 是为了那时的滑块是纯 UI 增量。
+export const WHEEL_MULTIPLIER_DEFAULT = 1.5
+const WHEEL_MULTIPLIER_MIN = 1
+const WHEEL_MULTIPLIER_MAX = 6
+
+function clampWheelMultiplier(n: number): number {
+  if (!Number.isFinite(n)) return WHEEL_MULTIPLIER_DEFAULT
+  return Math.min(WHEEL_MULTIPLIER_MAX, Math.max(WHEEL_MULTIPLIER_MIN, n))
+}
+
+function readPersistedWheelMultiplier(): number {
+  try {
+    const v = localStorage.getItem(WHEEL_MULTIPLIER_KEY)
+    if (v !== null) return clampWheelMultiplier(Number(v))
+  } catch { /* localStorage 不可用（如隐私模式），忽略 */ }
+  return WHEEL_MULTIPLIER_DEFAULT
+}
+
 export const useLayout = create<LayoutState>((set, get) => ({
   sidebarCollapsed: readPersistedSidebarCollapsed(),
   toggleSidebar: () => {
@@ -192,5 +214,11 @@ export const useLayout = create<LayoutState>((set, get) => ({
   },
   commitTimelineCollapsed: () => {
     persistTimelineCollapsed(get().timelineCollapsed)
+  },
+  wheelMultiplier: readPersistedWheelMultiplier(),
+  setWheelMultiplier: (n) => {
+    const v = clampWheelMultiplier(n)
+    try { localStorage.setItem(WHEEL_MULTIPLIER_KEY, String(v)) } catch { /* 忽略持久化失败 */ }
+    set({ wheelMultiplier: v })
   },
 }))

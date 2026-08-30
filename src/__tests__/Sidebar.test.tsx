@@ -14,7 +14,7 @@ vi.mock('../ipc', () => ({
       dirName: 'proj-a',
       cwd: '/home/proj-a',
       lastActivityMs: 100,
-      threads: [{ rootKey: 'root-a', resumeSessionId: 'sid-a', title: '修复登录', cwd: '/home/proj-a', lastActivityMs: 100, fileCount: 1 }],
+      threads: [makeThread({ rootKey: 'root-a', title: '修复登录' })],
     },
   ]),
   readConversation: vi.fn(),
@@ -41,7 +41,14 @@ vi.mock('../store/hooksInstall', () => ({
 }))
 vi.mock('../closeRequest', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
+// App.tsx 挂载时会动态 import('@tauri-apps/api/webview') 接线文件拖放；理由与
+// App.test.tsx 完全一致（见该文件注释）——不替身会让每条用例都触发一次真实的、时机
+// 不定的 IPC 调用噪音。
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
+}))
 
+import { makeThread } from './factories'
 import App from '../App'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
