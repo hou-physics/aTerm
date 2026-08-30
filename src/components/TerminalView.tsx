@@ -7,6 +7,7 @@ import { ptyResize, ptyWrite } from '../ipc'
 import { attachPty } from '../ptyBuffer'
 import { useLayout } from '../store/layout'
 import { useTheme } from '../store/theme'
+import { registerPaste } from '../terminalPaste'
 import { buildXtermTheme } from '../themes/derive'
 import { createWheelAmplifier, wheelDeltaToLines } from '../wheel'
 
@@ -52,6 +53,10 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     termRef.current = term
     fitRef.current = fit
     term.onData((d) => { void ptyWrite(ptyId, d) })
+    // 拖放文件到本窗格（App.tsx）需要把它当一次「粘贴」投递给这个终端实例——term.paste()
+    // 会按当前是否开启括号粘贴模式自动包裹标记，是 Claude TUI 把它识别成图片附件的关键
+    // （见 terminalPaste.ts 顶部注释）。它会触发上面这个 onData，数据照常流到 PTY。
+    const unregisterPaste = registerPaste(ptyId, (text) => term.paste(text))
 
     // alt-screen（Claude Code 等 TUI）：无回滚，xterm 会渲染一条无意义的满高滚动条——切到该 buffer 时隐藏它；
     // 同时清空滚轮累积余量，避免残留分数跨模式泄漏。
@@ -146,7 +151,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       if (fontSizeFrame) cancelAnimationFrame(fontSizeFrame)
       window.removeEventListener('keydown', onDiagKeyDown)
       bufferChangeDisposable.dispose()
-      ro.disconnect(); detach(); unsubTheme(); unsubFontSize(); term.dispose()
+      ro.disconnect(); detach(); unsubTheme(); unsubFontSize(); unregisterPaste(); term.dispose()
     }
   }, [ptyId])
 
