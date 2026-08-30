@@ -26,11 +26,20 @@ export function wheelDeltaToLines(
 // xterm 用 view.devicePixelRatio 换算鼠标坐标，转发原值在 Retina 下才准确，也不依赖测试/嵌入环境里的全局绑定。
 export function createWheelAmplifier(multiplier: number): (target: EventTarget, ev: WheelEvent) => void {
   let synthesizing = false
+  // 未满一个事件的补发余量，跨事件累加。合成事件只能是整数个，而 1.5 这样的倍率
+  // 要求"平均每次补发 0.5 个"——靠余量累积实现：攒够 1 才真的补发一个，长期均值
+  // 收敛到 multiplier。与 wheelDeltaToLines 的 remainder 是同一手法。
+  // 整数倍率下 carry 恒为 0，行为与改动前逐次相同。
+  let carry = 0
   return (target, ev) => {
     if (synthesizing) return
+    carry += multiplier - 1
+    const extra = Math.floor(carry)
+    carry -= extra
+    if (extra <= 0) return
     synthesizing = true
     try {
-      for (let i = 1; i < multiplier; i++) {
+      for (let i = 0; i < extra; i++) {
         target.dispatchEvent(new WheelEvent('wheel', {
           deltaX: ev.deltaX, deltaY: ev.deltaY, deltaZ: ev.deltaZ, deltaMode: ev.deltaMode,
           clientX: ev.clientX, clientY: ev.clientY,
