@@ -747,3 +747,37 @@ describe('Sidebar — 空态判断需要参考 loading，不能把"正在扫描"
     await act(async () => { resolveList?.([]) })
   })
 })
+
+// 补一条缺失的回归测试：拖入窗格路径（构造 sessionArgs 那处，Sidebar.tsx:219）的
+// 标题回退此前没有任何断言覆盖——「终审必修 4」那条用例用的是 titled 默认为 true
+// 的会话，且只断言了 sessionId/threadKey。这里用 titled 为 false 的会话走完整的
+// 拖入窗格流程，断言落地窗格的 title 是「新对话」，不是 ThreadInfo.title 存的那串
+// session id 前 8 位十六进制。
+describe('Sidebar — 拖入窗格：pane.title 回退为「新对话」', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('titled 为 false 的会话拖入窗格：落地窗格的 title 是「新对话」，不是 session id 前 8 位', async () => {
+    vi.mocked(ipc.listProjects).mockResolvedValueOnce([{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: [makeThread({ rootKey: 'r-untitled-drag', title: 'ebd067d4', titled: false, resumeSessionId: 's-untitled-drag' })],
+    }])
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('新对话').closest('.side-item') as HTMLElement
+
+    await drag(item, { x: 10, y: 10 }, { x: 300, y: 50 })
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    const newPane = t.panes[1]
+    await act(async () => { await Promise.resolve() }) // startPaneTerminal 是 async，flush 一次
+    const updated = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes.find((p) => p.id === newPane.id)!
+    expect(updated.title).toBe('新对话')
+  })
+})
