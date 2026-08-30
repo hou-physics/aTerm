@@ -18,6 +18,16 @@ describe('resolvePaneIdentity', () => {
     expect(got?.dirName).toBe('-tmp-a')
     expect(got?.threadKey).toBe('-tmp-a:u-root')
     expect(got?.title).toBe('修登录')
+
+    // 用例名宣称"命中链上任意一个文件的 session id"，但上面只查了 sessionIds 数组的
+    // 首元素——如果实现退化成 `sessionIds[0] === sessionId`（而不是
+    // `sessionIds.includes(sessionId)`），上面几条断言依然全绿，宣称的性质根本没被
+    // 锁住。这里额外用数组第二个元素去查，断言解析到同一条链的同一个 rootKey。
+    const gotByLaterId = resolvePaneIdentity(projects, 's-new')
+    expect(gotByLaterId?.rootKey).toBe('u-root')
+    expect(gotByLaterId?.dirName).toBe('-tmp-a')
+    expect(gotByLaterId?.threadKey).toBe('-tmp-a:u-root')
+    expect(gotByLaterId?.title).toBe('修登录')
   })
 
   it('titled 为 false 时不给 title——采纳回退值会把标签标题变成一串 uuid', () => {
