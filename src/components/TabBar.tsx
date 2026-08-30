@@ -7,7 +7,8 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import { newTerminal } from '../actions'
+import { createPortal } from 'react-dom'
+import { newConversation, newTerminal, resumeThread } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
 import { DRAG_THRESHOLD_PX, pointInRect, resolveDropMode, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
@@ -18,6 +19,66 @@ import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { type Tab, useTabs } from '../store/tabs'
 import { ContextMenu } from './ContextMenu'
+import { type SessionPick, SessionPicker } from './SessionPicker'
+
+// 「＋」的浮层：与 ContextMenu.tsx 同一套"portal 到 document.body + 视口钳制 +
+// 三种关闭方式（点外部/Esc/窗口失焦）"，只是内容换成 SessionPicker 而不是菜单项
+// 列表——定位/关闭逻辑不重复实现第三套，直接照抄 ContextMenu 的做法（那份实现
+// 已经解决过"菜单是拖拽手柄的 DOM 后代导致 pointerCapture 吞掉 click"这类问题，
+// 见 ContextMenu.tsx 顶部注释）。不传 defaultProject 给 SessionPicker——「＋」不像
+// PanePicker 那样有一个"来源窗格"可以推断项目，「新对话」应当列出全部项目供选。
+function PlusMenu({
+  x,
+  y,
+  onPick,
+  onDismiss,
+}: {
+  x: number
+  y: number
+  onPick: (pick: SessionPick) => void
+  onDismiss: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState({ x, y })
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const { offsetWidth: w, offsetHeight: h } = el
+    if (w === 0 && h === 0) return
+    const clampedX = Math.max(4, Math.min(x, window.innerWidth - w - 4))
+    const clampedY = Math.max(4, Math.min(y, window.innerHeight - h - 4))
+    setPos({ x: clampedX, y: clampedY })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [x, y])
+
+  useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onDismiss()
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onDismiss()
+    }
+    const t = setTimeout(() => {
+      document.addEventListener('pointerdown', onPointerDown, true)
+      window.addEventListener('keydown', onKeyDown, true)
+      window.addEventListener('blur', onDismiss)
+    }, 0)
+    return () => {
+      clearTimeout(t)
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('blur', onDismiss)
+    }
+  }, [onDismiss])
+
+  return createPortal(
+    <div ref={ref} className="plus-menu" style={{ left: pos.x, top: pos.y }}>
+      <SessionPicker onPick={onPick} />
+    </div>,
+    document.body,
+  )
+}
 
 // id：每次 pointerdown 分配的单调递增拖拽序号，见下方 nextDragIdRef 与 onTabPointerDown
 // 注释——dragSafetyNet.ts 的 isDragActive() 靠它辨认"自己是不是仍然对应当前这次拖拽"，
@@ -83,6 +144,22 @@ export function TabBar() {
   // dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释。
   const nextDragIdRef = useRef(0)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
+  const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null)
+
+  // 「＋」不再直接开一个空终端，而是弹出与 ⌘D 空窗格同一套 SessionPicker，让用户
+  // 挑「新终端 / 新对话（选项目） / 恢复某条会话」——⌘T 仍然是"我就要一个 shell"
+  // 的快捷路径，两者分工不同，见 App.tsx 里 ⌘T 的处理器（本任务未改动它）。
+  const onPlusClick = useCallback((e: ReactMouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    setPlusMenu({ x: r.left, y: r.bottom + 4 })
+  }, [])
+
+  const onPlusPick = useCallback((pick: SessionPick) => {
+    setPlusMenu(null)
+    if (pick.kind === 'shell') { void newTerminal(); return }
+    if (pick.kind === 'newConversation') { void newConversation(pick.project.cwd); return }
+    void resumeThread(pick.project.dirName, pick.project.cwd, pick.thread)
+  }, [])
 
   // 拖拽清理的唯一入口：pointerup/pointercancel（同一个 onTabPointerUp）、
   // lostpointercapture（指针捕获被浏览器隐式释放——例如被拖的标签因为其它原因中途
@@ -389,8 +466,8 @@ export function TabBar() {
         <button
           type="button"
           className="tab-new"
-          onClick={() => void newTerminal()}
-          title="新建终端标签 (⌘T)"
+          onClick={onPlusClick}
+          title="新建标签"
         >
           ＋
         </button>
@@ -425,6 +502,10 @@ export function TabBar() {
           ]}
           onDismiss={() => setContextMenu(null)}
         />
+      )}
+      {/* 「＋」的会话选择浮层，见上方 PlusMenu 注释。 */}
+      {plusMenu && (
+        <PlusMenu x={plusMenu.x} y={plusMenu.y} onPick={onPlusPick} onDismiss={() => setPlusMenu(null)} />
       )}
     </div>
   )
