@@ -2,7 +2,7 @@ import './ptyBuffer'
 import './closeRequest'
 import './contextMenu'
 import './App.css'
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { newTerminal } from './actions'
 import { ConversationPanel } from './components/ConversationPanel'
 import { DragGhost } from './components/DragGhost'
@@ -39,9 +39,17 @@ export default function App() {
   const metadataRefreshRef = useRef<Throttled | null>(null)
   const skipFirstStatusTickRef = useRef(true)
   const hint = useHint((s) => s.message)
+  // refresh() 有三个触发点（挂载、window focus、statusVersion 变化时的节流刷新），
+  // 每一处刷新之后都必须对账——否则新对话的身份会在其中某些路径上永远补不上。
+  // 不把对账塞进 useSessions.refresh 内部：那会让一个纯数据 store 反向依赖 tabs
+  // 这个 UI 状态 store。
+  const refreshAndReconcile = useCallback(async () => {
+    await refresh()
+    useTabs.getState().reconcilePanes(useSessions.getState().projects)
+  }, [refresh])
   useEffect(() => {
-    refresh().catch(console.error)
-    const onFocus = () => { refresh().catch(console.error) }
+    refreshAndReconcile().catch(console.error)
+    const onFocus = () => { refreshAndReconcile().catch(console.error) }
     window.addEventListener('focus', onFocus)
 
     // 会话元数据（模型 / effort / 权限模式 / 上下文用量 / 预览行 / 标题）随转录增长
@@ -50,7 +58,7 @@ export default function App() {
     // 推来的 session-status 事件恰好标志"某个转录被写了"，拿它当刷新信号；但必须
     // 节流：refresh() 会对每个项目的每个转录做头尾读取，而运行中的会话每 120ms 就
     // 可能推一条事件。
-    const throttled = createTrailingThrottle(() => { refresh().catch(console.error) }, METADATA_REFRESH_MS)
+    const throttled = createTrailingThrottle(() => { refreshAndReconcile().catch(console.error) }, METADATA_REFRESH_MS)
     metadataRefreshRef.current = throttled
 
     return () => {
@@ -58,7 +66,7 @@ export default function App() {
       throttled.cancel()
       metadataRefreshRef.current = null
     }
-  }, [refresh])
+  }, [refreshAndReconcile])
 
   // statusVersion 是 store 里的单调计数器（不是 statuses 那个每次都换引用的 Map），
   // 所以这个效应只在确有状态条目更新时才跑。首次挂载那一下跳过——上面的 effect 已经

@@ -1,7 +1,9 @@
 import { create } from 'zustand'
 import { ptyIsAlive, ptyKill, ptySpawn } from '../ipc'
+import type { ProjectInfo } from '../ipc'
 import { equalPaneWidths, MAX_PANES } from '../paneLayout'
 import { dropInsertionIndex, type DropTarget } from '../paneDrop'
+import { resolvePaneIdentity } from '../paneReconcile'
 import { ptyEventsReady } from '../ptyBuffer'
 import { useOverviewStore } from './overview'
 
@@ -138,6 +140,7 @@ type TabsState = {
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
   setPaneWidths(tabId: string, widths: number[]): void
+  reconcilePanes(projects: ProjectInfo[]): void
 }
 
 export const useTabs = create<TabsState>((set, get) => ({
@@ -506,4 +509,41 @@ export const useTabs = create<TabsState>((set, get) => ({
     set((s) => ({
       tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, paneWidths: widths } : t)),
     })),
+  // 窗格身份对账（spec §3.3c）：把"我起进程时指定的 sessionId"映射回该链此刻的
+  // rootKey/标题，回填进窗格。一处对账同时修好四个症状：标签标题不更新、侧栏点击
+  // 又开新标签、右侧对话面板不加载、底栏模型不显示。
+  //
+  // 只处理 sessionId 非空的窗格——--resume 起的窗格一开始就知道自己的 rootKey，
+  // 不需要也不该被这里改动。
+  //
+  // 身份完全未变时返回同一个 tabs 引用（no-op，不产生新对象），与本文件既有惯例
+  // 一致（moveArrayItem、movePanesToTab 拖到自己标签时都是这样）——这个 action 每
+  // 15 秒被调用一次，制造新引用会让整棵标签树无谓重渲染。
+  reconcilePanes: (projects) => {
+    set((s) => {
+      let changed = false
+      const tabs = s.tabs.map((tab) => {
+        if (tab.kind !== 'term') return tab
+        let tabChanged = false
+        const panes = tab.panes.map((pane) => {
+          if (!pane.sessionId) return pane
+          const id = resolvePaneIdentity(projects, pane.sessionId)
+          if (!id) return pane
+          // title 只在 resolvePaneIdentity 给出时才采纳（titled 为真）；否则保留窗格
+          // 现有标题（「新对话」），不要写入 uuid 前 8 位的回退值。
+          const nextTitle = id.title ?? pane.title
+          if (
+            pane.dirName === id.dirName && pane.rootKey === id.rootKey &&
+            pane.threadKey === id.threadKey && pane.title === nextTitle
+          ) return pane
+          tabChanged = true
+          return { ...pane, dirName: id.dirName, rootKey: id.rootKey, threadKey: id.threadKey, title: nextTitle }
+        })
+        if (!tabChanged) return tab
+        changed = true
+        return { ...tab, panes, title: deriveTabTitle(panes, tab.title) }
+      })
+      return changed ? { tabs } : {}
+    })
+  },
 }))
