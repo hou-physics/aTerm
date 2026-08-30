@@ -179,33 +179,54 @@ function readPersistedWheelMultiplier(): number {
 // 这个坑，这里照抄同一个写法。
 //
 // expanding=true 表示"刚展开"（窗口变宽）；expanding=false 表示"刚收起"（窗口变窄）。
-// panelWidthCss 是调用时刻的 store.panelWidth（CSS 像素）。
+// panelWidthCss 是调用时刻的 store.panelWidth（CSS 像素）。这里只做真正的一次调整，
+// 不管排队——排队由下面 resizeWindowForPanel 的 pendingPanelResize 负责。
+async function runPanelResize(expanding: boolean, panelWidthCss: number) {
+  const { getCurrentWindow, currentMonitor, PhysicalPosition, PhysicalSize } = await import('@tauri-apps/api/window')
+  const win = getCurrentWindow()
+  // panelWidth 存的是 CSS 像素，而 outerPosition/outerSize/Monitor.workArea 全部是
+  // 物理像素——这一步换算漏了的话，Retina（devicePixelRatio=2）上面板只会长出该有
+  // 宽度的一半，非 Retina 屏上又恰好正确，是最难查的那类缺陷（同 fileDrop.ts
+  // toLogicalPoint 顶部注释的坑，方向相反）。
+  const dpr = window.devicePixelRatio || 1
+  const delta = panelWidthCss * dpr
+  const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()])
+  if (expanding) {
+    const monitor = await currentMonitor()
+    if (!monitor) return // 拿不到当前显示器信息（极端环境）：放弃联动，保留窗口原状
+    const plan = planPanelExpand(
+      { x: pos.x, width: size.width },
+      { x: monitor.workArea.position.x, width: monitor.workArea.size.width },
+      delta,
+    )
+    await win.setPosition(new PhysicalPosition(plan.x, pos.y))
+    await win.setSize(new PhysicalSize(plan.width, size.height))
+  } else {
+    const plan = planPanelCollapse({ x: pos.x, width: size.width }, delta, WINDOW_MIN_WIDTH_CSS * dpr)
+    await win.setPosition(new PhysicalPosition(plan.x, pos.y))
+    await win.setSize(new PhysicalSize(plan.width, size.height))
+  }
+}
+
+// 排队队列：见 resizeWindowForPanel 顶部注释——快速连续触发时，后一次调整必须等前一次
+// 完全落地之后才开始读取窗口几何，这个模块级变量就是那条队列本身。
+let pendingPanelResize: Promise<void> = Promise.resolve()
+
+// 用户快速连续触发面板开关（手抖连按 ⌘J，或点了按钮又马上按快捷键）时，如果每次调用都
+// 各自起一条独立、互不等待的调整链，后一条链的 outerPosition()/outerSize() 可能在前一条
+// 链的 setPosition()/setSize() 落地之前就已经读到了窗口的旧坐标/旧尺寸——基于这份过期
+// 几何算出的目标位置和宽度自然是错的，表现为"窗口莫名其妙变成了奇怪的宽度"，且只能手动
+// 拖回来。这正是这整个模块想避免的那类问题，只是触发条件从"单次开合"变成了"连击"。
+//
+// 用一个模块级的 pendingPanelResize 把所有调整串成一条队列：新的调整接在上一条 *完全*
+// 落地（包括它自己的 setPosition/setSize 都 await 完）之后才开始，而不是在排队的这一刻
+// 就先把窗口几何读好——那样等于没有串行化，读到的仍然是"发起时"而不是"轮到自己执行时"
+// 的窗口状态。`.catch(() => {})` 直接挂在重新赋值给 pendingPanelResize 的这个 promise
+// 上（而不是只挂在 runPanelResize 内部）：这样任何一次调整失败（非 Tauri 环境、或真实
+// Tauri 调用出错）都不会让 pendingPanelResize 变成一个永久 rejected 的 promise——后面
+// 排队的调整仍然能正常执行，不会被前一次的失败卡死整条队列。
 function resizeWindowForPanel(expanding: boolean, panelWidthCss: number) {
-  void import('@tauri-apps/api/window').then(async ({ getCurrentWindow, currentMonitor, PhysicalPosition, PhysicalSize }) => {
-    const win = getCurrentWindow()
-    // panelWidth 存的是 CSS 像素，而 outerPosition/outerSize/Monitor.workArea 全部是
-    // 物理像素——这一步换算漏了的话，Retina（devicePixelRatio=2）上面板只会长出该有
-    // 宽度的一半，非 Retina 屏上又恰好正确，是最难查的那类缺陷（同 fileDrop.ts
-    // toLogicalPoint 顶部注释的坑，方向相反）。
-    const dpr = window.devicePixelRatio || 1
-    const delta = panelWidthCss * dpr
-    const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()])
-    if (expanding) {
-      const monitor = await currentMonitor()
-      if (!monitor) return // 拿不到当前显示器信息（极端环境）：放弃联动，保留窗口原状
-      const plan = planPanelExpand(
-        { x: pos.x, width: size.width },
-        { x: monitor.workArea.position.x, width: monitor.workArea.size.width },
-        delta,
-      )
-      await win.setPosition(new PhysicalPosition(plan.x, pos.y))
-      await win.setSize(new PhysicalSize(plan.width, size.height))
-    } else {
-      const plan = planPanelCollapse({ x: pos.x, width: size.width }, delta, WINDOW_MIN_WIDTH_CSS * dpr)
-      await win.setPosition(new PhysicalPosition(plan.x, pos.y))
-      await win.setSize(new PhysicalSize(plan.width, size.height))
-    }
-  }).catch(() => {}) // 非 Tauri 环境下静默降级，见上面函数顶部注释
+  pendingPanelResize = pendingPanelResize.then(() => runPanelResize(expanding, panelWidthCss)).catch(() => {})
 }
 
 export const useLayout = create<LayoutState>((set, get) => ({

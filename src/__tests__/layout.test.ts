@@ -1,18 +1,34 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { outerPositionMock, outerSizeMock, setPositionMock, setSizeMock, currentMonitorMock } = vi.hoisted(() => ({
-  outerPositionMock: vi.fn(async () => ({ x: 100, y: 50 })),
-  outerSizeMock: vi.fn(async () => ({ width: 1200, height: 800 })),
-  setPositionMock: vi.fn(async () => {}),
-  setSizeMock: vi.fn(async () => {}),
+const {
+  outerPositionMock, outerSizeMock, setPositionMock, setSizeMock, currentMonitorMock,
+  resetWindowGeometry,
+} = vi.hoisted(() => {
+  // 可变的"当前窗口几何"假状态，供下面的串行化竞态测试用：outerPosition/outerSize 从
+  // 这里读，setPosition/setSize 写回这里——这样才能真的测出"第二次调整读到的是第一次
+  // 落地后的几何，而不是发起时那份过期几何"，纯粹断言"被调用过"测不出竞态问题。
+  const initial = { x: 100, y: 50, width: 1200, height: 800 }
+  const windowGeometry = { ...initial }
+  const resetWindowGeometry = () => { Object.assign(windowGeometry, initial) }
+  const outerPositionMock = vi.fn(async () => ({ x: windowGeometry.x, y: windowGeometry.y }))
+  const outerSizeMock = vi.fn(async () => ({ width: windowGeometry.width, height: windowGeometry.height }))
+  const setPositionMock = vi.fn(async (pos: { x: number; y: number }) => {
+    windowGeometry.x = pos.x
+    windowGeometry.y = pos.y
+  })
+  const setSizeMock = vi.fn(async (size: { width: number; height: number }) => {
+    windowGeometry.width = size.width
+    windowGeometry.height = size.height
+  })
   // workArea 特意给得很宽（3840，4K 显示器量级）：下面几条测试用的 panelWidth 都不大，
   // 宽到不会意外触发 planPanelExpand 的"左移"/"铺满工作区"分支——那两条分支已经在
   // panelWindow.test.ts 里独立覆盖过，这里只关心"resizeWindowForPanel 有没有被触发、
-  // 传的数字对不对换算"，不想让分支切换掺进来干扰断言。
-  currentMonitorMock: vi.fn(async () => ({
+  // 传的数字对不对换算/是否串行化"，不想让分支切换掺进来干扰断言。
+  const currentMonitorMock = vi.fn(async () => ({
     workArea: { position: { x: 0, y: 0 }, size: { width: 3840, height: 2160 } },
-  })),
-}))
+  }))
+  return { outerPositionMock, outerSizeMock, setPositionMock, setSizeMock, currentMonitorMock, windowGeometry, resetWindowGeometry }
+})
 
 // store/layout.ts 展开/收起面板时会动态 import('@tauri-apps/api/window') 联动窗口位置/
 // 尺寸（见该文件 resizeWindowForPanel）。真实 Tauri 窗口 API 在 jsdom 里不可用，换成桩
@@ -65,6 +81,7 @@ async function flushWindowResize() {
 beforeEach(() => {
   vi.resetModules()
   vi.clearAllMocks()
+  resetWindowGeometry()
 })
 
 afterEach(() => {
@@ -334,5 +351,34 @@ describe('layout store — 面板展开/收起联动窗口尺寸（用户诉求�
     expect(setSizeMock).toHaveBeenCalledWith(expect.objectContaining({ width: 1200 + 800, height: 800 }))
     // x 不变（右边够，走"只变宽"分支）；y 不变（面板联动从不改变窗口的垂直位置）。
     expect(setPositionMock).toHaveBeenCalledWith(expect.objectContaining({ x: 100, y: 50 }))
+  })
+
+  // 竞态回归保护：快速连续两次触发 togglePanel（手抖连按 ⌘J，或点了按钮又马上按快捷键），
+  // 如果两次各自起一条互不等待的调整链，第二条链可能在第一条链的 setPosition/setSize
+  // 落地之前就已经读到了 outerPosition/outerSize——基于过期几何算出目标宽度，最终窗口
+  // 尺寸偏离预期（用户看到的是"窗口莫名其妙变成了奇怪的宽度"，还得手动拖回来）。
+  //
+  // outerPosition/outerSize/setPosition/setSize 这四个桩共享同一份可变的 windowGeometry
+  // 假状态（见文件顶部），因此能真的测出"第二次调整读到的是不是第一次落地后的几何"，
+  // 而不只是断言"两次都被调用过"那种测不出竞态的弱断言。
+  it('快速连续两次 togglePanel（不等待第一次落地）：窗口调整必须串行化，第二次基于第一次落地后的几何计算', async () => {
+    mockLocalStorage() // 初始收起（默认值）
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().togglePanel() // 展开：不等待
+    useLayout.getState().togglePanel() // 立即收起，不等待第一次落地
+    expect(useLayout.getState().panelCollapsed).toBe(true) // 状态本身是同步的，两次都已落地
+
+    await vi.waitFor(() => {
+      expect(setSizeMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+    })
+
+    // 第一次（展开）：初始 outerSize.width=1200，panelWidth 默认 400（dpr=1）→
+    // delta=400，workArea(3840) 够用 → 只变宽 → 新宽度 1600。
+    expect(setSizeMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ width: 1200 + 400 }))
+    // 第二次（收起）：如果正确地串行化、读到的是第一次落地后的 1600 → max(800, 1600-400) = 1200。
+    // 如果没有串行化、读到的是发起时那份过期的 1200 → max(800, 1200-400) = 800——
+    // 与串行化后的正确结果不同，足以区分两种实现（本用例先在未串行化的实现上跑出过
+    // 800，加上串行化后变成下面断言的 1200，见 panel-window-report.md 的红/绿记录）。
+    expect(setSizeMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ width: 1200 }))
   })
 })
