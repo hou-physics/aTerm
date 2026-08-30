@@ -172,11 +172,11 @@ function readPersistedWheelMultiplier(): number {
 // panelWindow.ts 的纯函数（那部分因为要连真实 Tauri API，没法直接单测；数学关系已经在
 // panelWindow.test.ts 里独立验证过）。
 //
-// 整条链走动态 import('@tauri-apps/api/window') 并在末尾 .catch(() => {})：非 Tauri
-// 环境（vitest/jsdom、浏览器预览）里 getCurrentWindow() 会因为读不到
-// window.__TAURI_INTERNALS__ 而同步抛错，不 catch 会变成未处理的 promise rejection，
-// 污染所有渲染真实组件树的测试文件——App.tsx 里文件拖放那段（onDragDropEvent）已经踩过
-// 这个坑，这里照抄同一个写法。
+// 整条链走动态 import('@tauri-apps/api/window')，末尾由 resizeWindowForPanel 统一 catch
+// （见其顶部注释）：非 Tauri 环境（vitest/jsdom、浏览器预览）里 getCurrentWindow() 会因为
+// 读不到 window.__TAURI_INTERNALS__ 而同步抛错，不 catch 会变成未处理的 promise
+// rejection，污染所有渲染真实组件树的测试文件——App.tsx 里文件拖放那段（onDragDropEvent）
+// 已经踩过这个坑，这里照抄同一个写法。
 //
 // expanding=true 表示"刚展开"（窗口变宽）；expanding=false 表示"刚收起"（窗口变窄）。
 // panelWidthCss 是调用时刻的 store.panelWidth（CSS 像素）。这里只做真正的一次调整，
@@ -221,12 +221,23 @@ let pendingPanelResize: Promise<void> = Promise.resolve()
 // 用一个模块级的 pendingPanelResize 把所有调整串成一条队列：新的调整接在上一条 *完全*
 // 落地（包括它自己的 setPosition/setSize 都 await 完）之后才开始，而不是在排队的这一刻
 // 就先把窗口几何读好——那样等于没有串行化，读到的仍然是"发起时"而不是"轮到自己执行时"
-// 的窗口状态。`.catch(() => {})` 直接挂在重新赋值给 pendingPanelResize 的这个 promise
+// 的窗口状态。`.catch(...)` 直接挂在重新赋值给 pendingPanelResize 的这个 promise
 // 上（而不是只挂在 runPanelResize 内部）：这样任何一次调整失败（非 Tauri 环境、或真实
 // Tauri 调用出错）都不会让 pendingPanelResize 变成一个永久 rejected 的 promise——后面
 // 排队的调整仍然能正常执行，不会被前一次的失败卡死整条队列。
+//
+// 这里必须吞掉 rejection（不能让它逃逸）：vitest/jsdom 下 getCurrentWindow() 会同步抛错
+// （见上面 runPanelResize 顶部注释），不吞会变成未处理的 promise rejection，污染所有渲染
+// 真实组件树的测试文件。但吞掉不等于装作没发生——真实 Tauri 环境里这条链也会失败，起因
+// 往往是 capabilities 权限没给全（例如本模块曾经缺过 core:window:allow-set-size /
+// allow-set-position，导致这整套面板变宽/变窄的功能在打包版里完全不生效，而 748 个测试
+// 全绿、构建也干净，因为 jsdom 里根本不会触达真实的权限系统）。所以吞归吞，必须把错误
+// console.warn 出来：下次再出现"功能没生效但测试全绿"，打开 devtools 就能立刻看到线索，
+// 而不必再像这次一样去翻 acl-manifests.json 逐条核对权限。
 function resizeWindowForPanel(expanding: boolean, panelWidthCss: number) {
-  pendingPanelResize = pendingPanelResize.then(() => runPanelResize(expanding, panelWidthCss)).catch(() => {})
+  pendingPanelResize = pendingPanelResize
+    .then(() => runPanelResize(expanding, panelWidthCss))
+    .catch((e) => { console.warn('[panel] 窗口尺寸联动失败', e) })
 }
 
 export const useLayout = create<LayoutState>((set, get) => ({
