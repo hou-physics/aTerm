@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, waitFor } from '@testing-library/react'
 
 vi.mock('../ipc', () => ({
   ptySpawn: vi.fn(async () => 'pty-1'),
@@ -52,7 +52,10 @@ vi.mock('@tauri-apps/api/webview', () => ({
 import App from '../App'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
+import { useLibrary } from '../store/library'
+import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
+import { makeThread } from './factories'
 
 const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
 const TAB_A = { id: 'tab-a', kind: 'term' as const, title: 'A', panes: [{ id: 'pane-a', ptyId: 'p1', title: 'A' }], activePaneId: 'pane-a' }
@@ -62,8 +65,10 @@ beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
   // hint 现在是独立 store（见 store/hint.ts），不再随 App 每次挂载天然重置——手动清空，
   // 避免上一个测试触发的轻提示（真实 setTimeout，2200ms 后才会自行清除）泄漏进下一个
-  // 测试的断言。
-  useHint.setState({ message: null })
+  // 测试的断言。Task 8 给 store 加了 action 字段——setState 是浅合并，漏了 action: null
+  // 不会让*这个*文件的测试立刻出错（这里的调用点都是单参数 show()），但这是给共享
+  // store 加字段后留下的隐患，且与"beforeEach 必须重置全部字段"这条约束字面不符。
+  useHint.setState({ message: null, action: null })
 })
 
 // App 挂载时会触发一次异步的 useSessions().refresh()（mock 的 listProjects 也是个
@@ -375,5 +380,53 @@ describe('App — ⌘W 关闭聚焦窗格；标签只剩一个窗格时等同关
 
     await act(async () => { await Promise.resolve() })
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+  })
+})
+
+// 评审 Task 8 ②：HomePageMenu.test.tsx 只渲染 <HomePage/>，从没有挂载过 <App/>——那四条
+// 用例只验证了 store/hint.ts 的契约（show() 带 action、超时一起清空），从未验证 App.tsx
+// 里 .pane-hint-action 这个按钮真的会被渲染出来、className 对不对、onClick 有没有接上。
+// 这里补一条整合用例，从主页右键隐藏一个项目开始，一路走到 App.tsx 渲染出的真实 DOM。
+//
+// 目标只是"按钮被渲染且接线正确"，不是"能点"：jsdom 测不出 pointer-events:none 这类
+// CSS 命中问题（真实点击是否命中，只能靠真机验证，见 App.css 里 .pane-hint 顶部注释），
+// fireEvent.click 在 jsdom 里会无视 CSS pointer-events 直接派发事件到目标节点上，
+// 这条用例因此不能、也不该被当作"验证了可点性"的证据。
+describe('App — 主页「隐藏项目」的可撤销提示挂到了真实 DOM 上（评审 Task 8 ②，整合用例）', () => {
+  const HIDDEN_PROJECT = {
+    dirName: '-tmp-hideme', cwd: '/tmp/hideme', lastActivityMs: Date.now(),
+    threads: [makeThread({ title: '会话' })],
+  }
+
+  beforeEach(() => {
+    useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
+  })
+
+  it('右键隐藏项目后，.pane-hint-action 按钮真的出现在 DOM 里；点击它、onClick 真的把项目找回来', async () => {
+    const { getByText, container } = await renderApp() // activeId 默认 home，主页可见
+    // 挂载时 App 会触发一次真实的异步 refresh()（mock 的 listProjects 恒返回 []），
+    // renderApp() 里那次微任务 flush 会让它先落地——项目数据必须在那之后再灌进去，
+    // 否则会被这次自动刷新覆盖回空数组（上面 DOM 快照曾经就是这样"看起来像坏了"）。
+    act(() => { useSessions.setState({ projects: [HIDDEN_PROJECT] as never, loading: false }) })
+
+    // 不用 getByText(/hideme/) 定位/断言：侧边栏「最近会话」也会显示同一个项目的
+    // basename（不受 hiddenProjects 影响，这是设计使然，只有主页卡片视图过滤），
+    // 隐藏后按项目名整页找文本永远还能在侧边栏命中一次，会把"卡片消失了"这条断言
+    // 假阳性地判定为失败。改为专门定位主页卡片区自己的 `.card .name` 节点。
+    const cardName = () => container.querySelector('.card .name')
+    expect(cardName()).toBeTruthy()
+
+    fireEvent.contextMenu(cardName() as Element)
+    fireEvent.click(getByText('隐藏项目'))
+    await waitFor(() => expect(cardName()).toBeNull())
+
+    // 按钮真的渲染出来了，不是只有 store 里的 action 字段。
+    const btn = container.querySelector('.pane-hint-action')
+    expect(btn).toBeTruthy()
+    expect(btn?.textContent).toBe('撤销')
+
+    // onClick 真的接上了：点它之后项目应该回到卡片列表。
+    fireEvent.click(btn as Element)
+    await waitFor(() => expect(cardName()).toBeTruthy())
   })
 })

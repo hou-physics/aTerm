@@ -47,7 +47,9 @@ const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
 
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
-  useHint.setState({ message: null })
+  // Task 8 给 useHint 加了 action 字段（见 store/hint.ts），setState 是浅合并，这里一并
+  // 重置，不留一个字段没被清空。
+  useHint.setState({ message: null, action: null })
   useDnd.setState({ target: null, tabBarIndex: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
   document.body.classList.remove('dragging-no-select')

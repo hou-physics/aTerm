@@ -99,7 +99,19 @@ export function HomePage() {
                 }}
               />
             ))}
-            {projects.length === 0 && <div className="sub">尚未发现 Claude Code 会话（~/.claude/projects 为空）</div>}
+            {/* 空态判断必须看 visibleProjects，不能只看 projects（评审 Task 8 ①）：
+                如果这里仍写 projects.length === 0，把「最近项目」全部隐藏后卡片区会
+                变成一片空白——本期没有设置面板兜底，唯一的恢复手段是隐藏那一刻的
+                2.2 秒轻提示，一旦错过就无处可寻，用户会以为应用坏了。两种"卡片区
+                是空的"要给出不同的话："没有会话"和"会话都被你自己藏起来了"对用户是
+                完全不同的含义，不能用同一句文案糊弄过去。 */}
+            {visibleProjects.length === 0 && (
+              <div className="sub">
+                {projects.length === 0
+                  ? '尚未发现 Claude Code 会话（~/.claude/projects 为空）'
+                  : '已隐藏全部项目（不是没有会话——可以用上方搜索框找到它们）'}
+              </div>
+            )}
           </div>
           {menu && (
             <ContextMenu
@@ -170,11 +182,7 @@ function ProjectCard({ project: p, expanded, onToggle, onContextMenu }: { projec
   return (
     <div className="card" onClick={onToggle} onContextMenu={onContextMenu}>
       <div className="card-head">
-        {/* 项目名单独包一层 <span>（而不是与 "📁 " 直接摊平在 .name 这个 flex 容器里）：
-            右键菜单（Task 8）需要能用会话搜索同款的项目名单独定位到这段文本——外层再
-            包一层是为了不新增一个 flex item（.name 有 gap:6px，若把 "📁 " 单独拆成
-            一个文本节点会在它与项目名之间多出一段本不该有的间距，见该处 CSS 注释）。 */}
-        <div className="name"><StatusDot status={aggregate} /><span> 📁 <span className="card-project-name">{basename(p.cwd)}</span></span></div>
+        <div className="name"><StatusDot status={aggregate} /> 📁 {basename(p.cwd)}</div>
         <button type="button" className="card-overview-btn" onClick={onOpenOverview}>▦ 总览</button>
       </div>
       <div className="sub">{p.threads.length} 个会话 · {formatRelative(p.lastActivityMs)}</div>

@@ -58,7 +58,9 @@ const OVERVIEW_TAB = { id: 'tab-ov', kind: 'overview' as const, title: '总览�
 
 beforeEach(() => {
   useTabs.setState({ tabs: [HOME], activeId: 'home' })
-  useHint.setState({ message: null })
+  // Task 8 给 useHint 加了 action 字段（见 store/hint.ts），setState 是浅合并，这里一并
+  // 重置，不留一个字段没被清空。
+  useHint.setState({ message: null, action: null })
   useDnd.setState({ target: null, dropMode: null, refusal: null, tabBarIndex: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
   document.body.classList.remove('dragging-no-select')
@@ -1001,7 +1003,7 @@ describe('TabBar — 拖放创建窗格也按修正后的可用宽度判定，�
     })
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1)
     expect(getByText('窗口太窄，放不下新窗格')).toBeTruthy()
-    await act(async () => { useHint.setState({ message: null }) }) // 清掉这次提示，不干扰下面对同一条提示的断言
+    await act(async () => { useHint.setState({ message: null, action: null }) }) // 清掉这次提示，不干扰下面对同一条提示的断言
 
     // 拖放合并（把 tab-b 并进 tab-a）同样是 nextCount=2，理应给出同一个结论——修正前
     // 这里会因为用原始 clientWidth 而误判"刚好装得下"，与 ⌘D 的判断相矛盾。
