@@ -1,6 +1,6 @@
 // 把文件拖进终端（spec §5）用到的纯函数。DOM/Tauri 事件的接线在 App.tsx，
 // 这里只放可单测的换算与字符串处理。
-import type { PaneSlotRect } from './paneDrop'
+import { pointInRect, type PaneSlotRect } from './paneDrop'
 
 /** 单引号包裹；内部的 ' 用 '\'' 断开重接。这是 POSIX shell 里唯一无需枚举元字符的
  *  安全写法——单引号内除 ' 本身之外一切字符都是字面量，$ / 反引号 / 空格 / 换行全部
@@ -22,12 +22,12 @@ export function toLogicalPoint(p: { x: number; y: number }, dpr: number): { x: n
   return { x: p.x / dpr, y: p.y / dpr }
 }
 
-/** 命中测试：左上闭、右下开，保证相邻窗格的公共边只归属右/下那个，不会同时命中。 */
+/** 命中测试：左上闭、右下开，保证相邻窗格的公共边只归属右/下那个，不会同时命中。
+ *  边界不等式复用 paneDrop.ts 的 pointInRect——那是同一条"半开区间"约定，两处各写
+ *  一遍容易在后续改动中悄悄漂移成不一致的判定。 */
 export function paneAtPoint(rects: PaneSlotRect[], x: number, y: number): string | null {
   for (const { paneId, rect } of rects) {
-    if (x >= rect.left && x < rect.left + rect.width && y >= rect.top && y < rect.top + rect.height) {
-      return paneId
-    }
+    if (pointInRect(x, y, rect)) return paneId
   }
   return null
 }

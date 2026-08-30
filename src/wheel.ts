@@ -19,7 +19,7 @@ export function wheelDeltaToLines(
 
 // 鼠标上报模式（如 Claude TUI 的 All-Motion Mouse Tracking）下，xterm 会把滚轮自行编码发给应用，
 // 我们不知道当前生效的是哪种协议（SGR 1006 / urxvt / X10），所以不手工拼接转义序列，
-// 而是在收到真实滚轮事件的同一目标上补发 (multiplier - 1) 个合成 WheelEvent，交给 xterm 按当前协议编码。
+// 而是在收到真实滚轮事件的同一目标上按余量累加补发若干个合成 WheelEvent（非整数倍率下不是每次都补发同样个数，长期均值收敛到 multiplier，见下方 carry 的注释），交给 xterm 按当前协议编码。
 // 返回的函数自带重入守卫：xterm 的监听器会对每个合成事件也调用一次该函数（因为事件会冒泡回同一目标），
 // 若不加守卫会无限递归；守卫确保一次真实事件最终只产生 (multiplier - 1) 次真正的补发。
 // view 转发原始事件的 ev.view（浏览器派发的可信事件必带真实 window）而非硬编码全局 window——

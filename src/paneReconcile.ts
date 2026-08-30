@@ -24,6 +24,14 @@ export function resolvePaneIdentity(projects: ProjectInfo[], sessionId: string):
         threadKey: `${project.dirName}:${thread.rootKey}`,
         // 只在有真实标题时给出。titled 为 false 时 thread.title 是 session_id 前 8 位
         // 的回退值（见 scan.rs），采纳它会把标签标题从「新对话」变成一串 uuid。
+        //
+        // 契约：title 有值时保证非空——src-tauri/src/sessions/parser.rs 的三条 title
+        // 路径都带 !is_empty() / trim() 非空守卫，titled === true 蕴含 title 非空，
+        // 生产中不存在 `titled: true, title: ''` 这个状态。下游 store/tabs.ts 的
+        // reconcilePanes 用 `id.title ?? pane.title` 采纳这里给出的值：既然 title
+        // 有值就非空，`??` 与 `||` 在此处等价；选 `??` 是因为语义本就是「字段缺省
+        // 则保留旧标题」，不是「遇到假值就回退」，用 `??` 如实表达这个意图，而不是
+        // 为了规避一个实际不会出现的空串。
         title: thread.titled ? thread.title : undefined,
       }
     }
