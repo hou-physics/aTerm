@@ -22,6 +22,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { blockKey } from '../store/overview'
 import { useLibrary } from '../store/library'
+import { useSessions } from '../store/sessions'
+import { useTabs } from '../store/tabs'
 import { displayTitle as computeDisplayTitle } from '../sessionList'
 import { useThreadStatus } from '../store/status'
 import type { ThreadInfo } from '../ipc'
@@ -69,6 +71,11 @@ export function SessionBlock({ thread, dirName, subagentCount, onOpen }: {
   const commit = () => {
     setEditing(false)
     rename(key, draft)
+    // 改名要立刻生效，不能等挂载/聚焦/状态事件那 15 秒节流的下一轮刷新——纯内存
+    // 操作，只扫用户已打开的那几个窗格，开销可忽略（与 Sidebar.tsx 的
+    // onRenameSubmit 同一理由）。rename() 的 set() 是同步的，这里读到的
+    // useLibrary.getState().aliases 已经是改名后的新值。
+    useTabs.getState().reconcilePanes(useSessions.getState().projects, useLibrary.getState().aliases)
   }
 
   const cancel = () => {

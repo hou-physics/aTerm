@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
 // App.tsx 挂载时会用真实的 useSessions().refresh() 覆盖任何提前用 setState 种下的
 // projects（refresh 内部把 listProjects() 的结果原样写回 store）——所以这里直接在
@@ -154,6 +154,64 @@ describe('Sidebar — 终审必修 1：双击打开 titled 为 false 的会话',
     expect(useTabs.getState().tabs).toHaveLength(2)
     expect(useTabs.getState().tabs[1]).toMatchObject({ kind: 'term', title: '新对话' })
     expect(useTabs.getState().tabs[1].panes[0].title).toBe('新对话')
+  })
+})
+
+// 本次修复的主诉求（用户原话：「重命名之后的标签不会改变命名，但是在项目栏里面，
+// 确实它改变了」）：右键改名后，已经打开的那个标签标题此前完全不会跟着变——
+// resolvePaneIdentity 完全不认识别名，标签标题这条链只走 thread.titled 的真实标题
+// （见 paneReconcile.ts 顶部注释、store/tabs.ts 的 reconcilePanes）。这里连开带改，
+// 直接复现用户报告的原始现象；改名的操作方式与 SidebarMenu.test.tsx「重命名：回车
+// 提交后显示新名字」保持一致，只是这里额外断言标签栏，且不等待任何节流刷新——
+// onRenameSubmit 之后必须同步生效（15 秒的节流刷新只覆盖挂载/聚焦/状态事件三个
+// 入口，改名不是这三者之一）。
+describe('Sidebar — 改名后已打开的标签标题立刻跟着变（不必等 15 秒节流刷新）', () => {
+  it('先打开该会话的标签，再在侧栏改名：标签标题立刻变成新名字', async () => {
+    await renderApp() // activeId 默认 home，seed 数据是「修复登录」/ proj-a / root-a
+    const sidebarList = document.querySelector('.sidebar-list') as HTMLElement
+    const item = within(sidebarList).getByText('修复登录').closest('.side-item') as HTMLElement
+
+    // 打开它——resumeThread 带 sessionId，是 reconcilePanes 认得这个窗格的前提
+    // （见上方「终审必修 1」注释）。
+    fireEvent.doubleClick(item)
+    const tabbar = document.querySelector('.tabbar') as HTMLElement
+    await waitFor(() => expect(within(tabbar).getByText('修复登录')).toBeTruthy())
+
+    fireEvent.contextMenu(within(sidebarList).getByText('修复登录'))
+    fireEvent.click(screen.getByText('重命名'))
+    const input = within(sidebarList).getByDisplayValue('修复登录') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '我的登录任务' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    // 不等待任何节流刷新——onRenameSubmit 之后应同步生效。
+    await waitFor(() => expect(within(tabbar).getByText('我的登录任务')).toBeTruthy())
+    expect(within(tabbar).queryByText('修复登录')).toBeNull()
+  })
+
+  it('清除别名（提交空白）后，已打开标签的标题退回真实标题', async () => {
+    await renderApp()
+    const sidebarList = document.querySelector('.sidebar-list') as HTMLElement
+    const item = within(sidebarList).getByText('修复登录').closest('.side-item') as HTMLElement
+    fireEvent.doubleClick(item)
+    const tabbar = document.querySelector('.tabbar') as HTMLElement
+    await waitFor(() => expect(within(tabbar).getByText('修复登录')).toBeTruthy())
+
+    // 先改一个别名。
+    fireEvent.contextMenu(within(sidebarList).getByText('修复登录'))
+    fireEvent.click(screen.getByText('重命名'))
+    fireEvent.change(within(sidebarList).getByDisplayValue('修复登录'), { target: { value: '临时别名' } })
+    fireEvent.keyDown(within(sidebarList).getByDisplayValue('临时别名'), { key: 'Enter' })
+    await waitFor(() => expect(within(tabbar).getByText('临时别名')).toBeTruthy())
+
+    // 再提交空白，清除别名——library.rename() 里全空白视为清除（见 store/library.ts）。
+    fireEvent.contextMenu(within(sidebarList).getByText('临时别名'))
+    fireEvent.click(screen.getByText('重命名'))
+    const input = within(sidebarList).getByDisplayValue('临时别名') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '   ' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    await waitFor(() => expect(within(tabbar).getByText('修复登录')).toBeTruthy())
+    expect(within(tabbar).queryByText('临时别名')).toBeNull()
   })
 })
 

@@ -292,7 +292,15 @@ export function Sidebar() {
                   onClick={onItemClick}
                   onDoubleClick={onItemDoubleClick}
                   onContextMenu={onItemContextMenu}
-                  onRenameSubmit={(value) => { useLibrary.getState().rename(key, value); setEditing(null) }}
+                  onRenameSubmit={(value) => {
+                    useLibrary.getState().rename(key, value)
+                    // 改名要立刻生效，不能等挂载/聚焦/状态事件那 15 秒节流的下一轮
+                    // 刷新——纯内存操作，只扫用户已打开的那几个窗格，开销可忽略。
+                    // getState().aliases 在 rename() 的 set() 之后立刻是新值（zustand
+                    // 的 set 是同步的），这里不会读到旧别名。
+                    useTabs.getState().reconcilePanes(useSessions.getState().projects, useLibrary.getState().aliases)
+                    setEditing(null)
+                  }}
                   onRenameCancel={() => setEditing(null)}
                 />
               )
