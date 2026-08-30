@@ -243,6 +243,65 @@ describe('Sidebar — 从「最近会话」拖入窗格区（设计文档 §5-B 
   })
 })
 
+// 终审必修 4：拖入窗格是第三个直接构造 sessionArgs 的写入点（不经 actions.ts 的
+// resumeThread），此前唯独它缺 sessionId——从侧栏拖出来的窗格发出第一句话、
+// rootKey 翻转之后 reconcilePanes 找不到它，永久失联。
+describe('Sidebar — 终审必修 4：拖入窗格的 sessionArgs 带上 sessionId', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('拖入窗格：pane.sessionId 等于 resumeSessionId（此前该字段整个缺失）', async () => {
+    // 与「双击打开 titled 为 false」那条用例同一理由：数据必须在挂载触发的
+    // refresh() 之前就位，这里顺带给出一个已知的 resumeSessionId 方便精确断言。
+    vi.mocked(ipc.listProjects).mockResolvedValueOnce([{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: [makeThread({ rootKey: 'r-drag', title: '拖拽会话', resumeSessionId: 's-drag-1' })],
+    }])
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('拖拽会话').closest('.side-item') as HTMLElement
+
+    await drag(item, { x: 10, y: 10 }, { x: 300, y: 50 })
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    const newPane = t.panes[1]
+    await act(async () => { await Promise.resolve() }) // startPaneTerminal 是 async，flush 一次
+    const updated = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes.find((p) => p.id === newPane.id)!
+    expect(updated.sessionId).toBe('s-drag-1')
+    expect(updated.threadKey).toBe('-tmp-a:r-drag')
+  })
+
+  // 补一条 Fix 1 的回归：拖拽幽灵标签是 Sidebar.tsx 第二个标题写入点（见上一次提交），
+  // 与本提交同一个拖拽路径，这里一并锁住，不单开一个几乎重复的 describe。
+  it('拖拽指示（幽灵标签）显示「新对话」，不是 session_id 前 8 位', async () => {
+    vi.mocked(ipc.listProjects).mockResolvedValueOnce([{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: [makeThread({ rootKey: 'r-unt', title: 'ebd067d4', titled: false, resumeSessionId: 's-unt' })],
+    }])
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const item = screen.getByText('新对话').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    expect(document.querySelector('.drag-ghost')?.textContent).toBe('新对话')
+
+    await act(async () => {
+      fireEvent.pointerUp(item, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+  })
+})
+
 // 拖到空槽窗格（本次修复的主要设计间隙，与 TabBar.test.tsx 同一组背景）：目标窗格
 // 没有 ptyId 时，应该直接在原地用这条会话启动它——"exactly as if it had been chosen
 // through the ⌘D picker"——不新建窗格，不让总窗格数意外增加。

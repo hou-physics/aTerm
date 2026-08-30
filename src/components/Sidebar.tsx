@@ -217,6 +217,10 @@ export function Sidebar() {
       threadKey: `${p.dirName}:${t.rootKey}`,
       dirName: p.dirName,
       rootKey: t.rootKey,
+      // 此前唯一缺这一行的 resume 起点：拖出来的窗格发出第一句话、rootKey 翻转之后
+      // reconcilePanes 找不到它，永久失联（终审 Fix 4）。actions.ts/PanePicker.tsx
+      // 两处 resume 起点都已经带了它。
+      sessionId: t.resumeSessionId,
     }
     if (mode === 'fill' && targetPane) {
       // startPaneTerminal 只补 ptyId/title 等字段，不touch activePaneId（PanePicker
