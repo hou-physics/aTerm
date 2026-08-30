@@ -148,3 +148,37 @@ describe('侧栏最近会话', () => {
     expect(screen.queryByText('会话0')).toBeTruthy()
   })
 })
+
+// 终审必修 3a：会话被逐条「从列表移除」到空之后，`.sidebar-list` 此前是一片空白，
+// 没有任何解释。与 HomePage.tsx「已隐藏全部项目」那条空态同一惯例——必须区分
+// "本来就没有会话"与"有会话、但被自己全部移除了"，不能用同一句文案糊弄过去。
+describe('侧栏空态（终审必修 3a）', () => {
+  it('本来就没有任何会话：显示「尚未发现 Claude Code 会话」', () => {
+    useSessions.setState({ projects: [], loading: false })
+    render(<Sidebar />)
+    expect(screen.queryByText(/尚未发现 Claude Code 会话/)).toBeTruthy()
+    expect(screen.queryByText(/已从列表移除/)).toBeNull()
+  })
+
+  it('有会话，但全被移除了：显示「已从列表移除全部会话」，不是「尚未发现会话」', () => {
+    seed(2)
+    useLibrary.setState({
+      removedSessions: {
+        [blockKey('-tmp-a', 'r0')]: Date.now() + dayMs,
+        [blockKey('-tmp-a', 'r1')]: Date.now() + dayMs,
+      },
+    })
+    render(<Sidebar />)
+    // 不是「尚未发现会话」那句——那是给"真的一个会话都没有"准备的，语义不同，用错了
+    // 会让用户误以为 ~/.claude/projects 是空的，而不是"我自己把它们移除了"。
+    expect(screen.queryByText(/尚未发现 Claude Code 会话/)).toBeNull()
+    expect(screen.queryByText(/已从列表移除全部会话/)).toBeTruthy()
+  })
+
+  it('还有至少一条会话在列表里时，不显示任何空态文案', () => {
+    seed(2)
+    render(<Sidebar />)
+    expect(screen.queryByText(/尚未发现 Claude Code 会话/)).toBeNull()
+    expect(screen.queryByText(/已从列表移除全部会话/)).toBeNull()
+  })
+})

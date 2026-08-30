@@ -279,6 +279,9 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 /* 右键菜单「重命名」的就地编辑框（Sidebar.tsx），替换 .side-item-title 那个位置——
    flex:1/min-width:0 让它在 .side-item-row 里跟标题一样吃满剩余宽度，不撑破一行。 */
 .side-item-rename-input { flex: 1; min-width: 0; padding: 1px 4px; border: 1px solid var(--color-accent); border-radius: 4px; background: var(--color-bg); color: var(--color-text); font-size: 13px; font-family: inherit; outline: none; }
+/* 侧栏空态（终审必修 3a）：区分「尚未发现会话」与「已移除全部会话」两句文案，
+   样式与 .pane-picker-empty 同一基调（同一变量、同一字号）。 */
+.sidebar-empty { color: var(--color-text-faint); font-size: 12px; padding: 8px 8px; line-height: 1.5; }
 .home { padding: 28px 32px; max-width: 980px; margin: 0 auto; }
 .cmd-input { width: 100%; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-text); font-size: 14px; font-family: 'SF Mono', Menlo, monospace; outline: none; }
 .cmd-input:focus { border-color: var(--color-accent); }

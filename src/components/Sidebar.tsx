@@ -44,6 +44,11 @@ export function Sidebar() {
     .filter(({ p, t }) => !isSessionRemoved(removedSessions[blockKey(p.dirName, t.rootKey)], t.lastActivityMs))
     .sort((a, b) => b.lastActivityMs - a.lastActivityMs)
   const groups = groupRecentByDate(recent, Date.now())
+  // 空态判断必须看 projects 本身有没有会话，不能只看 groups/recent 是不是空——
+  // 二者为空的原因不同：本来就没发现任何会话，与「有会话，但被用户逐条移除到空」
+  // 是完全不同的含义，不能用同一句文案糊弄过去（与 HomePage.tsx 「已隐藏全部项目」
+  // 那条空态同一惯例）。跨三个任务分别落地时没人补这个缺口，这里补上。
+  const hasAnySession = projects.some((p) => p.threads.length > 0)
 
   // 单击只选中、双击才打开（防误触，见用户原话）。存 blockKey，与别名/移除名单同一套键。
   const [selected, setSelected] = useState<string | null>(null)
@@ -294,6 +299,13 @@ export function Sidebar() {
             })}
           </Fragment>
         ))}
+        {groups.length === 0 && (
+          <div className="sidebar-empty">
+            {hasAnySession
+              ? '已从列表移除全部会话（不是没有会话——可以用 ⌘D 找到它们）'
+              : '尚未发现 Claude Code 会话（~/.claude/projects 为空）'}
+          </div>
+        )}
       </div>
       <HooksControl />
       <ThemeSwitcher />
@@ -317,7 +329,17 @@ export function Sidebar() {
             },
             {
               label: '从列表移除',
-              onSelect: () => useLibrary.getState().removeSession(blockKey(menu.p.dirName, menu.t.rootKey)),
+              onSelect: () => {
+                const key = blockKey(menu.p.dirName, menu.t.rootKey)
+                useLibrary.getState().removeSession(key)
+                // 可撤销轻提示，与 HomePage.tsx「隐藏项目」同一惯例（action 字段见
+                // store/hint.ts）。restoreSession 此前是零调用点的死代码——这是它
+                // 唯一的落地入口。
+                useHint.getState().show('已从列表移除', {
+                  label: '撤销',
+                  onClick: () => useLibrary.getState().restoreSession(key),
+                })
+              },
             },
           ]}
         />

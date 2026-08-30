@@ -30,6 +30,7 @@ vi.mock('../store/hooksInstall', () => ({
 
 import * as ipc from '../ipc'
 import { Sidebar } from '../components/Sidebar'
+import { useHint } from '../store/hint'
 import { useLibrary } from '../store/library'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
@@ -49,6 +50,7 @@ function seed(n: number) {
 beforeEach(() => {
   useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
   useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
+  useHint.setState({ message: null, action: null })
   vi.clearAllMocks()
 })
 
@@ -77,6 +79,23 @@ describe('侧栏右键菜单', () => {
     fireEvent.click(screen.getByText('从列表移除'))
     await waitFor(() => expect(screen.queryByText('会话0')).toBeNull())
     expect(screen.queryByText('会话1')).toBeTruthy()   // 只移除被点的那一条
+  })
+
+  // 终审必修 3b：restoreSession（store/library.ts）此前是零调用点的死代码——这条
+  // 用例是它唯一的落地入口，与 HomePage.tsx「隐藏项目」的可撤销提示同一惯例
+  // （见 HomePageMenu.test.tsx 的「隐藏后给出可撤销提示」）。
+  it('「从列表移除」后给出可撤销提示，点撤销该会话回到列表', async () => {
+    seed(2)
+    render(<Sidebar />)
+    fireEvent.contextMenu(screen.getByText('会话0'))
+    fireEvent.click(screen.getByText('从列表移除'))
+    await waitFor(() => expect(screen.queryByText('会话0')).toBeNull())
+
+    const action = useHint.getState().action
+    expect(action?.label).toBe('撤销')
+    action!.onClick()
+
+    await waitFor(() => expect(screen.queryByText('会话0')).toBeTruthy())
   })
 
   it('重命名：回车提交后显示新名字', async () => {
