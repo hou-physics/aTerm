@@ -8,7 +8,9 @@ vi.mock('../ipc', () => ({
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 
-import { newConversationSpec, randomUuidV4 } from '../actions'
+import { newConversationSpec, randomUuidV4, resumeThread } from '../actions'
+import { useTabs } from '../store/tabs'
+import { makeThread } from './factories'
 
 describe('newConversationSpec', () => {
   it('注入命令里的 session id 与返回的 sessionId 是同一个', () => {
@@ -89,5 +91,17 @@ describe('randomUuidV4 的回退路径（crypto.randomUUID 缺失时）', () => 
       expect(spec.inject).toBe(`claude --session-id ${spec.sessionId}`)
       expect(spec.sessionId.length).toBe(36)
     })
+  })
+})
+
+describe('resumeThread 也带上 sessionId', () => {
+  it('传给 openTerminal 的参数里含 sessionId，且等于 resumeSessionId', async () => {
+    // 为什么需要：被 resume 的链如果此前没有用户消息，rootKey 就等于 session_id；
+    // 用户发出第一句话后 rootKey 翻成那条消息的 uuid，此时窗格若没有 sessionId
+    // 就再也对不上账，永久失联。resumeSessionId 必在该链的 sessionIds 里。
+    const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
+    await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', resumeSessionId: 's-newest' }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's-newest' }))
+    spy.mockRestore()
   })
 })

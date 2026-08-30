@@ -1,6 +1,7 @@
 import { Fragment, useMemo, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import { newConversation, openProjectOverview, resumeThread, runCommand } from '../actions'
 import { revealInFinder, type ProjectInfo, type ThreadInfo } from '../ipc'
+import { displayTitle } from '../sessionList'
 import { filterProjectsByQuery, type ProjectSearchMatch } from '../sessionSearch'
 import { useHint } from '../store/hint'
 import { useLibrary } from '../store/library'
@@ -200,11 +201,12 @@ function ProjectCard({ project: p, expanded, onToggle, onContextMenu }: { projec
 
 function ThreadRow({ project: p, thread: t }: { project: ProjectInfo; thread: ThreadInfo }) {
   const status = useThreadStatus(p.dirName, t.rootKey)
+  const aliases = useLibrary((s) => s.aliases)
   return (
     <div className="thread-row" onClick={() => void resumeThread(p.dirName, p.cwd, t)}>
       <span className="thread-row-main">
         <StatusDot status={status} />
-        <span className="t">{t.title}</span>
+        <span className="t">{displayTitle(t, p.dirName, aliases)}</span>
       </span>
       <span className="time">{formatRelative(t.lastActivityMs)}</span>
     </div>
@@ -225,11 +227,12 @@ function SearchResultRow({
   onOpen: (p: ProjectInfo, t: ThreadInfo) => void
 }) {
   const status = useThreadStatus(p.dirName, t.rootKey)
+  const aliases = useLibrary((s) => s.aliases)
   return (
     <div className="thread-row" onClick={() => onOpen(p, t)}>
       <span className="thread-row-main">
         <StatusDot status={status} />
-        <span className="t">{t.title}</span>
+        <span className="t">{displayTitle(t, p.dirName, aliases)}</span>
         <span className="search-result-project">{basename(p.cwd)}</span>
       </span>
       <span className="time">{formatRelative(t.lastActivityMs)}</span>

@@ -29,7 +29,14 @@ export const resumeThread = (dirName: string, cwd: string, t: ThreadInfo) => {
   // 跨项目需以「项目:会话」复合键去重，避免误切到同名会话所在的其他项目终端。
   const threadKey = `${dirName}:${t.rootKey}`
   if (useTabs.getState().focusThread(threadKey)) return
-  return useTabs.getState().openTerminal({ title: t.title, cwd, inject: `claude --resume ${t.resumeSessionId}`, threadKey, dirName, rootKey: t.rootKey })
+  return useTabs.getState().openTerminal({
+    title: t.title, cwd, inject: `claude --resume ${t.resumeSessionId}`,
+    threadKey, dirName, rootKey: t.rootKey,
+    // resumeSessionId 必在该链的 sessionIds 里，所以带上它之后，--resume 起的窗格
+    // 也能被 reconcilePanes 对账——修掉「被 resume 的链此前无用户消息、发第一句话
+    // 后 rootKey 翻转导致该窗格永久失联」这个缺口（V3.0 终审留账）。
+    sessionId: t.resumeSessionId,
+  })
 }
 
 // 新对话的唯一构造点。两个入口（主页的「＋ 新对话」、窗格选择器的「新对话」）都必须

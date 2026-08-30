@@ -22,6 +22,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { blockKey } from '../store/overview'
 import { useLibrary } from '../store/library'
+import { displayTitle as computeDisplayTitle } from '../sessionList'
 import { useThreadStatus } from '../store/status'
 import type { ThreadInfo } from '../ipc'
 import { formatRelative } from '../time'
@@ -35,12 +36,14 @@ export function SessionBlock({ thread, dirName, subagentCount, onOpen }: {
   onOpen: () => void
 }) {
   const status = useThreadStatus(dirName, thread.rootKey)
-  // 自定义名字（现由 store/library.ts 持有，见该文件顶部注释）：只读展示，有就
-  // 显示，没有就退回记录里的原始标题。
+  // 显示名（优先级：用户别名 > 真实标题 > 「新对话」，见 sessionList.ts 顶部注释）：
+  // 别名现由 store/library.ts 持有；没有别名时不能直接退回 thread.title——后端在
+  // 会话尚无真实标题时把 title 填成 session id 前 8 位，titled: false 是这个情况的
+  // 标记，直接渲染会在总览页方块里露出一串十六进制。
   const key = blockKey(dirName, thread.rootKey)
-  const customName = useLibrary((s) => s.aliases[key])
+  const aliases = useLibrary((s) => s.aliases)
   const rename = useLibrary((s) => s.rename)
-  const displayTitle = customName ?? thread.title
+  const displayTitle = computeDisplayTitle(thread, dirName, aliases)
   const model = shortModelName(thread.model)
   const ctx = formatContextTokens(thread.contextTokens)
 

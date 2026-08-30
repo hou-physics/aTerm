@@ -52,6 +52,13 @@ describe('SessionBlock（spec §5.3）', () => {
     expect(screen.queryByText(/上下文/)).toBeNull()
   })
 
+  it('未命名会话显示「新对话」而不是标题前 8 位（后端 title 回退值，titled: false 是标记）', () => {
+    const untitled = makeThread({ rootKey: 'r2', title: 'ebd067d4', titled: false })
+    render(<SessionBlock thread={untitled} dirName="proj" subagentCount={0} onOpen={() => {}} />)
+    expect(screen.getByText('新对话')).toBeTruthy()
+    expect(screen.queryByText('ebd067d4')).toBeNull()
+  })
+
   it('整块带上状态类名，供 CSS 着色（spec §5.3：底色与边框随状态）', () => {
     // 状态由组件自己经 useThreadStatus 求得，不作为 prop 传入：SessionBlock 本身
     // 就是「每项一个组件」，正是 Sidebar.tsx:246 那条 Rules of Hooks 注释的解法。

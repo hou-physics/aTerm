@@ -20,6 +20,8 @@ vi.mock('../store/hooksInstall', () => ({
   useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
 }))
 import * as ipc from '../ipc'
+import { useLibrary } from '../store/library'
+import { blockKey } from '../store/overview'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
 import { HomePage } from '../components/HomePage'
@@ -44,7 +46,52 @@ const PROJECTS = [
 beforeEach(() => {
   useSessions.setState({ projects: PROJECTS as never, loading: false })
   useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
+  useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
   vi.clearAllMocks()
+})
+
+// Task 9：三处列表（侧栏、主页、总览方块）统一改走 displayTitle，主页占两处——卡片
+// 展开视图的 ThreadRow、搜索结果的 SearchResultRow。二者共用同一个 PROJECTS 夹具，
+// 分别用展开卡片、输入搜索词两条路径触发渲染。
+describe('HomePage — 会话标题统一走 displayTitle（Task 9）', () => {
+  it('展开卡片里的会话：未命名会话显示「新对话」而不是标题前 8 位', async () => {
+    useSessions.setState({
+      projects: [{
+        dirName: '-tmp-untitled', cwd: '/tmp/untitled', lastActivityMs: Date.now(),
+        threads: [makeThread({ rootKey: 'r1', title: 'ebd067d4', titled: false })],
+      }] as never,
+      loading: false,
+    })
+    render(<HomePage />)
+    fireEvent.click(screen.getByText(/untitled/))
+    expect(await screen.findByText('新对话')).toBeTruthy()
+    expect(screen.queryByText('ebd067d4')).toBeNull()
+  })
+
+  it('展开卡片里的会话：有别名时显示别名，不是真实标题', async () => {
+    const [project] = PROJECTS
+    const [firstThread] = project.threads
+    useLibrary.getState().rename(blockKey(project.dirName, firstThread.rootKey), '我的登录修复')
+    render(<HomePage />)
+    fireEvent.click(screen.getByText(/phineuro/))
+    expect(await screen.findByText('我的登录修复')).toBeTruthy()
+    expect(screen.queryByText('修复登录流程')).toBeNull()
+  })
+
+  it('搜索结果行：未命名会话同样显示「新对话」而不是标题前 8 位', () => {
+    useSessions.setState({
+      projects: [{
+        dirName: '-tmp-untitled', cwd: '/tmp/untitled', lastActivityMs: Date.now(),
+        threads: [makeThread({ rootKey: 'r1', title: 'ebd067d4', titled: false })],
+      }] as never,
+      loading: false,
+    })
+    render(<HomePage />)
+    const input = screen.getByPlaceholderText(/搜索过往对话/)
+    fireEvent.change(input, { target: { value: 'untitled' } })
+    expect(screen.getByText('新对话')).toBeTruthy()
+    expect(screen.queryByText('ebd067d4')).toBeNull()
+  })
 })
 
 describe('HomePage — 输入框为空时：今天已有的内容不变', () => {
