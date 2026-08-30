@@ -1,7 +1,7 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { resumeThread } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
-import type { ProjectInfo, ThreadInfo } from '../ipc'
+import { revealInFinder, type ProjectInfo, type ThreadInfo } from '../ipc'
 import { DRAG_THRESHOLD_PX, dropInsertionIndex, resolveDropMode, resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
 import { previewPaneDrop } from '../paneLayout'
@@ -16,6 +16,7 @@ import { useSessions } from '../store/sessions'
 import { useThreadStatus } from '../store/status'
 import { useTabs } from '../store/tabs'
 import { basename, formatRelative } from '../time'
+import { ContextMenu } from './ContextMenu'
 import { HooksControl } from './HooksInstall'
 import { StatusDot } from './StatusDot'
 import { ThemeSwitcher } from './ThemeSwitcher'
@@ -46,6 +47,18 @@ export function Sidebar() {
 
   // 单击只选中、双击才打开（防误触，见用户原话）。存 blockKey，与别名/移除名单同一套键。
   const [selected, setSelected] = useState<string | null>(null)
+
+  // 右键菜单：重命名 / 在访达中显示 / 从列表移除（用户原话，见 Task 7 brief）。
+  const [menu, setMenu] = useState<{ x: number; y: number; p: ProjectInfo; t: ThreadInfo } | null>(null)
+  // 就地编辑中的那一条，存 blockKey（与 selected 同一套键）；非 null 时该行改渲染 <input>。
+  const [editing, setEditing] = useState<string | null>(null)
+
+  const onItemContextMenu = useCallback((e: ReactMouseEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => {
+    // 不能漏：src/contextMenu.ts 的全局监听靠 e.defaultPrevented 判断"应用自己已经
+    // 处理过这次右键"，漏了会连带弹出 WKWebView 的原生菜单（见 brief 要点①）。
+    e.preventDefault()
+    setMenu({ x: e.clientX, y: e.clientY, p, t })
+  }, [])
 
   const dragRef = useRef<DragState | null>(null)
   // 拖拽落地后浏览器仍会补发一次 click；真的发生过一次拖拽时这次 click 不该再触发
@@ -90,10 +103,11 @@ export function Sidebar() {
   }, [endDrag])
 
   const onItemPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => {
-    // 纵深防御，与 TabPanes.tsx/TabBar.tsx 同一理由：这个组件目前没有右键菜单
-    // （「最近会话」条目不挂 onContextMenu），这条分支现在恒不命中；保留它是为了不让
-    // 三处拖拽源的这层防御出现"漏了一处"的不对称，也不给将来在这里加菜单的人埋雷
-    // （见 .superpowers/context-menu-portal-report.md）。
+    // 纵深防御，与 TabPanes.tsx/TabBar.tsx 同一理由：右键菜单本身已经 portal 到
+    // document.body（见 ContextMenu.tsx），本就不是这个 `.side-item` 元素的 DOM
+    // 后代，这条分支理论上不会被真的命中——保留它是三处拖拽源的同一层保险，防止将来
+    // 弹层又被嵌回某个拖拽手柄的子树里时同一类问题重演（见 .superpowers/
+    // context-menu-portal-report.md 的排查记录）。
     if ((e.target as HTMLElement).closest('.context-menu')) return
     // 屏蔽文本选择，只加 body class，不调用 e.preventDefault()——与 TabBar.tsx 的
     // onTabPointerDown 同一理由/同一时机（见 store/dragGhost.ts 的 blockSelect()
@@ -249,26 +263,58 @@ export function Sidebar() {
         {groups.map((g) => (
           <Fragment key={g.label}>
             <div className="section-label">{g.label}</div>
-            {g.items.map(({ p, t }) => (
-              <SidebarItem
-                key={`${p.dirName}:${t.rootKey}`}
-                p={p}
-                t={t}
-                title={displayTitle(t, p.dirName, aliases)}
-                selected={selected === blockKey(p.dirName, t.rootKey)}
-                onPointerDown={onItemPointerDown}
-                onPointerMove={onItemPointerMove}
-                onPointerUp={onItemPointerUp}
-                onLostPointerCapture={onItemLostPointerCapture}
-                onClick={onItemClick}
-                onDoubleClick={onItemDoubleClick}
-              />
-            ))}
+            {g.items.map(({ p, t }) => {
+              const key = blockKey(p.dirName, t.rootKey)
+              return (
+                <SidebarItem
+                  key={`${p.dirName}:${t.rootKey}`}
+                  p={p}
+                  t={t}
+                  title={displayTitle(t, p.dirName, aliases)}
+                  selected={selected === key}
+                  editing={editing === key}
+                  onPointerDown={onItemPointerDown}
+                  onPointerMove={onItemPointerMove}
+                  onPointerUp={onItemPointerUp}
+                  onLostPointerCapture={onItemLostPointerCapture}
+                  onClick={onItemClick}
+                  onDoubleClick={onItemDoubleClick}
+                  onContextMenu={onItemContextMenu}
+                  onRenameSubmit={(value) => { useLibrary.getState().rename(key, value); setEditing(null) }}
+                  onRenameCancel={() => setEditing(null)}
+                />
+              )
+            })}
           </Fragment>
         ))}
       </div>
       <HooksControl />
       <ThemeSwitcher />
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onDismiss={() => setMenu(null)}
+          items={[
+            {
+              label: '重命名',
+              onSelect: () => setEditing(blockKey(menu.p.dirName, menu.t.rootKey)),
+            },
+            {
+              label: '在访达中显示',
+              // 传的是项目 cwd（brief 要点②），不是会话文件路径；后端只接受已存在的
+              // 目录。失败时 reject 的就是可直接展示给用户的中文错误字符串。
+              onSelect: () => {
+                void revealInFinder(menu.p.cwd).catch((msg) => useHint.getState().show(String(msg)))
+              },
+            },
+            {
+              label: '从列表移除',
+              onSelect: () => useLibrary.getState().removeSession(blockKey(menu.p.dirName, menu.t.rootKey)),
+            },
+          ]}
+        />
+      )}
     </>
   )
 }
@@ -277,17 +323,21 @@ export function Sidebar() {
 // （Rules of Hooks：不能在 Sidebar 自己的 .map() 循环体内调用 hook，见 HomePage.tsx
 // 里 ProjectCard/ThreadRow 同样的拆分理由）。拖拽/指针相关的所有状态与清理逻辑仍然
 // 全部留在 Sidebar 里，这里只透传回调，不复制任何一处判断。
-function SidebarItem({ p, t, title, selected, onPointerDown, onPointerMove, onPointerUp, onLostPointerCapture, onClick, onDoubleClick }: {
+function SidebarItem({ p, t, title, selected, editing, onPointerDown, onPointerMove, onPointerUp, onLostPointerCapture, onClick, onDoubleClick, onContextMenu, onRenameSubmit, onRenameCancel }: {
   p: ProjectInfo
   t: ThreadInfo
   title: string
   selected: boolean
+  editing: boolean
   onPointerDown: (e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => void
   onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => void
   onPointerUp: (e: ReactPointerEvent<HTMLDivElement>) => void
   onLostPointerCapture: () => void
   onClick: (p: ProjectInfo, t: ThreadInfo) => void
   onDoubleClick: (p: ProjectInfo, t: ThreadInfo) => void
+  onContextMenu: (e: ReactMouseEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => void
+  onRenameSubmit: (value: string) => void
+  onRenameCancel: () => void
 }) {
   const status = useThreadStatus(p.dirName, t.rootKey)
   return (
@@ -299,14 +349,54 @@ function SidebarItem({ p, t, title, selected, onPointerDown, onPointerMove, onPo
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onLostPointerCapture={onLostPointerCapture}
-      onClick={() => onClick(p, t)}
-      onDoubleClick={() => onDoubleClick(p, t)}
+      onClick={() => !editing && onClick(p, t)}
+      onDoubleClick={() => !editing && onDoubleClick(p, t)}
+      onContextMenu={(e) => onContextMenu(e, p, t)}
     >
       <span className="side-item-row">
         <StatusDot status={status} />
-        <span className="side-item-title">{title}</span>
+        {editing
+          ? <SidebarRenameInput initialValue={title} onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
+          : <span className="side-item-title">{title}</span>}
       </span>
       <div className="sub">{basename(p.cwd)} · {formatRelative(t.lastActivityMs)}</div>
     </div>
+  )
+}
+
+// 就地重命名输入框：Enter 提交、Escape 取消、失焦也提交（brief 要点③）。commit/discard
+// 都经过 doneRef 去重——DOM 从「渲染 input」切回「渲染 span」是父组件状态更新触发的，
+// 若 input 此刻真的持有焦点，React 摘除它时浏览器会在同一批里补发一次原生 blur，
+// 若不去重，Enter/Escape 各自的提交/取消会被这次补发的 blur 再执行一遍（Escape 的
+// 情形下这会把已经取消的编辑重新按 blur 规则提交一次，与"Esc 取消，名字不变"矛盾）。
+function SidebarRenameInput({ initialValue, onSubmit, onCancel }: {
+  initialValue: string
+  onSubmit: (value: string) => void
+  onCancel: () => void
+}) {
+  const doneRef = useRef(false)
+  const commit = (value: string) => {
+    if (doneRef.current) return
+    doneRef.current = true
+    onSubmit(value)
+  }
+  const discard = () => {
+    if (doneRef.current) return
+    doneRef.current = true
+    onCancel()
+  }
+  return (
+    <input
+      className="side-item-rename-input"
+      autoFocus
+      defaultValue={initialValue}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e: ReactKeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter') commit(e.currentTarget.value)
+        else if (e.key === 'Escape') discard()
+      }}
+      onBlur={(e) => commit(e.currentTarget.value)}
+    />
   )
 }

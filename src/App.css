@@ -269,6 +269,9 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    （StatusDot.tsx 引入后标题不再是 .side-item 的直接文本子节点，见该组件顶部注释）。 */
 .side-item-row { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
 .side-item-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 右键菜单「重命名」的就地编辑框（Sidebar.tsx），替换 .side-item-title 那个位置——
+   flex:1/min-width:0 让它在 .side-item-row 里跟标题一样吃满剩余宽度，不撑破一行。 */
+.side-item-rename-input { flex: 1; min-width: 0; padding: 1px 4px; border: 1px solid var(--color-accent); border-radius: 4px; background: var(--color-bg); color: var(--color-text); font-size: 13px; font-family: inherit; outline: none; }
 .home { padding: 28px 32px; max-width: 980px; margin: 0 auto; }
 .cmd-input { width: 100%; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-text); font-size: 14px; font-family: 'SF Mono', Menlo, monospace; outline: none; }
 .cmd-input:focus { border-color: var(--color-accent); }
