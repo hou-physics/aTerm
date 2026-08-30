@@ -1,4 +1,6 @@
 import { newConversationSpec } from '../actions'
+import { displayTitle } from '../sessionList'
+import { useLibrary } from '../store/library'
 import { useSessions } from '../store/sessions'
 import { type Tab, useTabs } from '../store/tabs'
 import { type SessionPick, SessionPicker } from './SessionPicker'
@@ -8,6 +10,7 @@ import { type SessionPick, SessionPicker } from './SessionPicker'
 // startPaneTerminal 调用。
 export function PanePicker({ tab, paneId }: { tab: Tab; paneId: string }) {
   const { projects } = useSessions()
+  const aliases = useLibrary((s) => s.aliases)
   const tabId = tab.id
 
   // 「新对话」默认目录：找到拆分出本窗格的来源窗格——addPane 总是把新窗格插在
@@ -32,10 +35,12 @@ export function PanePicker({ tab, paneId }: { tab: Tab; paneId: string }) {
     }
     const { project: p, thread: t } = pick
     void start(tabId, paneId, {
-      // titled 为 false 时 t.title 是 session_id 前 8 位——见 actions.ts 的 resumeThread
-      // 头顶注释，这里是同一条链路的另一个写入点，必须同样截断，否则窗格标题会永久
-      // 停在一串十六进制上（reconcilePanes 不会替用户纠正这个初始值）。
-      title: t.titled ? t.title : '新对话',
+      // 别名 > 真实标题 > 「新对话」（displayTitle）——见 actions.ts 的 resumeThread
+      // 头顶注释，这里是同一条链路的另一个写入点，必须给出同一个值。SessionPicker
+      // 本身的列表项已经用 displayTitle 渲染别名（见 SessionPicker.tsx），选中后落到
+      // 窗格标题上如果不是同一个值，用户会看着别名点下去、窗格标题却跳回真实标题
+      // 或那串 session_id 前 8 位。
+      title: displayTitle(t, p.dirName, aliases),
       cwd: p.cwd,
       inject: `claude --resume ${t.resumeSessionId}`,
       threadKey: `${p.dirName}:${t.rootKey}`,

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../ipc', () => ({
   ptySpawn: vi.fn(async () => 'pty-9'),
@@ -9,6 +9,8 @@ vi.mock('../ipc', () => ({
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 
 import { newConversationSpec, randomUuidV4, resumeThread } from '../actions'
+import { useLibrary } from '../store/library'
+import { blockKey } from '../store/overview'
 import { useTabs } from '../store/tabs'
 import { makeThread } from './factories'
 
@@ -123,6 +125,35 @@ describe('resumeThread 的标题回退——不把 session_id 前 8 位当标题
     const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
     await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', title: '修登录', titled: true }))
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ title: '修登录' }))
+    spy.mockRestore()
+  })
+})
+
+// 本次要修的 bug 本身（用户原话：把一个已改名的会话关掉标签、重新打开，标签标题
+// 显示的还是真实标题，要等到下一次对账才追上）：resumeThread 是四个「打开会话」
+// 入口共用的唯一写入点（见上方「终审必修 1」注释），此前只做
+// `t.titled ? t.title : '新对话'`，完全不认识别名。这里改用 displayTitle，别名要在
+// 写入的这一刻就生效，不能指望 reconcilePanes 兜底追上。
+describe('resumeThread 认识别名——打开标签的那一刻直接显示别名，不必等对账追上', () => {
+  afterEach(() => {
+    useLibrary.setState({ aliases: {} })
+  })
+
+  it('该会话已有别名时，openTerminal 收到的 title 是别名，不是真实标题', async () => {
+    useLibrary.setState({ aliases: { [blockKey('-tmp-a', 'r1')]: '我的登录任务' } })
+    const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
+    await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', title: '修登录', titled: true }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ title: '我的登录任务' }))
+    spy.mockRestore()
+  })
+
+  // 上上轮刚修好的回归保护（见上方「resumeThread 的标题回退」describe）：本轮改的
+  // 正是同一个写入点，必须确认没有连带弄丢它——titled 为 false 且没有别名时，仍是
+  // 「新对话」，不是 session_id 前 8 位。
+  it('未命名会话且无别名时，openTerminal 收到的 title 仍是「新对话」，不是 session_id 前 8 位', async () => {
+    const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
+    await resumeThread('-tmp-a', '/tmp/a', makeThread({ rootKey: 'r1', title: 'ebd067d4', titled: false }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ title: '新对话' }))
     spy.mockRestore()
   })
 })

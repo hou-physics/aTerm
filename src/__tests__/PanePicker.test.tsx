@@ -14,6 +14,8 @@ vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: v
 
 import * as ipc from '../ipc'
 import { PanePicker } from '../components/PanePicker'
+import { useLibrary } from '../store/library'
+import { blockKey } from '../store/overview'
 import { useSessions } from '../store/sessions'
 import { type Tab, useTabs } from '../store/tabs'
 import { makeThread } from './factories'
@@ -45,6 +47,8 @@ function makeTab(panes: Tab['panes'], activePaneId?: string): Tab {
 beforeEach(() => {
   useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
   useSessions.setState({ projects: PROJECTS as never })
+  // aliases 不清会在用例之间互相污染——与 Sidebar.test.tsx 同一理由。
+  useLibrary.setState({ aliases: {} })
   vi.clearAllMocks()
 })
 
@@ -219,6 +223,32 @@ describe('PanePicker — 「新对话」默认项目解析', () => {
     const p2 = useTabs.getState().tabs.find((x) => x.id === 'tab-1')!.panes.find((p) => p.id === 'p2')!
     expect(p2.title).toBe('新对话')
     expect(p2.title).not.toBe('ebd067d4')
+  })
+
+  // 本次要修的四个写入点之一：PanePicker 是唯一不经 actions.ts 的 resumeThread 的
+  // resume 起点（自己直接调用 startPaneTerminal），此前同样只做
+  // `t.titled ? t.title : '新对话'`，不认识别名——⌘D 选中一个已改名的会话，落地的
+  // 窗格标题会是真实标题，不是用户刚在列表里看到的那个别名。
+  it('⌘D 选中已有别名的会话：落地窗格的标题是别名，不是真实标题', async () => {
+    useLibrary.setState({ aliases: { [blockKey('proj-a', 'a2')]: '我的单测任务' } })
+    const tab = makeTab([{ id: 'p1', title: '新窗格' }], 'p1')
+    useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }, tab], activeId: 'tab-1' })
+    render(<PanePicker tab={tab} paneId="p1" />)
+
+    fireEvent.click(screen.getByText('📁 proj-a'))
+    const threadList = document.querySelector('.pane-picker-thread-list') as HTMLElement
+    // SessionPicker 本身的列表项已经用 displayTitle 渲染——真实标题「写单元测试」
+    // 在列表里已经不出现了，点的就是别名文本本身。
+    expect(within(threadList).queryByText('写单元测试')).toBeNull()
+    fireEvent.click(within(threadList).getByText('我的单测任务'))
+
+    await vi.waitFor(() => {
+      const pane = useTabs.getState().tabs.find((x) => x.id === 'tab-1')!.panes.find((p) => p.id === 'p1')!
+      expect(pane.ptyId).toBe('pty-picked')
+    })
+    const pane = useTabs.getState().tabs.find((x) => x.id === 'tab-1')!.panes.find((p) => p.id === 'p1')!
+    expect(pane.title).toBe('我的单测任务')
+    expect(pane.title).not.toBe('写单元测试')
   })
 
   it('来源窗格没有 dirName（如普通 zsh 终端）时，点击「新对话」改为列出全部项目供选择', async () => {

@@ -215,6 +215,54 @@ describe('Sidebar — 改名后已打开的标签标题立刻跟着变（不必�
   })
 })
 
+// 用户报的现象本身（区别于上面「已打开的标签立刻跟着变」那组——那组测的是对账
+// 追上*已经打开*的窗格；这里测的是打开的那一刻）：把一个已改名的会话关掉标签、
+// 重新打开，标签标题此前会先短暂显示真实标题，要等到下一次对账（挂载/聚焦/状态
+// 事件节流，可能很久）才追上。resumeThread（actions.ts，被这里的双击复用）此前
+// 只做 `t.titled ? t.title : '新对话'`，不认识别名——这是本次要修的四个写入点之一。
+describe('Sidebar — 改名后关闭标签、重新打开，标签标题直接就是别名（不必等任何对账）', () => {
+  it('关闭已改名会话的标签、重新打开：新标签的标题立刻就是别名', async () => {
+    await renderApp() // activeId 默认 home，seed 数据是「修复登录」/ proj-a / root-a
+    const sidebarList = document.querySelector('.sidebar-list') as HTMLElement
+    const item = within(sidebarList).getByText('修复登录').closest('.side-item') as HTMLElement
+
+    // 打开它。
+    fireEvent.doubleClick(item)
+    const tabbar = document.querySelector('.tabbar') as HTMLElement
+    await waitFor(() => expect(within(tabbar).getByText('修复登录')).toBeTruthy())
+
+    // 改名。
+    fireEvent.contextMenu(within(sidebarList).getByText('修复登录'))
+    fireEvent.click(screen.getByText('重命名'))
+    const input = within(sidebarList).getByDisplayValue('修复登录') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '我的登录任务' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(within(tabbar).getByText('我的登录任务')).toBeTruthy())
+
+    // 关闭这个标签——mock 里 ptyIsAlive 恒为 false，closeTab 不会弹确认对话框，
+    // 直接同步移除。
+    const openedTabId = useTabs.getState().tabs[1].id
+    await act(async () => {
+      await useTabs.getState().closeTab(openedTabId)
+    })
+    expect(useTabs.getState().tabs).toHaveLength(1) // 只剩主页
+
+    // 重新打开——侧栏此刻仍显示别名（列表本身早就认识别名，这不是本次要修的部分）。
+    const itemAgain = within(sidebarList).getByText('我的登录任务').closest('.side-item') as HTMLElement
+    // act(async) 只是把 openTerminal 内部 `await ptyEventsReady`/`await ptySpawn` 这两个
+    // 微任务 flush 掉（与「终审必修 1」那条用例同一写法）——不是在等任何对账：resolvePaneIdentity
+    // /reconcilePanes 全程没被调用一次，标题是 resumeThread 写入的那一刻就定好的。
+    await act(async () => {
+      fireEvent.doubleClick(itemAgain)
+    })
+
+    // 不等待任何节流刷新/对账：resumeThread 写入的这一刻标题就必须是别名。
+    expect(useTabs.getState().tabs).toHaveLength(2)
+    expect(useTabs.getState().tabs[1]).toMatchObject({ kind: 'term', title: '我的登录任务' })
+    expect(useTabs.getState().tabs[1].panes[0].title).toBe('我的登录任务')
+  })
+})
+
 describe('Sidebar — 从「最近会话」拖入窗格区（设计文档 §5-B 场景 B）', () => {
   const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
   beforeEach(() => {

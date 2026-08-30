@@ -156,9 +156,11 @@ export function Sidebar() {
     }
     if (!drag.ghostStarted) {
       drag.ghostStarted = true
-      // titled 为 false 时 drag.t.title 是 session_id 前 8 位——与 actions.ts 的
-      // resumeThread 同一条注释，拖拽幽灵标签也是一个直渲 t.title 的写入点。
-      useDragGhost.getState().start(drag.t.titled ? drag.t.title : '新对话', e.clientX, e.clientY)
+      // 别名 > 真实标题 > 「新对话」（displayTitle）——与 actions.ts 的 resumeThread、
+      // 本组件列表本身（下方 displayTitle(t, p.dirName, aliases)）同一优先级。这里
+      // 在高频的 pointermove 回调里：不为它给 useCallback 加依赖、不改数据流，直接
+      // getState() 取当下的别名表（与下方 onItemPointerMove 依赖数组同一取舍）。
+      useDragGhost.getState().start(displayTitle(drag.t, drag.p.dirName, useLibrary.getState().aliases), e.clientX, e.clientY)
     } else {
       useDragGhost.getState().move(e.clientX, e.clientY)
     }
@@ -215,8 +217,9 @@ export function Sidebar() {
     if (preview.decision === 'collapse-panel') layout.togglePanel()
     const { p, t } = drag
     const sessionArgs = {
-      // titled 为 false 时 t.title 是 session_id 前 8 位——同上，第三个写入点。
-      title: t.titled ? t.title : '新对话',
+      // 别名 > 真实标题 > 「新对话」（displayTitle）——同上，第三个写入点。这里不在
+      // 高频回调里，直接用组件顶部已订阅的 aliases（本函数已因此加入依赖数组）。
+      title: displayTitle(t, p.dirName, aliases),
       cwd: p.cwd,
       inject: `claude --resume ${t.resumeSessionId}`,
       threadKey: `${p.dirName}:${t.rootKey}`,
@@ -240,7 +243,7 @@ export function Sidebar() {
     const paneId = useTabs.getState().insertPaneAt(activeTab.id, insertAt)
     if (!paneId) return // 上面已经校验过上限，这里只是防御性兜底，理论上不会命中
     void useTabs.getState().startPaneTerminal(activeTab.id, paneId, sessionArgs)
-  }, [endDrag])
+  }, [endDrag, aliases])
 
   // 指针捕获被浏览器隐式释放时补发的退出路径——见上方 endDrag 注释描述的真实触发
   // 场景（拖拽中的会话项被 refresh() 挤出「最近会话」列表）。这里只做清理，不尝试
