@@ -30,6 +30,8 @@ vi.mock('../store/hooksInstall', () => ({
 
 import * as ipc from '../ipc'
 import { Sidebar } from '../components/Sidebar'
+import { useLibrary } from '../store/library'
+import { blockKey } from '../store/overview'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
 import { makeThread } from './factories'
@@ -49,6 +51,10 @@ function seed(n: number) {
 
 beforeEach(() => {
   useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
+  // 必须重置：removedSessions（以及同一个 store 里的 aliases/hiddenProjects）不清会在
+  // 用例之间互相污染——那类污染的典型表现是"单跑绿、全量红"，因为后一条用例种下的
+  // removedSessions 会残留到下一条，非常难查。
+  useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
   vi.clearAllMocks()
 })
 
@@ -120,5 +126,25 @@ describe('侧栏最近会话', () => {
     render(<Sidebar />)
     expect(screen.queryByText('新对话')).toBeTruthy()
     expect(screen.queryByText('ebd067d4')).toBeNull()
+  })
+
+  it('已移除的会话不出现在列表里，同项目其它会话仍在', () => {
+    seed(3)
+    // 移除时刻晚于 r0 的 lastActivityMs——isSessionRemoved 应判定为"仍隐去"。
+    useLibrary.setState({ removedSessions: { [blockKey('-tmp-a', 'r0')]: Date.now() + dayMs } })
+    render(<Sidebar />)
+    expect(screen.queryByText('会话0')).toBeNull()
+    expect(screen.queryByText('会话1')).toBeTruthy()
+  })
+
+  it('移除后又有新活动的会话会自动回到列表——「下次再用它默认可以出现」', () => {
+    seed(3)
+    // 移除时刻早于 r0 的 lastActivityMs：移除之后这条会话又有了新活动，应自动回归，
+    // 不该被永久隐藏。这条专门盯住 isSessionRemoved 的比较方向有没有被写反——只有
+    // 上一条「仍隐去」用例的话，把实现改成"只要在 removedSessions 里就永久隐藏"
+    // 同样会通过。
+    useLibrary.setState({ removedSessions: { [blockKey('-tmp-a', 'r0')]: 1 } })
+    render(<Sidebar />)
+    expect(screen.queryByText('会话0')).toBeTruthy()
   })
 })
