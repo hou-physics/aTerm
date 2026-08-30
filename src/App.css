@@ -177,6 +177,13 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 /* ⌘D 被拒绝（已达 3 个窗格 / 窄窗口装不下）时的内联轻提示：浮在内容区底部居中，
    定时自行消失（见 store/hint.ts 的 useHint），不是弹窗。 */
 .pane-hint { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px; background: var(--color-elevated); color: var(--color-text); border: 1px solid var(--color-border); font-size: 12.5px; z-index: 5; pointer-events: none; }
+/* Task 8：「隐藏项目」提示里的「撤销」按钮。.pane-hint 整体保持 pointer-events:none——
+   它浮在终端上方，不该拦截终端的点击；只有这个按钮需要能被点到，所以单独放开。漏了
+   这一行，撤销按钮会完全点不动，且没有任何报错：鼠标事件直接穿过去。 */
+.pane-hint-action { pointer-events: auto; margin-left: 10px; padding: 2px 8px; border-radius: 6px;
+  border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-accent);
+  font-size: 12.5px; cursor: default; }
+.pane-hint-action:hover { border-color: var(--color-accent); }
 
 /* 拖放落点指示（设计文档 §5-B，本次修复 Fix 2/3 加强可见度 + 区分"拒绝"状态）：
    半透明色块覆盖目标窗格（整个或左/右半，取决于落点语义——见 paneDrop.ts 的

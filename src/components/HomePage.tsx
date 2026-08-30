@@ -1,10 +1,13 @@
 import { Fragment, useMemo, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import { newConversation, openProjectOverview, resumeThread, runCommand } from '../actions'
-import type { ProjectInfo, ThreadInfo } from '../ipc'
+import { revealInFinder, type ProjectInfo, type ThreadInfo } from '../ipc'
 import { filterProjectsByQuery, type ProjectSearchMatch } from '../sessionSearch'
+import { useHint } from '../store/hint'
+import { useLibrary } from '../store/library'
 import { useSessions } from '../store/sessions'
 import { useProjectStatus, useThreadStatus } from '../store/status'
 import { basename, formatRelative } from '../time'
+import { ContextMenu } from './ContextMenu'
 import { HooksPromptBar } from './HooksInstall'
 import { StatusDot } from './StatusDot'
 
@@ -19,9 +22,20 @@ import { StatusDot } from './StatusDot'
 // 点击/回车走的就是原来 Enter 键触发的同一个 runCommand。
 export function HomePage() {
   const { projects } = useSessions()
+  const hiddenProjects = useLibrary((s) => s.hiddenProjects)
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
+  // 右键菜单（用户原话：「显示在主页里面的项目 可以有一个右键隐藏的按钮」）：在访达
+  // 中显示 / 隐藏项目。只在 HomePage 层持有——ProjectCard 拆成独立组件只是为了合法
+  // 调用 useProjectStatus（见下方该组件顶部注释），菜单本身的浮层（ContextMenu，
+  // portal 到 body）与它要展示哪个项目无关，放在父组件更自然。
+  const [menu, setMenu] = useState<{ x: number; y: number; p: ProjectInfo } | null>(null)
   const q = query.trim()
+
+  // 「最近项目」卡片视图专用过滤：隐藏的项目从这里滤掉。只过滤卡片视图，不碰下面
+  // 的 matched（搜索结果）——用户明确搜某个东西时还把它藏起来，只会让人以为搜索
+  // 坏了（brief 专门测这一条）。
+  const visibleProjects = projects.filter((p) => !hiddenProjects[p.dirName])
 
   // 只在有匹配的会话时才展示这个项目分组——项目名命中但项目下没有会话（理论上
   // 可能发生：项目名匹配、但会话列表本就为空）时，filterProjectsByQuery 仍会保留
@@ -70,16 +84,53 @@ export function HomePage() {
         <>
           <div className="section-label">最近项目</div>
           <div className="cards">
-            {projects.map((p) => (
+            {visibleProjects.map((p) => (
               <ProjectCard
                 key={p.dirName}
                 project={p}
                 expanded={expanded === p.dirName}
                 onToggle={() => setExpanded(expanded === p.dirName ? null : p.dirName)}
+                onContextMenu={(e) => {
+                  // 不能漏：src/contextMenu.ts 的全局监听靠 e.defaultPrevented 判断
+                  // "应用自己已经处理过这次右键"，漏了会连带弹出 WKWebView 的原生菜单
+                  // （同 Task 7 的写法）。
+                  e.preventDefault()
+                  setMenu({ x: e.clientX, y: e.clientY, p })
+                }}
               />
             ))}
             {projects.length === 0 && <div className="sub">尚未发现 Claude Code 会话（~/.claude/projects 为空）</div>}
           </div>
+          {menu && (
+            <ContextMenu
+              x={menu.x}
+              y={menu.y}
+              onDismiss={() => setMenu(null)}
+              items={[
+                {
+                  label: '在访达中显示',
+                  // 传的是项目 cwd，不是会话文件路径；后端只接受已存在的目录。失败时
+                  // reject 的就是可直接展示给用户的中文错误字符串（同 Task 7）。
+                  onSelect: () => {
+                    void revealInFinder(menu.p.cwd).catch((msg) => useHint.getState().show(String(msg)))
+                  },
+                },
+                {
+                  label: '隐藏项目',
+                  onSelect: () => {
+                    useLibrary.getState().hideProject(menu.p.dirName)
+                    // 可撤销轻提示（用户原话："可以有一个右键隐藏的按钮，但是要有个
+                    // 可以撤回的机制"）。action 登记进 store/hint.ts，由 App.tsx 的
+                    // .pane-hint 渲染出撤销按钮。
+                    useHint.getState().show(`已隐藏 ${basename(menu.p.cwd)}`, {
+                      label: '撤销',
+                      onClick: () => useLibrary.getState().unhideProject(menu.p.dirName),
+                    })
+                  },
+                },
+              ]}
+            />
+          )}
         </>
       ) : (
         <div className="search-results">
@@ -106,7 +157,7 @@ export function HomePage() {
 // project/thread 分别调用一次——不能直接在 HomePage 的 .map() 循环体内调用 hook
 // （Rules of Hooks：同一个组件每次渲染调用的 hook 数量/顺序必须固定，而 projects
 // 数组长度是运行时可变的）。
-function ProjectCard({ project: p, expanded, onToggle }: { project: ProjectInfo; expanded: boolean; onToggle: () => void }) {
+function ProjectCard({ project: p, expanded, onToggle, onContextMenu }: { project: ProjectInfo; expanded: boolean; onToggle: () => void; onContextMenu: (e: MouseEvent) => void }) {
   const aggregate = useProjectStatus(p.dirName, p.threads.map((t) => t.rootKey))
   // 卡片头部整体是展开/收起的点击目标（外层 .card 的 onClick={onToggle}）——「总览」
   // 按钮嵌在这个更大的点击目标内部，是本项目反复吃过亏的"大目标里嵌套可交互元素"
@@ -117,9 +168,13 @@ function ProjectCard({ project: p, expanded, onToggle }: { project: ProjectInfo;
     openProjectOverview(p.dirName, basename(p.cwd))
   }
   return (
-    <div className="card" onClick={onToggle}>
+    <div className="card" onClick={onToggle} onContextMenu={onContextMenu}>
       <div className="card-head">
-        <div className="name"><StatusDot status={aggregate} /> 📁 {basename(p.cwd)}</div>
+        {/* 项目名单独包一层 <span>（而不是与 "📁 " 直接摊平在 .name 这个 flex 容器里）：
+            右键菜单（Task 8）需要能用会话搜索同款的项目名单独定位到这段文本——外层再
+            包一层是为了不新增一个 flex item（.name 有 gap:6px，若把 "📁 " 单独拆成
+            一个文本节点会在它与项目名之间多出一段本不该有的间距，见该处 CSS 注释）。 */}
+        <div className="name"><StatusDot status={aggregate} /><span> 📁 <span className="card-project-name">{basename(p.cwd)}</span></span></div>
         <button type="button" className="card-overview-btn" onClick={onOpenOverview}>▦ 总览</button>
       </div>
       <div className="sub">{p.threads.length} 个会话 · {formatRelative(p.lastActivityMs)}</div>
