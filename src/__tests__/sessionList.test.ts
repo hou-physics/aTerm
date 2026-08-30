@@ -66,6 +66,15 @@ describe('groupRecentByDate', () => {
     )
     expect(g.map((x) => x.label)).toEqual(['今天', '昨天'])
   })
+  it('精确边界：lastActivityMs 恰好等于今天零点整——实现用 `>=`，若误写成 `>` 会把它错分到昨天', () => {
+    // 上面那条用例的两个样本都带 ±1 分钟偏移，永远测不到"恰好等于分界点那一刻"这个
+    // 单独的整数值；`>` 和 `>=` 在那两个样本上给出完全相同的分组结果，无法区分实现
+    // 是不是写反了。这里单独给一条 lastActivityMs === todayMs 的样本。
+    const startOfToday = new Date(now)
+    startOfToday.setHours(0, 0, 0, 0)
+    const g = groupRecentByDate([{ lastActivityMs: startOfToday.getTime() }], now)
+    expect(g.map((x) => x.label)).toEqual(['今天'])
+  })
   it('保持传入顺序，不重新排序（调用方已按活跃时间排好）', () => {
     const a = { lastActivityMs: at(30, 9) }
     const b = { lastActivityMs: at(30, 11) }

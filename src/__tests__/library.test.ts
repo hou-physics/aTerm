@@ -46,10 +46,14 @@ describe('library store — rename / clearAlias', () => {
     expect(useLibrary.getState().aliases['-tmp-a::r1']).toBe(undefined)
   })
   it('两侧空白被 trim 掉，不会带着空格落盘', async () => {
-    mockLocalStorage()
+    const ls = mockLocalStorage()
     const { useLibrary } = await import('../store/library')
     useLibrary.getState().rename('-tmp-a::r1', '  我的任务  ')
     expect(useLibrary.getState().aliases['-tmp-a::r1']).toBe('我的任务')
+    // 只断言内存态在原 overviewStore.test.ts 版本里就漏了一半覆盖：trim 有可能只在
+    // 读出来的 getter 那一层做了，落盘的仍然带着两侧空格——那样每次重新加载都会
+    // 带着这对空格渲染回来。这里补上落盘内容本身的断言。
+    expect(ls.setItem).toHaveBeenCalledWith('aterm.overview.names', JSON.stringify({ '-tmp-a::r1': '我的任务' }))
   })
   it('clearAlias 删除该键', async () => {
     mockLocalStorage({ 'aterm.overview.names': JSON.stringify({ '-tmp-a::r1': '旧' }) })
