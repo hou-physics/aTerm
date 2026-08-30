@@ -168,7 +168,11 @@ export default function App() {
         if (decision === 'fits') {
           useTabs.getState().addPane(tab.id, tab.activePaneId)
         } else if (decision === 'collapse-panel') {
-          layout.togglePanel()
+          // 用 collapsePanelKeepingWindow 而不是 togglePanel：这里要的是"收起面板后
+          // .main 的终端内容区跟着变宽，腾出装下新窗格的空间"，togglePanel 现在的语义已经
+          // 变成"收起面板 → 窗口自己变窄、终端区宽度不变"，改调它会让这一档彻底腾不出
+          // 任何空间（见 store/layout.ts 里两个方法顶部的注释）。
+          layout.collapsePanelKeepingWindow()
           useTabs.getState().addPane(tab.id, tab.activePaneId)
         } else {
           useHint.getState().show('窗口太窄，放不下新窗格')

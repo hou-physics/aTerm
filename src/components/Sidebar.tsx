@@ -214,7 +214,10 @@ export function Sidebar() {
       useHint.getState().show(preview.refusalKind === 'max-panes' ? '最多支持 3 个窗格' : '窗口太窄，放不下新窗格')
       return
     }
-    if (preview.decision === 'collapse-panel') layout.togglePanel()
+    // collapsePanelKeepingWindow 而非 togglePanel：这里要的是"收起面板腾出终端内容区
+    // 宽度"这个旧语义，togglePanel 现在会联动缩窗口、终端区宽度不变，腾不出空间
+    // （详见 store/layout.ts 与 App.tsx ⌘D 处理器同一处注释）。
+    if (preview.decision === 'collapse-panel') layout.collapsePanelKeepingWindow()
     const { p, t } = drag
     const sessionArgs = {
       // 别名 > 真实标题 > 「新对话」（displayTitle）——同上，第三个写入点。这里不在

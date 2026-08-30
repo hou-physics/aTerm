@@ -1,10 +1,12 @@
 import { create } from 'zustand'
+import { planPanelCollapse, planPanelExpand, WINDOW_MIN_WIDTH_CSS } from '../panelWindow'
 
 type LayoutState = {
   sidebarCollapsed: boolean
   toggleSidebar(): void
   panelCollapsed: boolean
   togglePanel(): void
+  collapsePanelKeepingWindow(): void
   fontSize: number
   setFontSize(n: number): void
   adjustFontSize(delta: number): void
@@ -163,6 +165,49 @@ function readPersistedWheelMultiplier(): number {
   return WHEEL_MULTIPLIER_DEFAULT
 }
 
+// 展开/收起对话面板时，让窗口自身宽度联动变化，而不是像现状那样挤窄终端区——用户反馈：
+// .main 是 flex:1、.conv-panel-dock 是 flex:none，面板一展开就把 .main 的可用宽度吃掉
+// 一块，体感上是"面板向左展开"；真正要的是"窗口向右变宽，终端区宽度不变"。这里只负责
+// 物理像素换算与 Tauri 窗口 API 的调用序列，"新窗口该在哪、多宽"这个决策交给
+// panelWindow.ts 的纯函数（那部分因为要连真实 Tauri API，没法直接单测；数学关系已经在
+// panelWindow.test.ts 里独立验证过）。
+//
+// 整条链走动态 import('@tauri-apps/api/window') 并在末尾 .catch(() => {})：非 Tauri
+// 环境（vitest/jsdom、浏览器预览）里 getCurrentWindow() 会因为读不到
+// window.__TAURI_INTERNALS__ 而同步抛错，不 catch 会变成未处理的 promise rejection，
+// 污染所有渲染真实组件树的测试文件——App.tsx 里文件拖放那段（onDragDropEvent）已经踩过
+// 这个坑，这里照抄同一个写法。
+//
+// expanding=true 表示"刚展开"（窗口变宽）；expanding=false 表示"刚收起"（窗口变窄）。
+// panelWidthCss 是调用时刻的 store.panelWidth（CSS 像素）。
+function resizeWindowForPanel(expanding: boolean, panelWidthCss: number) {
+  void import('@tauri-apps/api/window').then(async ({ getCurrentWindow, currentMonitor, PhysicalPosition, PhysicalSize }) => {
+    const win = getCurrentWindow()
+    // panelWidth 存的是 CSS 像素，而 outerPosition/outerSize/Monitor.workArea 全部是
+    // 物理像素——这一步换算漏了的话，Retina（devicePixelRatio=2）上面板只会长出该有
+    // 宽度的一半，非 Retina 屏上又恰好正确，是最难查的那类缺陷（同 fileDrop.ts
+    // toLogicalPoint 顶部注释的坑，方向相反）。
+    const dpr = window.devicePixelRatio || 1
+    const delta = panelWidthCss * dpr
+    const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()])
+    if (expanding) {
+      const monitor = await currentMonitor()
+      if (!monitor) return // 拿不到当前显示器信息（极端环境）：放弃联动，保留窗口原状
+      const plan = planPanelExpand(
+        { x: pos.x, width: size.width },
+        { x: monitor.workArea.position.x, width: monitor.workArea.size.width },
+        delta,
+      )
+      await win.setPosition(new PhysicalPosition(plan.x, pos.y))
+      await win.setSize(new PhysicalSize(plan.width, size.height))
+    } else {
+      const plan = planPanelCollapse({ x: pos.x, width: size.width }, delta, WINDOW_MIN_WIDTH_CSS * dpr)
+      await win.setPosition(new PhysicalPosition(plan.x, pos.y))
+      await win.setSize(new PhysicalSize(plan.width, size.height))
+    }
+  }).catch(() => {}) // 非 Tauri 环境下静默降级，见上面函数顶部注释
+}
+
 export const useLayout = create<LayoutState>((set, get) => ({
   sidebarCollapsed: readPersistedSidebarCollapsed(),
   toggleSidebar: () => {
@@ -171,10 +216,30 @@ export const useLayout = create<LayoutState>((set, get) => ({
     set({ sidebarCollapsed: next })
   },
   panelCollapsed: readPersistedPanelCollapsed(),
+  // togglePanel 有三个调用方（App.tsx 的 ⌘J、TabBar.tsx 的面板按钮、以及将来面板自己的
+  // 顶栏按钮），且这套"窗口跟着联动变宽/变窄"的副作用特意放在这里、而不是留给每个调用方
+  // 自己去触发：放在调用方就要求每一处都记得同时做"切状态"和"调窗口尺寸"两件事，漏一处
+  // 就是"某个入口开面板、窗口却纹丝不动"这种难查的诡异 bug；放在 store 里能保证所有入口
+  // 行为一致。
   togglePanel: () => {
     const next = !get().panelCollapsed
     persistPanelCollapsed(next)
+    const panelWidthCss = get().panelWidth
     set({ panelCollapsed: next })
+    resizeWindowForPanel(!next, panelWidthCss) // next=true(收起)→expanding=false；next=false(展开)→expanding=true
+  },
+  // ⌘D 新建窗格时"窄窗口先收起对话面板腾出宽度"那一档（App.tsx，设计文档 §8）专用，
+  // TabBar.tsx/Sidebar.tsx 的拖放落点判断走的是同一套 decidePaneFit/previewPaneDrop
+  // 'collapse-panel' 决策，也用这个方法。那几处依赖的是收起面板前的旧语义——"收起面板 →
+  // .conv-panel-dock 让出空间 → .main 的 flex:1 终端内容区跟着变宽，腾出的宽度装得下
+  // 新窗格/新落点"。togglePanel 现在的语义已经变成"收起面板 → 窗口自己变窄、终端区宽度
+  // 不变"，如果这几处改调 togglePanel，窗口会缩小但终端内容区宽度纹丝不动，什么空间都
+  // 没腾出来，调用方却以为自己已经腾出来了——因此单独留一个"只改状态、绝不触碰窗口尺寸"
+  // 的收起方法，专供这类"要靠收起面板换宽度"的场景；日常的面板开关（⌘J/顶栏按钮）继续
+  // 走 togglePanel。
+  collapsePanelKeepingWindow: () => {
+    persistPanelCollapsed(true)
+    set({ panelCollapsed: true })
   },
   fontSize: readPersistedFontSize(),
   setFontSize: (n) => {

@@ -1,5 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const { outerPositionMock, outerSizeMock, setPositionMock, setSizeMock, currentMonitorMock } = vi.hoisted(() => ({
+  outerPositionMock: vi.fn(async () => ({ x: 100, y: 50 })),
+  outerSizeMock: vi.fn(async () => ({ width: 1200, height: 800 })),
+  setPositionMock: vi.fn(async () => {}),
+  setSizeMock: vi.fn(async () => {}),
+  // workArea 特意给得很宽（3840，4K 显示器量级）：下面几条测试用的 panelWidth 都不大，
+  // 宽到不会意外触发 planPanelExpand 的"左移"/"铺满工作区"分支——那两条分支已经在
+  // panelWindow.test.ts 里独立覆盖过，这里只关心"resizeWindowForPanel 有没有被触发、
+  // 传的数字对不对换算"，不想让分支切换掺进来干扰断言。
+  currentMonitorMock: vi.fn(async () => ({
+    workArea: { position: { x: 0, y: 0 }, size: { width: 3840, height: 2160 } },
+  })),
+}))
+
+// store/layout.ts 展开/收起面板时会动态 import('@tauri-apps/api/window') 联动窗口位置/
+// 尺寸（见该文件 resizeWindowForPanel）。真实 Tauri 窗口 API 在 jsdom 里不可用，换成桩
+// 实现，好让下面几条测试能断言"窗口尺寸调整确实被触发/没有被触发"，不需要真的起一个
+// Tauri 运行时。
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    outerPosition: outerPositionMock,
+    outerSize: outerSizeMock,
+    setPosition: setPositionMock,
+    setSize: setSizeMock,
+  }),
+  currentMonitor: currentMonitorMock,
+  PhysicalPosition: class { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y } },
+  PhysicalSize: class { width: number; height: number; constructor(w: number, h: number) { this.width = w; this.height = h } },
+}))
+
 function mockLocalStorage(initial: Record<string, string> = {}) {
   const store = new Map<string, string>(Object.entries(initial))
   const ls = {
@@ -23,8 +53,18 @@ function mockThrowingLocalStorage() {
   return ls
 }
 
+// 排空 resizeWindowForPanel 内部那串 await（动态 import → Promise.all(outerPosition,
+// outerSize) → 可能的 currentMonitor → setPosition → setSize）。用真实的宏任务
+// （setTimeout）而不是纯 Promise.resolve() 链，是为了不用去猜确切要串多少级微任务——
+// 尤其是给"确认没有被触发"的用例用：既要等得够久让"万一真触发了"来得及跑完，又不能
+// 用 vi.waitFor 那种"等到条件成立"的写法（这里要等的恰恰是"什么都没发生"）。
+async function flushWindowResize() {
+  await new Promise((resolve) => setTimeout(resolve, 10))
+}
+
 beforeEach(() => {
   vi.resetModules()
+  vi.clearAllMocks()
 })
 
 afterEach(() => {
@@ -228,5 +268,71 @@ describe('layout store — wheelMultiplier', () => {
     mockLocalStorage({ 'aterm-wheel-multiplier': 'abc' })
     const { useLayout } = await import('../store/layout')
     expect(useLayout.getState().wheelMultiplier).toBe(1.5)
+  })
+})
+
+describe('layout store — 面板展开/收起联动窗口尺寸（用户诉求：窗口向右变宽，终端区不被挤）', () => {
+  it('togglePanel 展开面板：读取窗口当前位置/尺寸与显示器 workArea，联动调用 setPosition/setSize', async () => {
+    mockLocalStorage() // 初始 panelCollapsed=true（默认收起），这次 toggle 是"展开"
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().togglePanel()
+    expect(useLayout.getState().panelCollapsed).toBe(false)
+    await vi.waitFor(() => {
+      expect(outerPositionMock).toHaveBeenCalled()
+      expect(outerSizeMock).toHaveBeenCalled()
+      expect(currentMonitorMock).toHaveBeenCalled()
+      expect(setPositionMock).toHaveBeenCalled()
+      expect(setSizeMock).toHaveBeenCalled()
+    })
+  })
+
+  it('togglePanel 收起面板：同样联动调用 setPosition/setSize（窗口跟着变窄）', async () => {
+    mockLocalStorage({ 'aterm-panel-collapsed': '0' }) // 初始展开，这次 toggle 是"收起"
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().togglePanel()
+    expect(useLayout.getState().panelCollapsed).toBe(true)
+    await vi.waitFor(() => {
+      expect(setPositionMock).toHaveBeenCalled()
+      expect(setSizeMock).toHaveBeenCalled()
+    })
+  })
+
+  // 回归保护：⌘D 新建窗格时"窄窗口先收起面板腾出空间"那一档（App.tsx）改调用这个方法，
+  // 就是因为它绝不能触发窗口尺寸联动——一旦联动，窗口会变窄但 .main 的终端内容区宽度
+  // 纹丝不动，腾不出任何空间，⌘D 却以为自己已经腾出来了（详见 store/layout.ts 里
+  // collapsePanelKeepingWindow 顶部注释）。这条测试如果把 collapsePanelKeepingWindow
+  // 误实现成 togglePanel 的同义词，必须变红。
+  it('collapsePanelKeepingWindow 只改状态，绝不触发窗口 setPosition/setSize', async () => {
+    mockLocalStorage({ 'aterm-panel-collapsed': '0' }) // 初始展开
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().collapsePanelKeepingWindow()
+    expect(useLayout.getState().panelCollapsed).toBe(true)
+    await flushWindowResize()
+    expect(outerPositionMock).not.toHaveBeenCalled()
+    expect(setPositionMock).not.toHaveBeenCalled()
+    expect(setSizeMock).not.toHaveBeenCalled()
+  })
+
+  it('collapsePanelKeepingWindow 也会持久化折叠状态（与 togglePanel 共用同一条持久化路径）', async () => {
+    const ls = mockLocalStorage({ 'aterm-panel-collapsed': '0' })
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().collapsePanelKeepingWindow()
+    expect(ls.setItem).toHaveBeenCalledWith('aterm-panel-collapsed', '1')
+  })
+
+  it('devicePixelRatio=2 时，panelWidth（CSS 像素）在传给窗口尺寸前会先换算成物理像素', async () => {
+    vi.stubGlobal('devicePixelRatio', 2)
+    mockLocalStorage({ 'aterm-panel-width': '400' }) // CSS 400px
+    const { useLayout } = await import('../store/layout')
+    useLayout.getState().togglePanel() // 初始收起 → 这次是展开
+    await vi.waitFor(() => { expect(setSizeMock).toHaveBeenCalled() })
+    // outerSize 桩返回 width:1200；delta 应为 400 * dpr(2) = 800 物理像素，而不是
+    // 400——漏了 dpr 换算的话，这里会算出 1600 而不是期望的 2000，在 Retina
+    // （devicePixelRatio=2）上面板会只长出该有宽度的一半，这正是本模块唯一"在 Retina
+    // 上错、在普通屏上对"的失效模式。workArea 给得足够宽（3840），不会触发
+    // planPanelExpand 的左移/铺满分支，新宽度就是 outerSize.width + delta。
+    expect(setSizeMock).toHaveBeenCalledWith(expect.objectContaining({ width: 1200 + 800, height: 800 }))
+    // x 不变（右边够，走"只变宽"分支）；y 不变（面板联动从不改变窗口的垂直位置）。
+    expect(setPositionMock).toHaveBeenCalledWith(expect.objectContaining({ x: 100, y: 50 }))
   })
 })
