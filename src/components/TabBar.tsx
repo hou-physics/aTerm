@@ -373,7 +373,10 @@ export function TabBar() {
       useHint.getState().show(preview.refusalKind === 'max-panes' ? '最多支持 3 个窗格' : '窗口太窄，放不下新窗格')
       return
     }
-    if (preview.decision === 'collapse-panel') layout.togglePanel()
+    // collapsePanelKeepingWindow 而非 togglePanel：同 Sidebar.tsx/App.tsx ⌘D 处理器
+    // 那处一样的理由——这里要的是"收起面板腾出终端内容区宽度"，togglePanel 现在会联动
+    // 缩窗口、终端区宽度不变，腾不出空间。
+    if (preview.decision === 'collapse-panel') layout.collapsePanelKeepingWindow()
     if (mode === 'fill' && targetPane) {
       useTabs.getState().fillEmptyPane(drag.tabId, activeId, targetPane.id)
     } else {
