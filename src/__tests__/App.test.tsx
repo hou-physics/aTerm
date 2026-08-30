@@ -40,6 +40,14 @@ vi.mock('../closeRequest', () => ({}))
 // TerminalView 内部会实例化真实的 xterm.js Terminal（渲染器、ResizeObserver 等），
 // 与本文件要验证的"标签间循环切换"无关，替身掉避免测试和真实终端机制耦合。
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
+// App.tsx 挂载时会动态 import('@tauri-apps/api/webview') 去接线文件拖放（见该文件新增
+// 的 onDragDropEvent effect）。jsdom 里这个模块本身能解析，但 getCurrentWebview() 之后
+// 真正调用 onDragDropEvent() 会走 Tauri IPC 并 reject——App.tsx 那端已经用 .catch(() => {})
+// 兜底不会让测试挂掉，但每个测试都会真的触发一次未处理的 IPC 调用，噪音大且与本文件
+// 任何一条断言无关，这里直接换成一个立即 resolve、返回空 unlisten 函数的桩。
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
+}))
 
 import App from '../App'
 import { useHint } from '../store/hint'
