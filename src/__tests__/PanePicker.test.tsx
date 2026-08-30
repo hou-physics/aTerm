@@ -16,6 +16,7 @@ import * as ipc from '../ipc'
 import { PanePicker } from '../components/PanePicker'
 import { useSessions } from '../store/sessions'
 import { type Tab, useTabs } from '../store/tabs'
+import { makeThread } from './factories'
 
 const PROJECTS = [
   {
@@ -23,8 +24,8 @@ const PROJECTS = [
     cwd: '/home/proj-a',
     lastActivityMs: 1000,
     threads: [
-      { rootKey: 'a1', resumeSessionId: 'sid-a1', title: '修复登录流程', cwd: '/home/proj-a', lastActivityMs: 1000, fileCount: 1 },
-      { rootKey: 'a2', resumeSessionId: 'sid-a2', title: '写单元测试', cwd: '/home/proj-a', lastActivityMs: 900, fileCount: 1 },
+      makeThread({ title: '修复登录流程' }),
+      makeThread({ rootKey: 'a2', title: '写单元测试' }),
     ],
   },
   {
@@ -32,7 +33,7 @@ const PROJECTS = [
     cwd: '/home/proj-b',
     lastActivityMs: 800,
     threads: [
-      { rootKey: 'b1', resumeSessionId: 'sid-b1', title: '重构支付模块', cwd: '/home/proj-b', lastActivityMs: 800, fileCount: 1 },
+      makeThread({ title: '重构支付模块' }),
     ],
   },
 ]
@@ -112,7 +113,7 @@ describe('PanePicker — 搜索框过滤最近会话与全部项目（大小写�
           dirName: 'proj-mixed',
           cwd: '/home/CamelCase',
           lastActivityMs: 500,
-          threads: [{ rootKey: 'm1', resumeSessionId: 'sid-m1', title: 'fix Login Bug', cwd: '/home/CamelCase', lastActivityMs: 500, fileCount: 1 }],
+          threads: [makeThread({ title: 'fix Login Bug' })],
         },
       ],
     })

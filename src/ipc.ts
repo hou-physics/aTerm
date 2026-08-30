@@ -2,6 +2,11 @@ import { invoke } from '@tauri-apps/api/core'
 
 export interface ThreadInfo {
   rootKey: string; resumeSessionId: string; title: string; cwd: string; lastActivityMs: number; fileCount: number
+  // 链上全部文件的 session id（时间升序，与 fileCount 同源）。窗格对账用：见
+  // paneReconcile.ts。必填——后端恒会给出，写成可选只会把契约的模糊转嫁给调用方。
+  sessionIds: string[]
+  // title 是否为真实标题。false 时 title 是 resumeSessionId 前 8 位的回退值，不可采纳。
+  titled: boolean
   // 徽章数据：均可缺省（老会话或异常记录取不到时为 null），与 rust 端 ThreadInfo 同源。
   model?: string | null
   contextTokens?: number | null

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, fireEvent } from '@testing-library/react'
 import type { SessionStatusPayload } from '../ipc'
+import { makeThread } from './factories'
 
 // 集成测试：HomePage/Sidebar 真正接到 store/status 上（不 mock store/status 本身），
 // 只 mock Tauri 事件桥（listen）与 ipc 的 invoke 调用边界——与 status.test.ts 同一套
@@ -48,8 +49,8 @@ function entry(over: Partial<SessionStatusPayload> = {}): SessionStatusPayload {
 const PROJECTS = [{
   dirName: 'proj-a', cwd: '/home/proj-a', lastActivityMs: 100,
   threads: [
-    { rootKey: 'root-1', resumeSessionId: 'sid-1', title: '修复登录', cwd: '/home/proj-a', lastActivityMs: 100, fileCount: 1 },
-    { rootKey: 'root-2', resumeSessionId: 'sid-2', title: '写测试', cwd: '/home/proj-a', lastActivityMs: 90, fileCount: 1 },
+    makeThread({ rootKey: 'root-1', title: '修复登录' }),
+    makeThread({ rootKey: 'root-2', title: '写测试' }),
   ],
 }]
 

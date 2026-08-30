@@ -23,19 +23,20 @@ import * as ipc from '../ipc'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
 import { HomePage } from '../components/HomePage'
+import { makeThread } from './factories'
 
 const PROJECTS = [
   {
     dirName: '-Users-x-phineuro', cwd: '/Users/x/phineuro', lastActivityMs: Date.now() - 60_000,
     threads: [
-      { rootKey: 'u1', resumeSessionId: 'sid-1', title: '修复登录流程', cwd: '/Users/x/phineuro', lastActivityMs: Date.now() - 60_000, fileCount: 2 },
-      { rootKey: 'u2', resumeSessionId: 'sid-2', title: '写测试', cwd: '/Users/x/phineuro', lastActivityMs: Date.now() - 3600_000, fileCount: 1 },
+      makeThread({ title: '修复登录流程', resumeSessionId: 'sid-1' }),
+      makeThread({ title: '写测试' }),
     ],
   },
   {
     dirName: '-Users-x-aterm', cwd: '/Users/x/aterm', lastActivityMs: Date.now() - 120_000,
     threads: [
-      { rootKey: 'a1', resumeSessionId: 'sid-a1', title: '重构分屏布局', cwd: '/Users/x/aterm', lastActivityMs: Date.now() - 120_000, fileCount: 3 },
+      makeThread({ title: '重构分屏布局' }),
     ],
   },
 ]

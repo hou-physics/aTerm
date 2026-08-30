@@ -20,7 +20,7 @@ import { buildOverviewStatusText, buildSessionStatusText, StatusBar } from '../c
 import { threadStatusKey, useStatusStore } from '../store/status'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
-import { HOME_TAB, makePane, makeTermTab } from './factories'
+import { HOME_TAB, makePane, makeTermTab, makeThread } from './factories'
 
 describe('buildSessionStatusText（spec §5.2：会话标签显示模型 · effort · 权限模式）', () => {
   it('三项齐全时以 · 连接', () => {
@@ -49,9 +49,7 @@ describe('buildOverviewStatusText（总览/主页显示会话统计）', () => {
   })
 })
 
-function thread(over: Partial<ThreadInfo> = {}): ThreadInfo {
-  return { rootKey: 'r1', resumeSessionId: 's1', title: 'T', cwd: '/tmp/p', lastActivityMs: 1, fileCount: 1, ...over }
-}
+const thread = (over: Partial<ThreadInfo> = {}) => makeThread(over)
 
 function setProjects(projects: ProjectInfo[]) {
   useSessions.setState({ projects, loading: false })
