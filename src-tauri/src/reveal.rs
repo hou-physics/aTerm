@@ -26,10 +26,15 @@ pub(crate) fn validate_reveal_dir(path: &str) -> Result<&Path, String> {
 ///
 /// 路径作为独立参数交给 `open`（`.arg(p)`），不经 shell、不做任何字符串拼接，因此
 /// 路径里的空格、引号、`;`、`$` 等一律是字面量，没有注入面。
+///
+/// `open` 用绝对路径 `/usr/bin/open`，不吃 `$PATH`——这是本仓库第一个启动外部程序的
+/// 命令，此处定的是先例：`$PATH` 是调用方（用户 shell 环境）能控制的东西，一旦仓库
+/// 里出现第二个、第三个 `Command::new("xxx")` 抄这个先例走 `$PATH` 解析，攻击面就是
+/// "在 PATH 里随便放一个同名可执行文件"。macOS 上 `/usr/bin/open` 的路径是固定的。
 #[tauri::command]
 pub fn reveal_in_finder(path: String) -> Result<(), String> {
     let p = validate_reveal_dir(&path)?;
-    std::process::Command::new("open")
+    std::process::Command::new("/usr/bin/open")
         .arg(p)
         .spawn()
         .map_err(|e| format!("打开访达失败：{e}"))?;
