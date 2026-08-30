@@ -20,7 +20,8 @@
 // 之后，手柄根本收不到事件，就不会记录起点、也就不会触发拖拽——原生 mousedown/文本
 // 选择行为不受影响（没有调用 preventDefault，只是不让事件继续冒泡）。
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { blockKey, useOverviewStore } from '../store/overview'
+import { blockKey } from '../store/overview'
+import { useLibrary } from '../store/library'
 import { useThreadStatus } from '../store/status'
 import type { ThreadInfo } from '../ipc'
 import { formatRelative } from '../time'
@@ -34,10 +35,11 @@ export function SessionBlock({ thread, dirName, subagentCount, onOpen }: {
   onOpen: () => void
 }) {
   const status = useThreadStatus(dirName, thread.rootKey)
-  // 自定义名字（Task 4 的 store）：只读展示，有就显示，没有就退回记录里的原始标题。
+  // 自定义名字（现由 store/library.ts 持有，见该文件顶部注释）：只读展示，有就
+  // 显示，没有就退回记录里的原始标题。
   const key = blockKey(dirName, thread.rootKey)
-  const customName = useOverviewStore((s) => s.names[key])
-  const rename = useOverviewStore((s) => s.rename)
+  const customName = useLibrary((s) => s.aliases[key])
+  const rename = useLibrary((s) => s.rename)
   const displayTitle = customName ?? thread.title
   const model = shortModelName(thread.model)
   const ctx = formatContextTokens(thread.contextTokens)

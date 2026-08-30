@@ -5,7 +5,7 @@ const t = (rootKey: string, ms: number) => ({ rootKey, lastActivityMs: ms })
 
 beforeEach(() => {
   localStorage.clear()
-  useOverviewStore.setState({ order: {}, positions: {}, names: {} })
+  useOverviewStore.setState({ order: {}, positions: {} })
 })
 
 describe('排序快照（spec §5.2：打开时按最后活动时间新→旧，打开期间不重排）', () => {
@@ -83,33 +83,6 @@ describe('位置：拖拽中只改内存，落手才持久化（沿用项目既�
   it('commitPosition 写入 localStorage', () => {
     useOverviewStore.getState().commitPosition('k', { x: 10, y: 20 })
     expect(JSON.parse(localStorage.getItem('aterm.overview.positions')!)).toEqual({ k: { x: 10, y: 20 } })
-  })
-})
-
-describe('重命名', () => {
-  it('rename 持久化，clearName 恢复默认标题', () => {
-    const s = useOverviewStore.getState()
-    s.rename('k', '我的重构任务')
-    expect(JSON.parse(localStorage.getItem('aterm.overview.names')!)).toEqual({ k: '我的重构任务' })
-    s.clearName('k')
-    expect(useOverviewStore.getState().names.k).toBeUndefined()
-  })
-
-  it('空白名字视为清除，不留下空标题的方块', () => {
-    const s = useOverviewStore.getState()
-    s.rename('k', '   ')
-    expect(useOverviewStore.getState().names.k).toBeUndefined()
-  })
-
-  // 终审：空白规则此前只对"全空白"做了特判，非空名字的两侧填充原样落盘——
-  // `"  我的任务  "` 会带着空格持久化，之后每次渲染都带着空格显示，用户既看不出多的
-  // 是什么、也删不掉。trim 放在 rename 的第一步，这条规则因此对全空白和两侧填充是
-  // 同一条，不再是特例。
-  it('非空名字两侧的空白同样被 trim，不带着空格落盘', () => {
-    const s = useOverviewStore.getState()
-    s.rename('k', '  我的任务  ')
-    expect(useOverviewStore.getState().names.k).toBe('我的任务')
-    expect(JSON.parse(localStorage.getItem('aterm.overview.names')!)).toEqual({ k: '我的任务' })
   })
 })
 

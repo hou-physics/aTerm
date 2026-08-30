@@ -2,7 +2,8 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionBlock } from '../components/SessionBlock'
-import { blockKey, useOverviewStore } from '../store/overview'
+import { blockKey } from '../store/overview'
+import { useLibrary } from '../store/library'
 import { threadStatusKey, useStatusStore } from '../store/status'
 import { makeThread } from './factories'
 
@@ -91,7 +92,7 @@ describe('SessionBlock —— 双击分工（标题 vs 空白区，为 Task 9 �
 
 describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期以双击标题实现）', () => {
   beforeEach(() => {
-    useOverviewStore.setState({ order: {}, positions: {}, names: {} })
+    useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
   })
 
   it('双击标题进入编辑态', async () => {
@@ -106,7 +107,7 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.clear(screen.getByRole('textbox'))
     await userEvent.type(screen.getByRole('textbox'), '我的重构任务{Enter}')
     expect(screen.getByText('我的重构任务')).toBeTruthy()
-    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('我的重构任务')
+    expect(useLibrary.getState().aliases[blockKey('proj', 'r1')]).toBe('我的重构任务')
   })
 
   it('Esc 取消，保留原标题且不写入 store', async () => {
@@ -114,7 +115,7 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.dblClick(screen.getByText('重构解析器'))
     await userEvent.type(screen.getByRole('textbox'), '不该被保存{Escape}')
     expect(screen.getByText('重构解析器')).toBeTruthy()
-    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
+    expect(useLibrary.getState().aliases[blockKey('proj', 'r1')]).toBeUndefined()
   })
 
   it('失焦视为提交', async () => {
@@ -123,17 +124,17 @@ describe('方块重命名（spec §5.2 右键菜单的「重命名」，本期�
     await userEvent.clear(screen.getByRole('textbox'))
     await userEvent.type(screen.getByRole('textbox'), '失焦提交')
     await userEvent.tab()
-    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBe('失焦提交')
+    expect(useLibrary.getState().aliases[blockKey('proj', 'r1')]).toBe('失焦提交')
   })
 
   it('输入全空白视为清除自定义名，回退到默认标题', async () => {
-    useOverviewStore.getState().rename(blockKey('proj', 'r1'), '旧名字')
+    useLibrary.getState().rename(blockKey('proj', 'r1'), '旧名字')
     render(<SessionBlock thread={thread} dirName="proj" subagentCount={0} onOpen={() => {}} />)
     await userEvent.dblClick(screen.getByText('旧名字'))
     await userEvent.clear(screen.getByRole('textbox'))
     await userEvent.type(screen.getByRole('textbox'), '   {Enter}')
     expect(screen.getByText('重构解析器')).toBeTruthy()
-    expect(useOverviewStore.getState().names[blockKey('proj', 'r1')]).toBeUndefined()
+    expect(useLibrary.getState().aliases[blockKey('proj', 'r1')]).toBeUndefined()
   })
 
   it('重命名后徽章与状态点仍在，不因进出编辑态而丢失', async () => {
