@@ -21,6 +21,7 @@ import { decidePaneFit, MAX_PANES, neighborPaneId, usablePaneAreaWidth } from '.
 import { createTrailingThrottle, type Throttled } from './refreshThrottle'
 import { useHint } from './store/hint'
 import { useLayout } from './store/layout'
+import { useLibrary } from './store/library'
 import { useSessions } from './store/sessions'
 import { useStatusStore } from './store/status'
 import { useTabs } from './store/tabs'
@@ -52,7 +53,7 @@ export default function App() {
   // 这个 UI 状态 store。
   const refreshAndReconcile = useCallback(async () => {
     await refresh()
-    useTabs.getState().reconcilePanes(useSessions.getState().projects)
+    useTabs.getState().reconcilePanes(useSessions.getState().projects, useLibrary.getState().aliases)
   }, [refresh])
   useEffect(() => {
     refreshAndReconcile().catch(console.error)
