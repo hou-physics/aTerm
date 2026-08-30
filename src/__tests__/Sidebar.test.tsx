@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 
 // App.tsx 挂载时会用真实的 useSessions().refresh() 覆盖任何提前用 setState 种下的
 // projects（refresh 内部把 listProjects() 的结果原样写回 store）——所以这里直接在
@@ -56,6 +56,7 @@ import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { useLibrary } from '../store/library'
+import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
 
 const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
@@ -711,5 +712,38 @@ describe('Sidebar — 拖放创建窗格也按修正后的可用宽度判定，�
     await drag(item, { x: 10, y: 10 }, { x: 655, y: 50 }) // 落在 pane-a 矩形右半侧
 
     expect(useTabs.getState().tabs.find((x) => x.id === 'tab-a')!.panes).toHaveLength(2) // 新建成功
+  })
+})
+
+// Fix 1（本轮）：refresh() 要对每个项目的每个转录做头尾读取（见 App.tsx
+// METADATA_REFRESH_MS 附近注释），是有实际耗时的异步扫描，扫描期间 projects 仍是
+// 初始的 []。空态判断若只看 projects.some(...)，会把"正在加载"误判成"尚未发现
+// 会话"——而首次启动恰好落在这个窗口期。这里锁住：loading 为 true 时，两句空态
+// 文案（"尚未发现…" / "已从列表移除全部…"）都不该出现。
+describe('Sidebar — 空态判断需要参考 loading，不能把"正在扫描"误判为"没有会话"', () => {
+  it('loading 为 true 且 projects 为空时，两句空态文案都不应出现', async () => {
+    // 显式钉住起点：projects 是本用例想测的那个精确前提（[]），不依赖 store 在
+    // 用例之间不被重置这件事——useSessions 不像 useTabs/useHint 等 store 那样在
+    // 顶部 beforeEach 里被重置，留着上一条用例的残余数据会让下面的断言看运气。
+    useSessions.setState({ projects: [], loading: false })
+    // 用一个手动控制的 pending promise 卡住 refresh()，让 loading 在断言时仍是
+    // true——默认 mock 是立即 resolve 的 async 函数，一次 microtask flush 就会
+    // 结束，来不及观察到 loading:true 这个中间态。
+    let resolveList: ((v: Awaited<ReturnType<typeof ipc.listProjects>>) => void) | null = null
+    vi.mocked(ipc.listProjects).mockImplementationOnce(() => new Promise((resolve) => { resolveList = resolve }))
+
+    await renderApp()
+
+    expect(useSessions.getState().loading).toBe(true) // 前提：refresh() 确实还没结束
+    expect(useSessions.getState().projects).toEqual([])
+    // 必须限定在 `.sidebar-list` 容器内查——HomePage.tsx 的空态复用了完全相同的
+    // 中文文案（同一惯例），不限定容器会连带匹配到 HomePage 里那一份，产生「找到
+    // 多个元素」的误报，而不是这条用例真正想测的东西。
+    const sidebarList = document.querySelector('.sidebar-list') as HTMLElement
+    expect(within(sidebarList).queryByText('尚未发现 Claude Code 会话（~/.claude/projects 为空）')).toBeNull()
+    expect(within(sidebarList).queryByText('已从列表移除全部会话（不是没有会话——可以用 ⌘D 找到它们）')).toBeNull()
+
+    // 收尾：把挂起的 promise resolve 掉，不让它悬着影响之后的用例。
+    await act(async () => { resolveList?.([]) })
   })
 })

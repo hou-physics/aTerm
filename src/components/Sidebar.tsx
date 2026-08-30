@@ -34,7 +34,7 @@ type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number
 // rootKey 拼法），因此这里不做 focusThread 去重：⌘D 选择器本来就不做去重，
 // "exactly as if it had been chosen through the ⌘D picker" 意味着这里也不做。
 export function Sidebar() {
-  const { projects } = useSessions()
+  const { projects, loading } = useSessions()
   const { aliases, removedSessions } = useLibrary()
   // 不再 .slice(0, 12)：`.sidebar-list` 本就 flex:1 填满剩余高度并滚动（App.css），
   // 截断只是把下方空间白白空着。移除的会话在这里滤掉（isSessionRemoved），键与
@@ -301,9 +301,15 @@ export function Sidebar() {
         ))}
         {groups.length === 0 && (
           <div className="sidebar-empty">
-            {hasAnySession
-              ? '已从列表移除全部会话（不是没有会话——可以用 ⌘D 找到它们）'
-              : '尚未发现 Claude Code 会话（~/.claude/projects 为空）'}
+            {loading
+              // refresh() 还没结束：projects 仍是初始的 []，这时候两句空态文案
+              // 哪句都不成立——不是"本来没有会话"，也不是"移除到空"，是第三种
+              // 状态，不能借用前两句里的任何一句糊弄过去（见上方 hasAnySession
+              // 注释）。中性的加载提示复用同一个 .sidebar-empty 样式即可。
+              ? '正在扫描 Claude Code 会话…'
+              : hasAnySession
+                ? '已从列表移除全部会话（不是没有会话——可以用 ⌘D 找到它们）'
+                : '尚未发现 Claude Code 会话（~/.claude/projects 为空）'}
           </div>
         )}
       </div>
