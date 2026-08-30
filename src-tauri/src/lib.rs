@@ -1,5 +1,6 @@
 mod pty;
 mod pty_core;
+mod reveal;
 mod sessions;
 mod status;
 
@@ -138,6 +139,7 @@ pub fn run() {
             status::installer::hooks_status,
             status::installer::install_hooks,
             status::installer::uninstall_hooks,
+            reveal::reveal_in_finder,
             confirm_exit
         ])
         .setup(|app| {
