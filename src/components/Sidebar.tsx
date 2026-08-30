@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { resumeThread } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
 import { DRAG_THRESHOLD_PX, dropInsertionIndex, resolveDropMode, resolveDropTarget } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects } from '../paneDropDom'
 import { previewPaneDrop } from '../paneLayout'
+import { displayTitle, groupRecentByDate, isSessionRemoved } from '../sessionList'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
+import { useLibrary } from '../store/library'
+import { blockKey } from '../store/overview'
 import { useSessions } from '../store/sessions'
 import { useThreadStatus } from '../store/status'
 import { useTabs } from '../store/tabs'
@@ -31,10 +34,18 @@ type DragState = { p: ProjectInfo; t: ThreadInfo; startX: number; startY: number
 // "exactly as if it had been chosen through the ⌘D picker" 意味着这里也不做。
 export function Sidebar() {
   const { projects } = useSessions()
+  const { aliases, removedSessions } = useLibrary()
+  // 不再 .slice(0, 12)：`.sidebar-list` 本就 flex:1 填满剩余高度并滚动（App.css），
+  // 截断只是把下方空间白白空着。移除的会话在这里滤掉（isSessionRemoved），键与
+  // 别名共用同一套 blockKey，见 store/library.ts 顶部注释。
   const recent = projects
-    .flatMap((p) => p.threads.map((t) => ({ p, t })))
-    .sort((a, b) => b.t.lastActivityMs - a.t.lastActivityMs)
-    .slice(0, 12)
+    .flatMap((p) => p.threads.map((t) => ({ p, t, lastActivityMs: t.lastActivityMs })))
+    .filter(({ p, t }) => !isSessionRemoved(removedSessions[blockKey(p.dirName, t.rootKey)], t.lastActivityMs))
+    .sort((a, b) => b.lastActivityMs - a.lastActivityMs)
+  const groups = groupRecentByDate(recent, Date.now())
+
+  // 单击只选中、双击才打开（防误触，见用户原话）。存 blockKey，与别名/移除名单同一套键。
+  const [selected, setSelected] = useState<string | null>(null)
 
   const dragRef = useRef<DragState | null>(null)
   // 拖拽落地后浏览器仍会补发一次 click；真的发生过一次拖拽时这次 click 不该再触发
@@ -48,8 +59,9 @@ export function Sidebar() {
   const nextDragIdRef = useRef(0)
 
   // 拖拽清理的唯一入口，与 TabBar.tsx 的 endDrag 同一理由——这里格外关键：「最近会话」
-  // 列表在 window focus 时 refresh()，可能把正被拖拽的那一条会话挤出前 12 条，使其
-  // DOM 节点在拖拽中途消失，浏览器不会补发 pointerup，只会发 lostpointercapture（见
+  // 列表在 window focus 时 refresh()，可能把正被拖拽的那一条会话从列表里挤出去（例如
+  // 期间被标记为已移除，见 isSessionRemoved），使其 DOM 节点在拖拽中途消失，浏览器
+  // 不会补发 pointerup，只会发 lostpointercapture（见
   // 下方 onItemLostPointerCapture）——这正是这个组件比另外两处更需要 dragSafetyNet.ts
   // 那层窗口级兜底的地方：Sidebar 组件本身没有卸载（只是列表项消失），
   // lostpointercapture 若因元素已从 DOM 摘除而没能冒泡到 React 委托根节点，组件卸载
@@ -205,13 +217,25 @@ export function Sidebar() {
   }, [endDrag])
 
   // 指针捕获被浏览器隐式释放时补发的退出路径——见上方 endDrag 注释描述的真实触发
-  // 场景（拖拽中的会话项被 refresh() 挤出前 12 条列表）。这里只做清理，不尝试识别
-  // 落点或完成任何动作，与"松手落空"是同一处理。
+  // 场景（拖拽中的会话项被 refresh() 挤出「最近会话」列表）。这里只做清理，不尝试
+  // 识别落点或完成任何动作，与"松手落空"是同一处理。
   const onItemLostPointerCapture = useCallback(() => {
     endDrag()
   }, [endDrag])
 
+  // 单击：只选中，不打开——防误触。仍然尊重 suppressClickRef：拖拽落地后浏览器补发
+  // 的那次 click 既不该打开，也不该改变选中态。
   const onItemClick = useCallback((p: ProjectInfo, t: ThreadInfo) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    setSelected(blockKey(p.dirName, t.rootKey))
+  }, [])
+
+  // 双击：真正打开。同样尊重 suppressClickRef——理由与 onItemClick 一致，拖拽结束后
+  // 不该被误判为一次会打开会话的点击。
+  const onItemDoubleClick = useCallback((p: ProjectInfo, t: ThreadInfo) => {
     if (suppressClickRef.current) {
       suppressClickRef.current = false
       return
@@ -222,18 +246,25 @@ export function Sidebar() {
   return (
     <>
       <div className="sidebar-list">
-        <div className="section-label">最近会话</div>
-        {recent.map(({ p, t }) => (
-          <SidebarItem
-            key={`${p.dirName}:${t.rootKey}`}
-            p={p}
-            t={t}
-            onPointerDown={onItemPointerDown}
-            onPointerMove={onItemPointerMove}
-            onPointerUp={onItemPointerUp}
-            onLostPointerCapture={onItemLostPointerCapture}
-            onClick={onItemClick}
-          />
+        {groups.map((g) => (
+          <Fragment key={g.label}>
+            <div className="section-label">{g.label}</div>
+            {g.items.map(({ p, t }) => (
+              <SidebarItem
+                key={`${p.dirName}:${t.rootKey}`}
+                p={p}
+                t={t}
+                title={displayTitle(t, p.dirName, aliases)}
+                selected={selected === blockKey(p.dirName, t.rootKey)}
+                onPointerDown={onItemPointerDown}
+                onPointerMove={onItemPointerMove}
+                onPointerUp={onItemPointerUp}
+                onLostPointerCapture={onItemLostPointerCapture}
+                onClick={onItemClick}
+                onDoubleClick={onItemDoubleClick}
+              />
+            ))}
+          </Fragment>
         ))}
       </div>
       <HooksControl />
@@ -246,30 +277,34 @@ export function Sidebar() {
 // （Rules of Hooks：不能在 Sidebar 自己的 .map() 循环体内调用 hook，见 HomePage.tsx
 // 里 ProjectCard/ThreadRow 同样的拆分理由）。拖拽/指针相关的所有状态与清理逻辑仍然
 // 全部留在 Sidebar 里，这里只透传回调，不复制任何一处判断。
-function SidebarItem({ p, t, onPointerDown, onPointerMove, onPointerUp, onLostPointerCapture, onClick }: {
+function SidebarItem({ p, t, title, selected, onPointerDown, onPointerMove, onPointerUp, onLostPointerCapture, onClick, onDoubleClick }: {
   p: ProjectInfo
   t: ThreadInfo
+  title: string
+  selected: boolean
   onPointerDown: (e: ReactPointerEvent<HTMLDivElement>, p: ProjectInfo, t: ThreadInfo) => void
   onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => void
   onPointerUp: (e: ReactPointerEvent<HTMLDivElement>) => void
   onLostPointerCapture: () => void
   onClick: (p: ProjectInfo, t: ThreadInfo) => void
+  onDoubleClick: (p: ProjectInfo, t: ThreadInfo) => void
 }) {
   const status = useThreadStatus(p.dirName, t.rootKey)
   return (
     <div
-      className="side-item"
-      title={t.title}
+      className={selected ? 'side-item side-item-selected' : 'side-item'}
+      title={title}
       onPointerDown={(e) => onPointerDown(e, p, t)}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onLostPointerCapture={onLostPointerCapture}
       onClick={() => onClick(p, t)}
+      onDoubleClick={() => onDoubleClick(p, t)}
     >
       <span className="side-item-row">
         <StatusDot status={status} />
-        <span className="side-item-title">{t.title}</span>
+        <span className="side-item-title">{title}</span>
       </span>
       <div className="sub">{basename(p.cwd)} · {formatRelative(t.lastActivityMs)}</div>
     </div>

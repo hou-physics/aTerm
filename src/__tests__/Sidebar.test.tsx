@@ -101,8 +101,13 @@ async function drag(el: HTMLElement, from: { x: number; y: number }, to: { x: nu
   })
 }
 
-describe('Sidebar — 小幅移动的点击仍然正常触发 resumeThread（不误判为拖拽）', () => {
-  it('pointerdown/move(<4px)/up 之后的原生 click 照常打开该会话', async () => {
+// Task 6 起单击只选中、双击才打开（防误触）——这条用例原先断言"小幅移动后的单击
+// 仍照常打开会话"，现在单击本就不打开任何会话，那份断言不再成立。改成断言双击：
+// 低于阈值的这点抖动同样不该被误判为拖拽（suppressClickRef 不会被设成 true），
+// 双击因此仍能正常命中 resumeThread——这正是本用例标题想守住的那件事，只是承载它
+// 的手势从单击换成了双击。
+describe('Sidebar — 小幅移动的双击仍然正常触发 resumeThread（不误判为拖拽）', () => {
+  it('pointerdown/move(<4px)/up 之后的原生 dblclick 照常打开该会话', async () => {
     await renderApp() // activeId 默认 home
     const item = screen.getByText('修复登录').closest('.side-item') as HTMLElement
 
@@ -110,7 +115,7 @@ describe('Sidebar — 小幅移动的点击仍然正常触发 resumeThread（不
       fireEvent.pointerDown(item, { clientX: 10, clientY: 10, pointerId: 1 })
       fireEvent.pointerMove(item, { clientX: 11, clientY: 10, pointerId: 1 }) // 1px，低于阈值
       fireEvent.pointerUp(item, { clientX: 11, clientY: 10, pointerId: 1 })
-      fireEvent.click(item)
+      fireEvent.doubleClick(item)
     })
 
     // resumeThread 命中不了任何已开的窗格，走 openTerminal：新开一个标签
@@ -366,15 +371,19 @@ describe('Sidebar — 拖拽期间屏蔽文本选择并显示跟随光标的拖�
 
     expect(document.body.classList.contains('dragging-no-select')).toBe(false)
     expect(document.querySelector('.drag-ghost')).toBeNull()
-    expect(useTabs.getState().tabs).toHaveLength(2) // 普通点击行为不变，仍正常打开会话
+    // Task 6 起单击只选中、不打开：这点低于阈值的抖动没有被误判为拖拽，click 没被
+    // suppressClickRef 吞掉——仍正常落地为一次选中（不再是"仍正常打开会话"）。
+    expect(useTabs.getState().tabs).toHaveLength(1)
+    expect(item.classList.contains('side-item-selected')).toBe(true)
   })
 })
 
 // 指针捕获丢失时的清理（review 发现：三个拖拽源此前只在 pointerup/pointercancel 上
 // 清理，元素若在拖拽中途被移出 DOM，浏览器会静默释放指针捕获、只发 lostpointercapture
 // 而不补发 pointerup）。这里格外贴合真实场景——「最近会话」列表在 window focus 时
-// refresh()，可能把正被拖拽的那一条会话挤出前 12 条，使其 DOM 节点消失；侧边栏本身
-// 也会在 ⌘B 折叠时整个卸载（见 App.tsx 的 `{!sidebarCollapsed && <Sidebar/>}`），
+// refresh()，可能把正被拖拽的那一条会话从列表里挤出去（例如期间被标记为已移除），
+// 使其 DOM 节点消失；侧边栏本身也会在 ⌘B 折叠时整个卸载（见 App.tsx 的
+// `{!sidebarCollapsed && <Sidebar/>}`），
 // 后一种场景直接用于验证下面"组件卸载"那个用例。
 describe('Sidebar — 指针捕获丢失或组件卸载时同样清理拖拽状态（不会永久卡住 body class）', () => {
   const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')

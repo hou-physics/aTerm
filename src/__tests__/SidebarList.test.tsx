@@ -1,0 +1,124 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+
+vi.mock('../ipc', () => ({
+  ptySpawn: vi.fn(async () => 'pty-1'),
+  ptyIsAlive: vi.fn(async () => false),
+  ptyKill: vi.fn(async () => {}),
+  listProjects: vi.fn(async () => []),
+  revealInFinder: vi.fn(async () => {}),
+}))
+vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
+vi.mock('../store/status', () => ({
+  statusEventsReady: Promise.resolve(),
+  useThreadStatus: () => undefined,
+  useProjectStatus: () => 'unknown' as const,
+  useStatusStore: (selector: (s: { statuses: Map<string, unknown> }) => unknown) => selector({ statuses: new Map() }),
+  threadStatusKey: (dirName: string, rootKey: string) => `${dirName}::${rootKey}`,
+}))
+// 这个 mock 的形状必须与 App.test.tsx 里那份逐字一致——Sidebar 会渲染 <HooksControl/>，
+// 它同时 import 了 hooksPhase 与 useHooksInstall，而 store 模块在加载时还会发起一次
+// hooksStatus() 的 IPC（`hooksInstallReady`）。三个导出缺任何一个都会在 import 期就抛错，
+// 表现为"整个测试文件跑不起来"，而不是某条断言失败。
+vi.mock('../store/hooksInstall', () => ({
+  hooksInstallReady: Promise.resolve(),
+  hooksPhase: () => null,
+  useHooksInstall: Object.assign(() => null, {
+    getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }),
+  }),
+}))
+
+import * as ipc from '../ipc'
+import { Sidebar } from '../components/Sidebar'
+import { useSessions } from '../store/sessions'
+import { useTabs } from '../store/tabs'
+import { makeThread } from './factories'
+
+const dayMs = 24 * 60 * 60 * 1000
+
+function seed(n: number) {
+  useSessions.setState({
+    projects: [{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: Array.from({ length: n }, (_, i) =>
+        makeThread({ rootKey: `r${i}`, title: `会话${i}`, lastActivityMs: Date.now() - i * 1000 })),
+    }],
+    loading: false,
+  })
+}
+
+beforeEach(() => {
+  useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }], activeId: 'home' })
+  vi.clearAllMocks()
+})
+
+describe('侧栏最近会话', () => {
+  it('超过 12 条也全部渲染——列表本就填满高度并滚动，不该再截断', () => {
+    seed(20)
+    render(<Sidebar />)
+    expect(screen.queryByText('会话19')).toBeTruthy()
+  })
+
+  it('按今天/昨天/更早分组，且不产出空组', () => {
+    const now = Date.now()
+    useSessions.setState({
+      projects: [{
+        dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: now,
+        threads: [
+          makeThread({ rootKey: 'r1', title: '今天的', lastActivityMs: now }),
+          makeThread({ rootKey: 'r2', title: '很早的', lastActivityMs: now - 10 * dayMs }),
+        ],
+      }],
+      loading: false,
+    })
+    render(<Sidebar />)
+    expect(screen.queryByText('今天')).toBeTruthy()
+    expect(screen.queryByText('更早')).toBeTruthy()
+    expect(screen.queryByText('昨天')).toBeNull()   // 没有昨天的会话就不该有这个标题
+  })
+
+  it('单击只选中不打开——这正是防误触的要点', () => {
+    seed(3)
+    render(<Sidebar />)
+    fireEvent.click(screen.getByText('会话0'))
+    expect(ipc.ptySpawn).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.filter((t) => t.kind === 'term').length).toBe(0)
+  })
+
+  it('单击后该行带上选中态 class', () => {
+    seed(3)
+    render(<Sidebar />)
+    const row = screen.getByText('会话0').closest('.side-item')!
+    expect(row.classList.contains('side-item-selected')).toBe(false)
+    fireEvent.click(screen.getByText('会话0'))
+    expect(row.classList.contains('side-item-selected')).toBe(true)
+  })
+
+  it('双击才打开', async () => {
+    seed(3)
+    render(<Sidebar />)
+    // resumeThread → useTabs.openTerminal 在调用 ptySpawn 之前先 `await ptyEventsReady`
+    // （即便是已 resolve 的 promise，也要让出一次微任务），因此这里需要 act(async) 让
+    // 出一次微任务队列，断言才能看到 ptySpawn 已被调用——与 OverviewPage.test.tsx 里
+    // 「双击到底有没有打开会话」那条用例遇到的是同一类异步边界，只是那边选择整个
+    // mock 掉 ../actions 绕开这条链路，这里维持 brief 给的、直接断言 ipc.ptySpawn 的
+    // 写法，只补上必需的一次微任务让出。
+    await act(async () => {
+      fireEvent.doubleClick(screen.getByText('会话0'))
+    })
+    expect(ipc.ptySpawn).toHaveBeenCalled()
+  })
+
+  it('未命名会话显示「新对话」而不是 uuid 前 8 位', () => {
+    useSessions.setState({
+      projects: [{
+        dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+        threads: [makeThread({ rootKey: 'r1', title: 'ebd067d4', titled: false, lastActivityMs: Date.now() })],
+      }],
+      loading: false,
+    })
+    render(<Sidebar />)
+    expect(screen.queryByText('新对话')).toBeTruthy()
+    expect(screen.queryByText('ebd067d4')).toBeNull()
+  })
+})

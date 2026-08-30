@@ -261,6 +261,9 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    拖入窗格区）。 */
 .side-item { padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; cursor: grab; user-select: none; }
 .side-item:hover { background: var(--color-elevated); }
+/* 单击选中态（Sidebar.tsx：单击只选中，双击才打开，防误触）。与 :hover 用同一个
+   变量——两者不会同时触发视觉冲突的诉求，选中态在此已经足够醒目。 */
+.side-item-selected { background: var(--color-elevated); }
 .side-item .sub { color: var(--color-text-faint); font-size: 11px; }
 /* 状态点 + 标题同一行；截断放在 .side-item-title 而不是外层 .side-item 本身
    （StatusDot.tsx 引入后标题不再是 .side-item 的直接文本子节点，见该组件顶部注释）。 */
