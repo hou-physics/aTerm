@@ -508,8 +508,8 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .conv-header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
 .conv-title { font-size: 13px; font-weight: 600; }
 .conv-header-actions { flex: none; display: flex; align-items: center; gap: 6px; }
-.conv-refresh, .conv-timeline-toggle { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
-.conv-refresh:hover, .conv-timeline-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
+.conv-refresh, .conv-timeline-toggle, .conv-collapse-toggle { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.conv-refresh:hover, .conv-timeline-toggle:hover, .conv-collapse-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 /* 时间线区（日期分组列表）与正文区共同的父容器，撑满头部之下的剩余高度；引入这层
    包裹只是为了给拖拽分隔条提供一个可测量的"内容区高度"（见 ConversationPanel.tsx 的
    timelineHeightCap /contentRef），本身不承担视觉样式。 */

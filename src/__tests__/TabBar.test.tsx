@@ -1458,3 +1458,26 @@ describe('TabBar — 「＋」新建标签按钮固定在标签栏最左侧（�
     expect((document.querySelector('.tab-new') as HTMLElement).title).toBe('新建标签')
   })
 })
+
+// 用户诉求："展开按钮放在右上方（标签栏），折叠的按钮放在展开之后的对话历史那个上方
+// 栏里"——收起某个东西的控件应该长在那个东西身上。.panel-toggle 只在面板已收起
+// 时才需要存在（负责展开）；面板一旦展开，折叠交给 ConversationPanel.tsx 顶栏自己
+// 的按钮（见 ConversationPanel.test.tsx 里对应的用例），.panel-toggle 必须从 DOM 里
+// 消失，不能与面板自己的折叠按钮同时存在两份收起入口。
+describe('TabBar — 面板展开时隐藏 .panel-toggle（收起交给面板顶栏自己的按钮）', () => {
+  it('面板收起时 .panel-toggle 在 DOM 里且用于展开；面板展开后它必须从 DOM 里消失', async () => {
+    useTabs.setState({ tabs: [HOME], activeId: 'home' })
+    useLayout.setState({ panelCollapsed: true })
+    await renderApp()
+
+    const toggle = document.querySelector('.panel-toggle') as HTMLElement
+    expect(toggle).toBeTruthy()
+    expect(toggle.title).toBe('显示对话面板 (⌘J)')
+
+    act(() => { useLayout.setState({ panelCollapsed: false }) })
+    expect(document.querySelector('.panel-toggle')).toBeNull()
+
+    act(() => { useLayout.setState({ panelCollapsed: true }) })
+    expect(document.querySelector('.panel-toggle')).toBeTruthy()
+  })
+})
