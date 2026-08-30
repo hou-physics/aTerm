@@ -36,8 +36,8 @@ vi.mock('../closeRequest', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 // App.tsx 挂载时会动态 import('@tauri-apps/api/webview') 接线文件拖放；理由与
 // App.test.tsx 完全一致（见该文件注释）——不替身会让每条用例都触发一次真实的、时机
-// 不定的 IPC 调用噪音，且本文件的用例本来就靠 renderApp() 里精确的一次微任务 flush
-// 来对齐时机，多出来的悬空动态 import 续体正是本文件那条低频 flaky 用例的头号嫌疑。
+// 不定的 IPC 调用噪音。曾怀疑此 import 是本文件那条低频 flaky 的根因，但与 main（无
+// 拖放功能）的对照测试排除了这一点（两边各 12 次失败 1 次）；该 flaky 属既有缺陷。
 vi.mock('@tauri-apps/api/webview', () => ({
   getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
 }))
