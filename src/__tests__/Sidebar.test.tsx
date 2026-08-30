@@ -134,8 +134,8 @@ describe('Sidebar — 小幅移动的双击仍然正常触发 resumeThread（不
 
 // 终审必修 1：本分支给 resumeThread 补了 sessionId 之后，reconcilePanes 才开始处理
 // 双击打开出来的窗格——titled 为 false 时若仍直传 t.title，标签标题会永久停在
-// session_id 前 8 位上（见 actions.ts 的 resumeThread 头顶注释），因为
-// reconcilePanes 的 `id.title ?? pane.title` 找不到任何东西可以替它纠正回来。
+// session_id 前 8 位上（见 actions.ts 的 resumeThread 头顶注释）：对账要等到下一次
+// 刷新或改名才会追上，指望不上它兜底纠正窗格创建这一刻的标题。
 describe('Sidebar — 终审必修 1：双击打开 titled 为 false 的会话', () => {
   it('新开标签的标题是「新对话」，不是那串十六进制', async () => {
     // 与顶部注释同一理由：数据必须在 App 挂载触发的那次 refresh() 之前就位——

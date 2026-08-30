@@ -109,9 +109,8 @@ describe('resumeThread 也带上 sessionId', () => {
 // 终审必修 1：resumeThread 是四个「打开会话」入口共用的唯一写入点（侧栏双击、主页
 // ThreadRow、搜索结果行、＋ 选择器都经它）。titled 为 false 时 t.title 是
 // session_id 前 8 位（scan.rs 的回退值）——此前这里直接透传 t.title，标签标题会
-// 永久停在一串十六进制上：reconcilePanes（store/tabs.ts）用 `id.title ?? pane.title`
-// 采纳新标题，resolvePaneIdentity 在 titled 为 false 时给的 id.title 就是
-// undefined，窗格的初始标题因此被原样保留、永不自愈。这里必须在写入的一刻就截断。
+// 永久停在一串十六进制上：对账（reconcilePanes，store/tabs.ts）要等到下一次刷新或
+// 改名才会追上，指望不上它兜底修正窗格创建这一刻的标题。这里必须在写入的一刻就截断。
 describe('resumeThread 的标题回退——不把 session_id 前 8 位当标题传给 openTerminal', () => {
   it('titled 为 false 时，openTerminal 收到的 title 是「新对话」，不是那串十六进制', async () => {
     const spy = vi.spyOn(useTabs.getState(), 'openTerminal').mockResolvedValue(undefined)
