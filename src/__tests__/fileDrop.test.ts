@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDroppedPaths, paneAtPoint, shellQuote, toLogicalPoint } from '../fileDrop'
+import { formatDroppedPaths, paneAtPoint, resolveDropWrite, shellQuote, toLogicalPoint, writableDropPaneId } from '../fileDrop'
 
 describe('shellQuote', () => {
   it('普通路径被单引号包裹', () => {
@@ -59,5 +59,42 @@ describe('paneAtPoint', () => {
   })
   it('没有任何窗格时返回 null', () => {
     expect(paneAtPoint([], 10, 10)).toBeNull()
+  })
+})
+
+describe('writableDropPaneId', () => {
+  const panes = [{ id: 'p1', ptyId: 'pty-1' }, { id: 'p2' }] // p2 还停在 PanePicker，没有 ptyId
+
+  it('候选窗格有 ptyId：原样放行——若这里返回 null，说明把可写窗格误判成了不可写', () => {
+    expect(writableDropPaneId(panes, 'p1')).toBe('p1')
+  })
+  it('候选窗格没有 ptyId（还在 PanePicker）：返回 null——若这里返回 "p2"，说明漏掉了 ptyId 检查，回归本次要修的缺陷', () => {
+    expect(writableDropPaneId(panes, 'p2')).toBeNull()
+  })
+  it('候选 id 是 null（落在窗格区之外）：原样返回 null——若这里抛错，说明没有先做 null 早退', () => {
+    expect(writableDropPaneId(panes, null)).toBeNull()
+  })
+  it('候选 id 在 panes 里查不到：返回 null——若这里返回该 id，说明 find() 没查、或者对 undefined 取 .ptyId 时没做可选链', () => {
+    expect(writableDropPaneId(panes, 'ghost')).toBeNull()
+  })
+})
+
+describe('resolveDropWrite', () => {
+  const panes = [{ id: 'p1', ptyId: 'pty-1' }, { id: 'p2' }]
+
+  it('窗格可写、paths 非空：返回对应 ptyId 与 formatDroppedPaths 格式化后的文本', () => {
+    expect(resolveDropWrite(panes, 'p1', ['/a', '/b'])).toEqual({ ptyId: 'pty-1', text: "'/a' '/b' " })
+  })
+  it('窗格没有 ptyId：返回 null，即便 paths 非空——若这里写入了，就是本次要修的"高亮但静默丢弃"缺陷复发', () => {
+    expect(resolveDropWrite(panes, 'p2', ['/a'])).toBeNull()
+  })
+  it('paneId 在 panes 里查不到：返回 null——若这里抛错或返回非 null，说明没有复用 writableDropPaneId 的查找防护', () => {
+    expect(resolveDropWrite(panes, 'ghost', ['/a'])).toBeNull()
+  })
+  it('paneId 为 null（落在窗格区之外）：返回 null', () => {
+    expect(resolveDropWrite(panes, null, ['/a'])).toBeNull()
+  })
+  it('paths 为空数组：即便窗格可写也返回 null，调用方据此不写入任何内容——若这里返回非 null，说明漏掉了空文本检查', () => {
+    expect(resolveDropWrite(panes, 'p1', [])).toBeNull()
   })
 })

@@ -14,7 +14,7 @@ import { StatusBar } from './components/StatusBar'
 import { TabBar } from './components/TabBar'
 import { TabPanes } from './components/TabPanes'
 import { TerminalLayer } from './components/TerminalLayer'
-import { formatDroppedPaths, paneAtPoint, toLogicalPoint } from './fileDrop'
+import { paneAtPoint, resolveDropWrite, toLogicalPoint, writableDropPaneId } from './fileDrop'
 import { ptyWrite } from './ipc'
 import { getPaneSlotRects } from './paneDropDom'
 import { decidePaneFit, MAX_PANES, neighborPaneId, usablePaneAreaWidth } from './paneLayout'
@@ -203,14 +203,16 @@ export default function App() {
         const { x, y } = toLogicalPoint(payload.position, window.devicePixelRatio)
         const { tabs, activeId } = useTabs.getState()
         const tab = tabs.find((t) => t.id === activeId)
-        const paneId = paneAtPoint(getPaneSlotRects(tab), x, y)
+        const panes = tab?.panes ?? []
+        // writableDropPaneId 把还没选定会话（无 ptyId、仍显示 PanePicker）的窗格从
+        // 候选里剔除——悬停高亮与真正写入用的是同一条规则，不会出现"高亮了但放下去
+        // 没反应"的分歧（此前的缺陷：paneAtPoint 单凭几何命中，不知道 ptyId）。
+        const paneId = writableDropPaneId(panes, paneAtPoint(getPaneSlotRects(tab), x, y))
         if (payload.type !== 'drop') { setDropPaneId(paneId); return }
         setDropPaneId(null)
-        if (!paneId) return // 落在窗格区之外（主页/总览/标签栏/状态栏）：整个忽略
-        const ptyId = tab?.panes.find((p) => p.id === paneId)?.ptyId
-        const text = formatDroppedPaths(payload.paths)
-        if (!ptyId || text === '') return
-        void ptyWrite(ptyId, text)
+        const write = resolveDropWrite(panes, paneId, payload.paths)
+        if (!write) return // 落在窗格区之外、窗格不可写、或 paths 为空：整个忽略
+        void ptyWrite(write.ptyId, write.text)
       })
       if (disposed) un() // 卸载竞态：await 期间组件已卸载时立即注销
       else unlisten = un
