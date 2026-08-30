@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 vi.mock('../ipc', () => ({
   ptySpawn: vi.fn(async () => 'pty-1'),
@@ -29,13 +29,22 @@ beforeEach(() => {
 })
 
 describe('标签栏的 ＋', () => {
-  it('点一下弹出选择器，而不是直接开一个空终端', () => {
+  it('点一下弹出选择器，而不是直接开一个空终端', async () => {
     render(<TabBar />)
     fireEvent.click(screen.getByTitle(/新建/))
     // 选择器出现（「新终端（zsh）」是它固定的第一项）
     expect(screen.queryByText('新终端（zsh）')).toBeTruthy()
-    // 关键：这一下不该已经起了 PTY
+    // 冲一遍微任务队列再断言：openTerminal（store/tabs.ts）第一行是
+    // `await ptyEventsReady`，不 await 推进一次的话，即使点击处理器背地里偷偷多调用
+    // 了一次 newTerminal()，ptySpawn 也不可能在这次同步执行栈内被调用到——不冲队列，
+    // 下面这条断言对任何实现都恒为真，测不出它本该防住的"浮层弹出的同时后台偷偷建了
+    // 个标签"这种回归（本轮评审发现，见 task-5-report.md 的追加记录）。
+    await act(async () => { await Promise.resolve() })
+    // 关键：这一下不该已经起了 PTY；同时断言可观测结果而非仅仅"没调用某个函数"——
+    // 即便换一条不经过 ptySpawn 的"背地里建标签"路径，也应该被这两行拦住。
     expect(ipc.ptySpawn).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.filter((t) => t.kind === 'term').length).toBe(0)
+    expect(useTabs.getState().activeId).toBe('home')
   })
 
   it('在选择器里选一条会话 → 新建一个标签（而不是填充某个窗格）', async () => {
