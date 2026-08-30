@@ -136,6 +136,7 @@ type TabsState = {
   detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
   splitTabPanes(tabId: string): string[] | null
   reorderTab(tabId: string, rawTargetIndex: number): boolean
+  reorderPane(tabId: string, paneId: string, target: DropTarget): boolean
   startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string; sessionId?: string }): Promise<void>
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
@@ -442,6 +443,53 @@ export const useTabs = create<TabsState>((set, get) => ({
     const insertion = reorderInsertIndex(order, tabId, rawTargetIndex)
     if (insertion === srcIdx) return false
     set((s) => ({ tabs: moveArrayItem(s.tabs, srcIdx, insertion) }))
+    return true
+  },
+  // 同标签内拖动窗格标题栏：用户描述的"交换位置"诉求（拖一个框到右边，两个位置就都
+  // 自动交换）落地成"按落点重排"，不是严格的两两对调——两个窗格时两者完全等价，正是
+  // 用户描述的效果；三个及以上窗格时按落点插入更符合直觉（把最左边那个拖到最右＝它
+  // 移到最右端、其余顺次前移，而不是跟最右那个对调、中间那个纹丝不动）。target 来自
+  // paneDrop.ts 的 resolveDropTarget（TabPanes.tsx 在光标仍停留于源标签自己的窗格行
+  // 内时就地解出的落点，与 movePanesToTab/fillEmptyPane 是同一手势、不同分支）。
+  //
+  // 落点换算分两步：dropInsertionIndex 先把 {paneId, side} 换成"未移除拖拽源"的原始
+  // 下标（与 movePanesToTab 用的是同一个函数，那边源/目标是两个不同数组，不需要第二
+  // 步）；这里源和目标是同一个数组，还需要 reorderInsertIndex 做"移除拖拽源后，目标
+  // 下标要不要前移一格"的换算——与标签拖拽排序（reorderTab）是同一个问题，直接复用
+  // 那个函数，不再另写一份；minIndex 传 0，因为窗格顺序没有"主页标签恒排第一"那种
+  // 钳制（reorderTab 默认的 minIndex=1 是标签栏专属的业务规则）。
+  //
+  // paneWidths 必须跟着同一次 moveArrayItem 操作一起挪——否则窗格换了位置、宽度却留在
+  // 原下标，视觉上会错位；没有 paneWidths（理论上不会发生：能拖动窗格标题栏说明至少
+  // 有 2 个窗格，此时 paneWidths 恒已由别的路径填好）时原样保留 undefined，不主动补
+  // equalPaneWidths——窗格数量没变，不该触发"重新等分"。activePaneId 保持指向被拖的
+  // 窗格本身：它换了位置，但仍是焦点，不需要像 closePane 那样重新计算。
+  //
+  // 以下情况返回 false 且不产生新的 tabs 引用（与 moveArrayItem/movePanesToTab 拖到
+  // 自己标签时的既有惯例一致，真正的空操作不制造新对象）：标签不存在或非 term；源
+  // 窗格不属于该标签；换算出的目标下标与源下标相同——涵盖"拖到自己身上"（不论落在
+  // 自己的左半还是右半，dropInsertionIndex→reorderInsertIndex 两步换算后都会退回原
+  // 下标）与"落回原位"两种情况。
+  reorderPane: (tabId, paneId, target) => {
+    const tab = get().tabs.find((t) => t.id === tabId)
+    if (!tab || tab.kind !== 'term') return false
+    const paneIds = tab.panes.map((p) => p.id)
+    const srcIdx = paneIds.indexOf(paneId)
+    if (srcIdx === -1) return false
+    const rawIndex = dropInsertionIndex(paneIds, target)
+    const insertion = reorderInsertIndex(paneIds, paneId, rawIndex, 0)
+    if (insertion === srcIdx) return false
+    set((s) => ({
+      tabs: s.tabs.map((t) => {
+        if (t.id !== tabId) return t
+        return {
+          ...t,
+          panes: moveArrayItem(t.panes, srcIdx, insertion),
+          paneWidths: t.paneWidths ? moveArrayItem(t.paneWidths, srcIdx, insertion) : t.paneWidths,
+          activePaneId: paneId,
+        }
+      }),
+    }))
     return true
   },
   // 窗格选择器（设计文档 §5-A）选定后调用：给此前没有 ptyId 的窗格补上真正的终端。

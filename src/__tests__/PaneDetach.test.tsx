@@ -157,6 +157,127 @@ describe('TabPanes — 拖出窗格标题栏成为独立标签（设计文档 §
   })
 })
 
+// 用户描述的"交换位置"诉求（"我拖一个框到右边，然后它两个位置就都自动交换"）：同
+// 标签内拖动窗格标题栏，松手时光标仍落在源标签自己的窗格行内——上面那个 describe 块
+// 里"没有真的拖出去，不产生任何变化"这条用例此前验证的正是这条分支，但那条用例没有
+// mock 真实的窗格矩形（只 mock 了 row/tabbar），resolveDropTarget 因此恒解不出落点，
+// 落回"什么都不做"，与这里的新行为并不冲突。这里补上真实的窗格矩形，验证这条分支
+// 现在真的会调用 reorderPane；reorderPane 本身的换算逻辑（对调/顺次重排/no-op）已经
+// 在 tabs.test.ts 单独测过，这里只测接线——正确的分支被触发、参数正确。
+describe('TabPanes — 同标签内拖动窗格标题栏：按落点重排（用户描述的"交换位置"诉求）', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+  const PANE_RECTS = {
+    'row:tab-a': { left: 0, top: 40, width: 600, height: 300 },
+    tabbar: { left: 0, top: 0, width: 800, height: 30 },
+    p1: { left: 0, top: 40, width: 300, height: 300 },
+    p2: { left: 300, top: 40, width: 300, height: 300 },
+  }
+
+  it('松手时光标落在源标签自己窗格行内的另一个窗格上：调用 reorderPane 重排，而不是拆成独立标签', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockRects(PANE_RECTS)
+
+    // 把 P1 拖到 P2 矩形 [300,600) 的右半侧（中点 450）
+    await drag(titlebarFor('P1'), { x: 100, y: 60 }, { x: 500, y: 60 })
+
+    expect(useTabs.getState().tabs).toHaveLength(2) // 没有拆出新标签（home + tab-a）
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes.map((p) => p.id)).toEqual(['p2', 'p1']) // 对调
+    expect(t.activePaneId).toBe('p1') // 被拖的窗格换了位置，但仍是焦点
+  })
+
+  it('落在 P2 左半侧（P1 本就在 P2 左边）：换算后落回原位，no-op，顺序不变', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockRects(PANE_RECTS)
+
+    // P2 矩形 [300,600) 的左半侧（中点 450），落在 400
+    await drag(titlebarFor('P1'), { x: 100, y: 60 }, { x: 400, y: 60 })
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes.map((p) => p.id)).toEqual(['p1', 'p2']) // 未变
+  })
+
+  it('回归保护：拖出窗格行外（即便此刻已经有真实的窗格矩形可解析）仍然走既有的拆分逻辑，不是重排', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockRects(PANE_RECTS)
+
+    await drag(titlebarFor('P1'), { x: 100, y: 60 }, { x: 9000, y: 9000 }) // 远在窗格行与标签栏之外
+
+    const { tabs, activeId } = useTabs.getState()
+    expect(tabs.map((t) => t.id)).toEqual(['home', 'tab-a', tabs[2].id]) // 拆出、追加在末尾
+    expect(tabs[2].panes.map((p) => p.id)).toEqual(['p1'])
+    expect(activeId).toBe(tabs[2].id)
+    expect(tabs.find((t) => t.id === 'tab-a')!.panes.map((p) => p.id)).toEqual(['p2'])
+  })
+})
+
+// 拖放落点指示（设计文档 §5-B）延伸到同标签内窗格重排：拖动过程中已有的机制
+// （useDnd 的 target/dropMode，DropIndicator.tsx 消费）此前只在跨标签拖放时用，
+// 这里验证 TabPanes.tsx 的 onPointerMove 把它接到了同标签重排上——不接上，用户在盲拖
+// 时完全看不出会插到哪里。
+describe('TabPanes — 拖动窗格标题栏期间显示落点指示（同标签内重排）', () => {
+  const TAB = {
+    id: 'tab-a', kind: 'term' as const, title: '2 个对话',
+    panes: [{ id: 'p1', ptyId: 'pty-1', title: 'P1' }, { id: 'p2', ptyId: 'pty-2', title: 'P2' }],
+    activePaneId: 'p1',
+  }
+  const PANE_RECTS = {
+    'row:tab-a': { left: 0, top: 40, width: 600, height: 300 },
+    tabbar: { left: 0, top: 0, width: 800, height: 30 },
+    p1: { left: 0, top: 40, width: 300, height: 300 },
+    p2: { left: 300, top: 40, width: 300, height: 300 },
+  }
+
+  it('悬停源标签自己窗格行内的另一个窗格：显示落点指示（半侧覆盖），松手后消失', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockRects(PANE_RECTS)
+    const titlebar = titlebarFor('P1')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 100, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 500, clientY: 60, pointerId: 1 }) // 落在 p2 右半侧
+    })
+
+    const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
+    expect(indicator).toBeTruthy()
+    expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(false)
+    expect(indicator.style.left).toBe('450px') // p2 [300,600) 右半侧起点
+    expect(indicator.style.width).toBe('150px') // 半侧宽度
+
+    await act(async () => {
+      fireEvent.pointerUp(titlebar, { clientX: 500, clientY: 60, pointerId: 1 })
+    })
+
+    expect(document.querySelector('.pane-drop-indicator')).toBeNull() // 松手后清空
+  })
+
+  it('拖出窗格行外：指示条消失（落点语义变成"拖出成独立标签"，不是重排）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockRects(PANE_RECTS)
+    const titlebar = titlebarFor('P1')
+
+    await act(async () => {
+      fireEvent.pointerDown(titlebar, { clientX: 100, clientY: 60, pointerId: 1 })
+      fireEvent.pointerMove(titlebar, { clientX: 9000, clientY: 9000, pointerId: 1 }) // 远在行外
+    })
+
+    expect(document.querySelector('.pane-drop-indicator')).toBeNull()
+
+    await act(async () => {
+      fireEvent.pointerUp(titlebar, { clientX: 9000, clientY: 9000, pointerId: 1 })
+    })
+  })
+})
+
 // 与 TabBar.test.tsx/Sidebar.test.tsx 同一组回归断言（见 TabBar.test.tsx"只在真正开始
 // 拖拽后才 preventDefault"一节注释）：这里格外关键——右键菜单（PaneContextMenu）就
 // 渲染在这个标题栏的 DOM 子树里，点击菜单项时 pointerdown 会先冒泡到这里，上一轮在

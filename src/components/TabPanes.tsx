@@ -9,8 +9,8 @@ import {
   type RefObject,
 } from 'react'
 import { attachDragSafetyNet } from '../dragSafetyNet'
-import { DRAG_THRESHOLD_PX, pointInRect, resolveTabBarInsertIndex } from '../paneDrop'
-import { getPaneRowRect, getTabBarRect, getTabRects } from '../paneDropDom'
+import { DRAG_THRESHOLD_PX, pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
+import { getPaneRowRect, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
 import { clampDividerDrag, equalPaneWidths, usablePaneAreaWidth } from '../paneLayout'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
@@ -78,6 +78,11 @@ function PaneTitleBar({
     netCleanupRef.current = null
     dragRef.current = null
     useDnd.getState().setTabBarIndex(null)
+    // 同标签内拖动窗格时（见下方 onPointerMove）也会写 target/dropMode 驱动
+    // DropIndicator.tsx 显示落点指示——同 TabBar.tsx 的 endDrag，拖拽结束必须清空，
+    // 否则指示条会残留指向上一次拖拽的落点。
+    useDnd.getState().setTarget(null)
+    useDnd.getState().setDropMode(null)
     useDragGhost.getState().end()
   }, [])
 
@@ -136,11 +141,25 @@ function PaneTitleBar({
       const tabBarRect = getTabBarRect()
       if (tabBarRect && pointInRect(e.clientX, e.clientY, tabBarRect)) {
         useDnd.getState().setTabBarIndex(resolveTabBarInsertIndex(getTabRects(), e.clientX))
+        // 光标已经移到标签栏上，落点语义变成"插入新标签"——清掉窗格落点指示，避免
+        // 两条指示同时出现。
+        useDnd.getState().setTarget(null)
+        useDnd.getState().setDropMode(null)
       } else {
         useDnd.getState().setTabBarIndex(null)
+        // 光标还在窗格区：实时解出同标签内的落点（用户描述的"交换位置"诉求，见
+        // store/tabs.ts 的 reorderPane），驱动 DropIndicator.tsx 显示半侧覆盖的指示——
+        // 与 TabBar.tsx/Sidebar.tsx 跨标签拖放共用同一套 target/dropMode 机制。这里
+        // 恒用 'insert' 语义（半侧覆盖），不像跨标签拖放那样区分 'fill'：目标窗格是否
+        // 已有 ptyId 与这次操作无关——不管落在哪个窗格上，做的都是"把被拖的窗格插到它
+        // 旁边"，不是"用被拖的内容取代目标窗格"。解析不到落点（光标已经不在任何窗格
+        // 范围内，例如正飞向窗格区之外）时二者都清空，与上面标签栏分支同一处理。
+        const paneTarget = resolveDropTarget(getPaneSlotRects(tab), e.clientX, e.clientY)
+        useDnd.getState().setTarget(paneTarget)
+        useDnd.getState().setDropMode(paneTarget ? 'insert' : null)
       }
     },
-    [pane.title],
+    [tab, pane.title],
   )
 
   const onPointerUp = useCallback(
@@ -158,10 +177,22 @@ function PaneTitleBar({
       endDrag()
       if (!drag || !drag.dragging) return
       const rowRect = getPaneRowRect(tab.id)
-      if (rowRect && pointInRect(e.clientX, e.clientY, rowRect)) return // 仍在源标签自己的窗格行里：没有真的拖出去
+      if (rowRect && pointInRect(e.clientX, e.clientY, rowRect)) {
+        // 仍在源标签自己的窗格行里：没有真的拖出去，而是用户描述的"交换位置"诉求——
+        // 按落点重排（store/tabs.ts 的 reorderPane，两个窗格时就是严格对调，三个及以上
+        // 按落点插入）。endDrag() 已经在上面清空了 useDnd 的 target（驱动指示条那份
+        // 状态），这里必须重新解析一次落点，不能指望读 store——同 detach 分支读
+        // tabBarIndex 得在 endDrag() 之前提前取出是同一个理由，只是这里的落点状态在
+        // 拖拽过程中每次 pointermove 都会变，没有"提前取出"这个选项，只能重新算一遍。
+        // 解析不到落点（理论上不会：这个分支已经确认光标落在行内，行内必然落在某个
+        // 窗格矩形里）时维持原来的"什么都不做"。
+        const target = resolveDropTarget(getPaneSlotRects(tab), e.clientX, e.clientY)
+        if (target) useTabs.getState().reorderPane(tab.id, pane.id, target)
+        return
+      }
       detach(tabBarIndex ?? undefined)
     },
-    [tab.id, detach, endDrag],
+    [tab, pane.id, detach, endDrag],
   )
 
   // 指针捕获被浏览器隐式释放时补发的退出路径——与 TabBar.tsx/Sidebar.tsx 同一理由。
