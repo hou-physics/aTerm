@@ -8,7 +8,11 @@ import { useOverviewStore } from './overview'
 // Pane：标签内的单个终端会话。ptyId 缺省表示该窗格还没有终端——⌘D 新建的窗格先显示
 // 会话选择器（见 components/PanePicker.tsx），选定后才通过 startPaneTerminal 补上
 // ptyId，此前不占用任何 PTY 资源（设计文档 §5-A）。
-export type Pane = { id: string; ptyId?: string; title: string; threadKey?: string; dirName?: string; rootKey?: string }
+// sessionId：只有「我们自己用 --session-id 起的新对话」窗格才有，记录该窗格里跑的
+// claude 进程被指定使用的 session id。它是唯一稳定的身份——rootKey 会在首条用户消息
+// 出现时从 session_id 翻成那条消息的 uuid（见 scan.rs 的 group_chain_files），所以
+// 窗格不能只记 rootKey。--resume 起的窗格不设它：它一开始就知道自己的 rootKey。
+export type Pane = { id: string; ptyId?: string; title: string; threadKey?: string; dirName?: string; rootKey?: string; sessionId?: string }
 // dirName：只有 kind==='overview' 的标签使用，记住自己是哪个项目的总览页（App.tsx
 // 用它渲染 <OverviewPage dirName={...} />）；home/term 标签不填这个字段。
 export type Tab = {
@@ -117,7 +121,7 @@ type TabsState = {
   tabs: Tab[]
   activeId: string
   setActive(id: string): void
-  openTerminal(o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
+  openTerminal(o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string; sessionId?: string }): Promise<void>
   /** 打开某个项目的总览页（标签栏第三种标签，spec §5.2）：已存在同一 dirName 的总览
    * 标签则只聚焦它，不新建；新建时才清除该项目的排序快照（见下方实现注释）。 */
   openOverview(dirName: string, projectName: string): void
@@ -130,7 +134,7 @@ type TabsState = {
   detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
   splitTabPanes(tabId: string): string[] | null
   reorderTab(tabId: string, rawTargetIndex: number): boolean
-  startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string }): Promise<void>
+  startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string; sessionId?: string }): Promise<void>
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
   setPaneWidths(tabId: string, widths: number[]): void
@@ -140,11 +144,11 @@ export const useTabs = create<TabsState>((set, get) => ({
   tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }],
   activeId: 'home',
   setActive: (id) => set({ activeId: id }),
-  openTerminal: async ({ title, cwd, inject, threadKey, dirName, rootKey }) => {
+  openTerminal: async ({ title, cwd, inject, threadKey, dirName, rootKey, sessionId }) => {
     await ptyEventsReady
     const ptyId = await ptySpawn({ cwd, inject, cols: 80, rows: 24 })
     const id = `tab-${nextTab++}`
-    const pane: Pane = { id: `pane-${nextPane++}`, ptyId, title, threadKey, dirName, rootKey }
+    const pane: Pane = { id: `pane-${nextPane++}`, ptyId, title, threadKey, dirName, rootKey, sessionId }
     set((s) => ({ tabs: [...s.tabs, { id, kind: 'term', title, panes: [pane], activePaneId: pane.id }], activeId: id }))
   },
   // 「打开」总览页指的是这个总览标签被创建这件事，不是 OverviewPage 组件每次挂载
@@ -438,13 +442,13 @@ export const useTabs = create<TabsState>((set, get) => ({
     return true
   },
   // 窗格选择器（设计文档 §5-A）选定后调用：给此前没有 ptyId 的窗格补上真正的终端。
-  startPaneTerminal: async (tabId, paneId, { title, cwd, inject, threadKey, dirName, rootKey }) => {
+  startPaneTerminal: async (tabId, paneId, { title, cwd, inject, threadKey, dirName, rootKey, sessionId }) => {
     await ptyEventsReady
     const ptyId = await ptySpawn({ cwd, inject, cols: 80, rows: 24 })
     set((s) => ({
       tabs: s.tabs.map((t) => {
         if (t.id !== tabId) return t
-        const panes = t.panes.map((p) => (p.id === paneId ? { ...p, ptyId, title, threadKey, dirName, rootKey } : p))
+        const panes = t.panes.map((p) => (p.id === paneId ? { ...p, ptyId, title, threadKey, dirName, rootKey, sessionId } : p))
         return { ...t, panes, title: deriveTabTitle(panes, t.title) }
       }),
     }))

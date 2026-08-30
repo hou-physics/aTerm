@@ -60,12 +60,14 @@ describe('HomePage — 输入框为空时：今天已有的内容不变', () => 
     })
   })
 
-  it('展开卡片里的「＋ 新对话」注入 claude', async () => {
+  it('展开卡片里的「＋ 新对话」注入 claude --session-id（Task 1：新对话自带身份）', async () => {
     render(<HomePage />)
     fireEvent.click(screen.getByText(/phineuro/))
     fireEvent.click(await screen.findByText('＋ 新对话'))
     await vi.waitFor(() => {
-      expect(ipc.ptySpawn).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/Users/x/phineuro', inject: 'claude' }))
+      expect(ipc.ptySpawn).toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: '/Users/x/phineuro', inject: expect.stringMatching(/^claude --session-id [0-9a-f-]{36}$/) }),
+      )
     })
   })
 

@@ -9,8 +9,20 @@ export const resumeThread = (dirName: string, cwd: string, t: ThreadInfo) => {
   return useTabs.getState().openTerminal({ title: t.title, cwd, inject: `claude --resume ${t.resumeSessionId}`, threadKey, dirName, rootKey: t.rootKey })
 }
 
+// 新对话的唯一构造点。两个入口（主页的「＋ 新对话」、窗格选择器的「新对话」）都必须
+// 走它——PanePicker.tsx 此前自己写死 `inject: 'claude'`，绕过了身份绑定，导致窗格
+// 选择器里新建的对话同样认不出自己是谁。
+//
+// 为什么要自己指定 session id：窗格必须在进程启动前就知道自己的身份，否则一切按
+// threadKey 认人的逻辑（focusThread 去重、标签标题、对话面板、底栏模型）全部落空。
+// 见 spec §2.1 与 §3.1。
+export function newConversationSpec(cwd: string): { title: string; cwd: string; inject: string; sessionId: string } {
+  const sessionId = crypto.randomUUID()
+  return { title: '新对话', cwd, inject: `claude --session-id ${sessionId}`, sessionId }
+}
+
 export const newConversation = (cwd: string) =>
-  useTabs.getState().openTerminal({ title: '新对话', cwd, inject: 'claude' })
+  useTabs.getState().openTerminal(newConversationSpec(cwd))
 
 // 主页项目卡片的「总览」入口（Task 12）：Task 1–11 建好了总览页的全部能力，但没有
 // 任何一处 UI 调用 openOverview——功能存在却无法抵达。与上面几个 action 同一惯例，
