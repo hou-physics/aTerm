@@ -151,7 +151,9 @@ export function Sidebar() {
     }
     if (!drag.ghostStarted) {
       drag.ghostStarted = true
-      useDragGhost.getState().start(drag.t.title, e.clientX, e.clientY)
+      // titled 为 false 时 drag.t.title 是 session_id 前 8 位——与 actions.ts 的
+      // resumeThread 同一条注释，拖拽幽灵标签也是一个直渲 t.title 的写入点。
+      useDragGhost.getState().start(drag.t.titled ? drag.t.title : '新对话', e.clientX, e.clientY)
     } else {
       useDragGhost.getState().move(e.clientX, e.clientY)
     }
@@ -208,7 +210,8 @@ export function Sidebar() {
     if (preview.decision === 'collapse-panel') layout.togglePanel()
     const { p, t } = drag
     const sessionArgs = {
-      title: t.title,
+      // titled 为 false 时 t.title 是 session_id 前 8 位——同上，第三个写入点。
+      title: t.titled ? t.title : '新对话',
       cwd: p.cwd,
       inject: `claude --resume ${t.resumeSessionId}`,
       threadKey: `${p.dirName}:${t.rootKey}`,

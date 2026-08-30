@@ -193,6 +193,34 @@ describe('PanePicker — 「新对话」默认项目解析', () => {
     expect(call.inject).toBe(`claude --session-id ${pane.sessionId}`)
   })
 
+  // 终审必修 1：PanePicker 是四个 resume 起点里、唯一不经 actions.ts 的 resumeThread
+  // 的一处（自己直接调用 startPaneTerminal）。同一条截断规则必须在这里重复一遍。
+  it('选中 titled 为 false 的会话：窗格标题是「新对话」，不是 session_id 前 8 位', async () => {
+    useSessions.setState({
+      projects: [
+        {
+          dirName: 'proj-c', cwd: '/home/proj-c', lastActivityMs: 1,
+          threads: [makeThread({ rootKey: 'c1', title: 'ebd067d4', titled: false })],
+        },
+      ],
+    })
+    const tab = makeTab([{ id: 'p1', ptyId: 'pty-1', title: '窗格甲', dirName: undefined }, { id: 'p2', title: '新窗格' }], 'p2')
+    useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }, tab], activeId: 'tab-1' })
+    render(<PanePicker tab={tab} paneId="p2" />)
+
+    fireEvent.click(screen.getByText('📁 proj-c'))
+    const threadList = document.querySelector('.pane-picker-thread-list') as HTMLElement
+    fireEvent.click(within(threadList).getByText('新对话')) // displayTitle 把 titled:false 渲染成「新对话」（Fix 2）
+
+    await vi.waitFor(() => {
+      const pane = useTabs.getState().tabs.find((x) => x.id === 'tab-1')!.panes.find((p) => p.id === 'p2')!
+      expect(pane.ptyId).toBe('pty-picked')
+    })
+    const p2 = useTabs.getState().tabs.find((x) => x.id === 'tab-1')!.panes.find((p) => p.id === 'p2')!
+    expect(p2.title).toBe('新对话')
+    expect(p2.title).not.toBe('ebd067d4')
+  })
+
   it('来源窗格没有 dirName（如普通 zsh 终端）时，点击「新对话」改为列出全部项目供选择', async () => {
     const tab = makeTab([{ id: 'p1', ptyId: 'pty-1', title: 'zsh' }, { id: 'p2', title: '新窗格' }], 'p2')
     useTabs.setState({ tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }, tab], activeId: 'tab-1' })

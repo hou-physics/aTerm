@@ -12,6 +12,8 @@ vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: v
 
 import * as ipc from '../ipc'
 import { TabBar } from '../components/TabBar'
+import { useLibrary } from '../store/library'
+import { blockKey } from '../store/overview'
 import { useSessions } from '../store/sessions'
 import { useTabs } from '../store/tabs'
 import { makeThread } from './factories'
@@ -25,6 +27,9 @@ beforeEach(() => {
     }],
     loading: false,
   })
+  // 必须重置：与 SidebarList.test.tsx 同一理由——aliases/removedSessions 不清会在
+  // 用例之间互相污染。
+  useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
   vi.clearAllMocks()
 })
 
@@ -71,5 +76,42 @@ describe('标签栏的 ＋', () => {
     fireEvent.click(screen.getByTitle(/新建/))
     fireEvent.click(screen.getByText('新终端（zsh）'))
     await waitFor(() => expect(screen.queryByText('新终端（zsh）')).toBeNull())
+  })
+})
+
+// SessionPicker（＋ 与 ⌘D 共用同一套界面）是第四个渲染会话标题的列表面，终审发现它
+// 此前直渲 t.title——同样会露出 session_id 前 8 位，也无视用户刚起的别名。这里锁住
+// displayTitle 的两条优先级规则在这个入口同样成立。
+describe('＋ 选择器的会话标题走 displayTitle（不是裸的 t.title）', () => {
+  it('titled 为 false 时显示「新对话」，不是 session_id 前 8 位', () => {
+    useSessions.setState({
+      projects: [{
+        dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: 1,
+        threads: [makeThread({ rootKey: 'r1', title: 'ebd067d4', titled: false, resumeSessionId: 's1' })],
+      }],
+      loading: false,
+    })
+    render(<TabBar />)
+    fireEvent.click(screen.getByTitle(/新建/))
+    // 静态的「新对话」快捷菜单项本身也叫这个名字，所以这里不能用 getByText（会因
+    // 命中两处而报错）——直接读该会话行的 .t 节点文本。
+    const row = document.querySelector('.pane-picker-label + .pane-picker-item .t') as HTMLElement
+    expect(row.textContent).toBe('新对话')
+    expect(screen.queryByText('ebd067d4')).toBeNull()
+  })
+
+  it('有别名时优先显示别名，而不是原始标题——用户刚在侧栏起的名字这里也该认得', () => {
+    useLibrary.setState({ aliases: { [blockKey('-tmp-a', 'r1')]: '我的任务' }, hiddenProjects: {}, removedSessions: {} })
+    render(<TabBar />)
+    fireEvent.click(screen.getByTitle(/新建/))
+    expect(screen.queryByText('我的任务')).toBeTruthy()
+    expect(screen.queryByText('修登录')).toBeNull()
+  })
+
+  it('已从列表移除的会话仍出现在选择器里——用户主动打开选择器就是为了找到它，不应被隐藏名单挡住', () => {
+    useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: { [blockKey('-tmp-a', 'r1')]: Date.now() + 999_999 } })
+    render(<TabBar />)
+    fireEvent.click(screen.getByTitle(/新建/))
+    expect(screen.queryByText('修登录')).toBeTruthy()
   })
 })

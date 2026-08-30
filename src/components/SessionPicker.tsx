@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import type { ProjectInfo, ThreadInfo } from '../ipc'
+import { displayTitle } from '../sessionList'
 import { matchesQuery, filterProjectsByQuery } from '../sessionSearch'
+import { useLibrary } from '../store/library'
 import { useSessions } from '../store/sessions'
 import { basename, formatRelative } from '../time'
 
@@ -35,11 +37,16 @@ export function SessionPicker({
   onPick: (pick: SessionPick) => void
 }) {
   const { projects } = useSessions()
+  const aliases = useLibrary((s) => s.aliases)
   const [query, setQuery] = useState('')
   const [expandedProject, setExpandedProject] = useState<string | null>(null)
   const [pickingProject, setPickingProject] = useState(false)
   const q = query.trim().toLowerCase()
 
+  // 有意不做：这里不按 removedSessions 过滤「最近会话」/「全部项目」——理由与
+  // HomePage.tsx 的搜索结果不过滤 hiddenProjects 同源（见该文件"只过滤卡片视图"那段
+  // 注释）：用户主动打开这个选择器就是为了找到某个会话，把它藏起来只会让人以为
+  // 选择器坏了、找不到本该在的东西。不要把这行删掉当成"漏过滤"补上——它是有意的。
   const recent = projects
     .flatMap((p) => p.threads.map((t) => ({ p, t })))
     .sort((a, b) => b.t.lastActivityMs - a.t.lastActivityMs)
@@ -91,7 +98,7 @@ export function SessionPicker({
           <div className="pane-picker-label">最近会话</div>
           {recent.map(({ p, t }) => (
             <div key={`recent:${p.dirName}:${t.rootKey}`} className="pane-picker-item" onClick={() => pickResume(p, t)}>
-              <div className="t">{t.title}</div>
+              <div className="t">{displayTitle(t, p.dirName, aliases)}</div>
               <div className="sub">{basename(p.cwd)} · {formatRelative(t.lastActivityMs)}</div>
             </div>
           ))}
@@ -114,7 +121,7 @@ export function SessionPicker({
                 <div className="pane-picker-thread-list">
                   {p.threads.map((t) => (
                     <div key={`all:${p.dirName}:${t.rootKey}`} className="pane-picker-item" onClick={() => pickResume(p, t)}>
-                      <div className="t">{t.title}</div>
+                      <div className="t">{displayTitle(t, p.dirName, aliases)}</div>
                       <div className="sub">{formatRelative(t.lastActivityMs)}</div>
                     </div>
                   ))}

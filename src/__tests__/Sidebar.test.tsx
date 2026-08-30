@@ -50,10 +50,12 @@ vi.mock('@tauri-apps/api/webview', () => ({
 
 import { makeThread } from './factories'
 import App from '../App'
+import * as ipc from '../ipc'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
+import { useLibrary } from '../store/library'
 import { useTabs } from '../store/tabs'
 
 const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
@@ -66,6 +68,9 @@ beforeEach(() => {
   useHint.setState({ message: null, action: null })
   useDnd.setState({ target: null, dropMode: null, refusal: null })
   useDragGhost.setState({ visible: false, label: '', x: 0, y: 0 })
+  // 必须重置：与 SidebarList.test.tsx 同一理由，aliases/removedSessions 不清会在
+  // 用例之间互相污染。
+  useLibrary.setState({ aliases: {}, hiddenProjects: {}, removedSessions: {} })
   document.body.classList.remove('dragging-no-select')
 })
 
@@ -123,6 +128,31 @@ describe('Sidebar — 小幅移动的双击仍然正常触发 resumeThread（不
     // resumeThread 命中不了任何已开的窗格，走 openTerminal：新开一个标签
     expect(useTabs.getState().tabs).toHaveLength(2)
     expect(useTabs.getState().tabs[1]).toMatchObject({ kind: 'term', title: '修复登录' })
+  })
+})
+
+// 终审必修 1：本分支给 resumeThread 补了 sessionId 之后，reconcilePanes 才开始处理
+// 双击打开出来的窗格——titled 为 false 时若仍直传 t.title，标签标题会永久停在
+// session_id 前 8 位上（见 actions.ts 的 resumeThread 头顶注释），因为
+// reconcilePanes 的 `id.title ?? pane.title` 找不到任何东西可以替它纠正回来。
+describe('Sidebar — 终审必修 1：双击打开 titled 为 false 的会话', () => {
+  it('新开标签的标题是「新对话」，不是那串十六进制', async () => {
+    // 与顶部注释同一理由：数据必须在 App 挂载触发的那次 refresh() 之前就位——
+    // 挂载后再 useSessions.setState 会被随后的刷新悄悄覆盖回 mock 里的固定数据。
+    vi.mocked(ipc.listProjects).mockResolvedValueOnce([{
+      dirName: '-tmp-a', cwd: '/tmp/a', lastActivityMs: Date.now(),
+      threads: [makeThread({ rootKey: 'r-unt', title: 'ebd067d4', titled: false, resumeSessionId: 's-unt' })],
+    }])
+    await renderApp() // activeId 默认 home
+    const item = screen.getByText('新对话').closest('.side-item') as HTMLElement
+
+    await act(async () => {
+      fireEvent.doubleClick(item)
+    })
+
+    expect(useTabs.getState().tabs).toHaveLength(2)
+    expect(useTabs.getState().tabs[1]).toMatchObject({ kind: 'term', title: '新对话' })
+    expect(useTabs.getState().tabs[1].panes[0].title).toBe('新对话')
   })
 })
 

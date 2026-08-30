@@ -32,7 +32,10 @@ export function PanePicker({ tab, paneId }: { tab: Tab; paneId: string }) {
     }
     const { project: p, thread: t } = pick
     void start(tabId, paneId, {
-      title: t.title,
+      // titled 为 false 时 t.title 是 session_id 前 8 位——见 actions.ts 的 resumeThread
+      // 头顶注释，这里是同一条链路的另一个写入点，必须同样截断，否则窗格标题会永久
+      // 停在一串十六进制上（reconcilePanes 不会替用户纠正这个初始值）。
+      title: t.titled ? t.title : '新对话',
       cwd: p.cwd,
       inject: `claude --resume ${t.resumeSessionId}`,
       threadKey: `${p.dirName}:${t.rootKey}`,

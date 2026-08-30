@@ -30,7 +30,12 @@ export const resumeThread = (dirName: string, cwd: string, t: ThreadInfo) => {
   const threadKey = `${dirName}:${t.rootKey}`
   if (useTabs.getState().focusThread(threadKey)) return
   return useTabs.getState().openTerminal({
-    title: t.title, cwd, inject: `claude --resume ${t.resumeSessionId}`,
+    // titled 为 false 时 t.title 是 session_id 前 8 位的回退值（scan.rs）——直接拿它
+    // 当标签标题会让用户看到一串十六进制，且这条标签此后永远不会自愈：
+    // reconcilePanes（store/tabs.ts）用 `id.title ?? pane.title` 采纳新标题，
+    // resolvePaneIdentity 在 titled 为 false 时给的 id.title 就是 undefined，于是
+    // 窗格初始标题被原样保留。必须在这个唯一的写入点就截断，不能指望对账器事后纠正。
+    title: t.titled ? t.title : '新对话', cwd, inject: `claude --resume ${t.resumeSessionId}`,
     threadKey, dirName, rootKey: t.rootKey,
     // resumeSessionId 必在该链的 sessionIds 里，所以带上它之后，--resume 起的窗格
     // 也能被 reconcilePanes 对账——修掉「被 resume 的链此前无用户消息、发第一句话
