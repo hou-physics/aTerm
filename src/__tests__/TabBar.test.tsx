@@ -1473,6 +1473,8 @@ describe('TabBar — 面板展开时隐藏 .panel-toggle（收起交给面板顶
     const toggle = document.querySelector('.panel-toggle') as HTMLElement
     expect(toggle).toBeTruthy()
     expect(toggle.title).toBe('显示对话面板 (⌘J)')
+    // 符号改为 ☰（用户已选定）：原来的 ‹ 反直觉——面板是向右把窗口撑开，箭头却指着左。
+    expect(toggle.textContent).toBe('☰')
 
     act(() => { useLayout.setState({ panelCollapsed: false }) })
     expect(document.querySelector('.panel-toggle')).toBeNull()

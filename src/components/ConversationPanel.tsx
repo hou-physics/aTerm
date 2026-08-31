@@ -270,6 +270,26 @@ export function ConversationPanel() {
           onDoubleClick={onResizeDoubleClick}
         />
         <div className="conv-header">
+          {/* 折叠入口，必须留在 hasThread 条件之外：无论当前标签有没有关联对话都要
+              渲染，否则用户在没有关联对话的标签（如普通 zsh 终端标签）上打开面板后，
+              这里没有任何按钮，而 TabBar 那个又因展开态被隐藏——面板会彻底关不掉。
+              调用 togglePanel（而非 collapsePanelKeepingWindow，后者是给 ⌘D 腾地方
+              用的、故意不改窗口宽度）——用户手动收起面板时窗口应跟着变窄。
+              位置钉在面板顶栏最左缘（.conv-header 现在是 flex-start + .conv-header-actions
+              margin-left:auto，见 App.css）：收起时 TabBar 那个入口贴窗口最右缘
+              （TabBar.tsx 的 .panel-toggle），展开后这个入口接在面板最左缘，窗口
+              变宽/变窄时两个入口在屏幕上几乎是同一个位置（用户原话："它应该顶着那个
+              右边的格……展开之后，它应该顶着左边的格"）。符号改用 ✕（原来的 › 反
+              直觉——面板是向右把窗口撑开，箭头却指着左），见
+              .superpowers/sdd/reorder-and-toggle-fix-report.md。 */}
+          <button
+            type="button"
+            className="conv-collapse-toggle"
+            onClick={() => useLayout.getState().togglePanel()}
+            title="隐藏对话面板 (⌘J)"
+          >
+            ✕
+          </button>
           <span className="conv-title">对话</span>
           <div className="conv-header-actions">
             {hasThread && (
@@ -285,19 +305,6 @@ export function ConversationPanel() {
                 <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>
               </>
             )}
-            {/* 折叠入口，必须留在 hasThread 条件之外：无论当前标签有没有关联对话都要
-                渲染，否则用户在没有关联对话的标签（如普通 zsh 终端标签）上打开面板后，
-                这里没有任何按钮，而 TabBar 那个又因展开态被隐藏——面板会彻底关不掉。
-                调用 togglePanel（而非 collapsePanelKeepingWindow，后者是给 ⌘D 腾地方
-                用的、故意不改窗口宽度）——用户手动收起面板时窗口应跟着变窄。 */}
-            <button
-              type="button"
-              className="conv-collapse-toggle"
-              onClick={() => useLayout.getState().togglePanel()}
-              title="隐藏对话面板 (⌘J)"
-            >
-              ›
-            </button>
           </div>
         </div>
         {!hasThread && <div className="conv-empty">当前标签没有关联的对话</div>}

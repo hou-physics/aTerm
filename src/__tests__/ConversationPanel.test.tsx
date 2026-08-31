@@ -482,6 +482,9 @@ describe('ConversationPanel — 折叠态完全消失，展开/折叠分别由 T
     render(<ConversationPanel />)
     const btn = screen.getByTitle('隐藏对话面板 (⌘J)')
     expect(btn).toBeTruthy()
+    // 符号改为 ✕（用户已选定，见 .superpowers/sdd/reorder-and-toggle-fix-report.md）：
+    // 原来的 › 反直觉——面板是向右把窗口撑开，箭头却指着左。
+    expect(btn.textContent).toBe('✕')
     fireEvent.click(btn)
     expect(useLayout.getState().panelCollapsed).toBe(true)
     await waitFor(() => expect(ipc.readConversation).toHaveBeenCalledWith('proj-a', 'root-1'))
@@ -506,19 +509,23 @@ describe('ConversationPanel — 折叠态完全消失，展开/折叠分别由 T
         <ConversationPanel />
       </>,
     )
-    // 展开态：面板顶栏的折叠按钮在，TabBar 的展开/折叠按钮已隐藏
-    expect(screen.getByTitle('隐藏对话面板 (⌘J)')).toBeTruthy() // 面板顶栏那个
+    // 展开态：面板顶栏的折叠按钮在（文本 ✕），TabBar 的展开/折叠按钮已隐藏
+    const collapseBtn = screen.getByTitle('隐藏对话面板 (⌘J)')
+    expect(collapseBtn).toBeTruthy() // 面板顶栏那个
+    expect(collapseBtn.textContent).toBe('✕')
     expect(document.querySelector('.panel-toggle')).toBeNull() // TabBar 那个已隐藏
     expect(document.querySelector('.conv-panel-dock')).toBeTruthy()
 
     // 从面板顶栏的按钮收起
-    fireEvent.click(screen.getByTitle('隐藏对话面板 (⌘J)'))
+    fireEvent.click(collapseBtn)
     expect(useLayout.getState().panelCollapsed).toBe(true)
     expect(document.querySelector('.conv-panel-dock')).toBeNull() // 面板完全消失
-    expect(screen.getByTitle('显示对话面板 (⌘J)')).toBeTruthy() // TabBar 按钮重新出现（收起态，负责展开）
+    const expandBtn = screen.getByTitle('显示对话面板 (⌘J)')
+    expect(expandBtn).toBeTruthy() // TabBar 按钮重新出现（收起态，负责展开）
+    expect(expandBtn.textContent).toBe('☰')
 
     // 从 TabBar 的按钮展开
-    fireEvent.click(screen.getByTitle('显示对话面板 (⌘J)'))
+    fireEvent.click(expandBtn)
     expect(useLayout.getState().panelCollapsed).toBe(false)
     expect(document.querySelector('.conv-panel-dock')).toBeTruthy()
     expect(document.querySelector('.panel-toggle')).toBeNull() // TabBar 按钮再次隐藏
