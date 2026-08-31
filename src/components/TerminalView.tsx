@@ -47,24 +47,44 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     // 不是修复代码。会在每次按键/合成事件时打印控制台日志，带性能开销与噪音。
     // TODO(ime-probe): 根因定位后必须整段删除（含下方 cleanup 里对应的注销代码）。
     // ============================================================================
-    const imeLog = (line: string) => { console.log(`[ime] t=${performance.now().toFixed(1)} ${line}`) }
+    const imeTextarea = el.querySelector('textarea')
+    // value 可能很长（累积未清空正是本轮取证重点）——超过 20 字符截断，方便整段复制不换行。
+    const imeValueSnapshot = () => {
+      const raw = imeTextarea?.value ?? ''
+      const shown = raw.length > 20 ? raw.slice(0, 20) + '…' : raw
+      return JSON.stringify(shown)
+    }
+    const imeLog = (line: string) => { console.log(`[ime] t=${performance.now().toFixed(1)} ${line} value=${imeValueSnapshot()}`) }
     const onImeWinKeyDown = (e: KeyboardEvent) => {
       imeLog(`win-keydown key=${JSON.stringify(e.key)} code=${e.keyCode} composing=${e.isComposing} prevented=${e.defaultPrevented}`)
     }
     window.addEventListener('keydown', onImeWinKeyDown, true)
-    const imeTextarea = el.querySelector('textarea')
     const onImeTaKeyDown = (e: KeyboardEvent) => {
       imeLog(`ta-keydown  key=${JSON.stringify(e.key)} code=${e.keyCode} composing=${e.isComposing} prevented=${e.defaultPrevented}`)
+    }
+    // 第一轮只记了 keydown；t=28028 的发送另有触发源，这轮补 keyup/keypress/beforeinput 找嫌疑人。
+    const onImeTaKeyUp = (e: KeyboardEvent) => {
+      imeLog(`ta-keyup    key=${JSON.stringify(e.key)} code=${e.keyCode} composing=${e.isComposing}`)
+    }
+    const onImeTaKeyPress = (e: KeyboardEvent) => {
+      imeLog(`ta-keypress key=${JSON.stringify(e.key)} code=${e.keyCode}`)
+    }
+    const onImeBeforeInput = (e: Event) => {
+      const ie = e as InputEvent
+      imeLog(`ta-beforeinput inputType=${JSON.stringify(ie.inputType)} data=${JSON.stringify(ie.data)}`)
     }
     const onImeCompStart = (e: CompositionEvent) => { imeLog(`compositionstart data=${JSON.stringify(e.data)}`) }
     const onImeCompUpdate = (e: CompositionEvent) => { imeLog(`compositionupdate data=${JSON.stringify(e.data)}`) }
     const onImeCompEnd = (e: CompositionEvent) => { imeLog(`compositionend data=${JSON.stringify(e.data)}`) }
     const onImeInput = (e: Event) => {
       const ie = e as InputEvent
-      imeLog(`ta-input inputType=${JSON.stringify(ie.inputType)} data=${JSON.stringify(ie.data)} value=${JSON.stringify(imeTextarea?.value)}`)
+      imeLog(`ta-input inputType=${JSON.stringify(ie.inputType)} data=${JSON.stringify(ie.data)}`)
     }
     if (imeTextarea) {
       imeTextarea.addEventListener('keydown', onImeTaKeyDown, true)
+      imeTextarea.addEventListener('keyup', onImeTaKeyUp, true)
+      imeTextarea.addEventListener('keypress', onImeTaKeyPress, true)
+      imeTextarea.addEventListener('beforeinput', onImeBeforeInput, true)
       imeTextarea.addEventListener('compositionstart', onImeCompStart)
       imeTextarea.addEventListener('compositionupdate', onImeCompUpdate)
       imeTextarea.addEventListener('compositionend', onImeCompEnd)
@@ -190,6 +210,9 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       window.removeEventListener('keydown', onImeWinKeyDown, true)
       if (imeTextarea) {
         imeTextarea.removeEventListener('keydown', onImeTaKeyDown, true)
+        imeTextarea.removeEventListener('keyup', onImeTaKeyUp, true)
+        imeTextarea.removeEventListener('keypress', onImeTaKeyPress, true)
+        imeTextarea.removeEventListener('beforeinput', onImeBeforeInput, true)
         imeTextarea.removeEventListener('compositionstart', onImeCompStart)
         imeTextarea.removeEventListener('compositionupdate', onImeCompUpdate)
         imeTextarea.removeEventListener('compositionend', onImeCompEnd)
