@@ -244,10 +244,12 @@ export function ConversationPanel() {
     }
   }, [dirName, rootKey, conv, timelineCollapsed, timelineHeight])
 
-  // 折叠态：面板完全不渲染、不占宽度，终端拿满剩余空间。唯一的开关入口是 TabBar
-  // 右端的按钮（与 ⌘J 共享同一个 store 方法）；面板自身不再带折叠按钮，也不再
-  // 收成一条竖条——panelCollapsed 是 store/layout.ts 里唯一的真相来源，不引入
-  // 第二个标志位。
+  // 折叠态：面板完全不渲染、不占宽度，终端拿满剩余空间，也不再收成一条竖条。
+  // 展开入口在 TabBar 右端（面板不存在时没有自己的 DOM 可以承载按钮）；折叠入口
+  // 挪到了面板自己的顶栏（conv-header-actions 里的 conv-collapse-toggle，见下方）
+  // ——"收起某个东西的控件应该长在那个东西身上"。两者都调用同一个 togglePanel，
+  // 与 ⌘J 共享同一个 store 方法；panelCollapsed 仍是 store/layout.ts 里唯一的
+  // 真相来源，不引入第二个标志位。
   if (panelCollapsed) return null
 
   const hasThread = Boolean(dirName && rootKey)
@@ -268,20 +270,42 @@ export function ConversationPanel() {
           onDoubleClick={onResizeDoubleClick}
         />
         <div className="conv-header">
+          {/* 折叠入口，必须留在 hasThread 条件之外：无论当前标签有没有关联对话都要
+              渲染，否则用户在没有关联对话的标签（如普通 zsh 终端标签）上打开面板后，
+              这里没有任何按钮，而 TabBar 那个又因展开态被隐藏——面板会彻底关不掉。
+              调用 togglePanel（而非 collapsePanelKeepingWindow，后者是给 ⌘D 腾地方
+              用的、故意不改窗口宽度）——用户手动收起面板时窗口应跟着变窄。
+              位置钉在面板顶栏最左缘（.conv-header 现在是 flex-start + .conv-header-actions
+              margin-left:auto，见 App.css）：收起时 TabBar 那个入口贴窗口最右缘
+              （TabBar.tsx 的 .panel-toggle），展开后这个入口接在面板最左缘，窗口
+              变宽/变窄时两个入口在屏幕上几乎是同一个位置（用户原话："它应该顶着那个
+              右边的格……展开之后，它应该顶着左边的格"）。符号改用 ✕（原来的 › 反
+              直觉——面板是向右把窗口撑开，箭头却指着左），见
+              .superpowers/sdd/reorder-and-toggle-fix-report.md。 */}
+          <button
+            type="button"
+            className="conv-collapse-toggle"
+            onClick={() => useLayout.getState().togglePanel()}
+            title="隐藏对话面板 (⌘J)"
+          >
+            ✕
+          </button>
           <span className="conv-title">对话</span>
-          {hasThread && (
-            <div className="conv-header-actions">
-              <button
-                type="button"
-                className="conv-timeline-toggle"
-                onClick={toggleTimelineCollapsed}
-                title={timelineCollapsed ? '展开时间线' : '折叠时间线'}
-              >
-                {timelineCollapsed ? '⌃' : '⌄'}
-              </button>
-              <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>
-            </div>
-          )}
+          <div className="conv-header-actions">
+            {hasThread && (
+              <>
+                <button
+                  type="button"
+                  className="conv-timeline-toggle"
+                  onClick={toggleTimelineCollapsed}
+                  title={timelineCollapsed ? '展开时间线' : '折叠时间线'}
+                >
+                  {timelineCollapsed ? '⌃' : '⌄'}
+                </button>
+                <button type="button" className="conv-refresh" onClick={() => load()} title="刷新">⟳</button>
+              </>
+            )}
+          </div>
         </div>
         {!hasThread && <div className="conv-empty">当前标签没有关联的对话</div>}
         {hasThread && loading && <div className="conv-status">加载中…</div>}

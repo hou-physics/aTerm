@@ -78,7 +78,14 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .tab-close:hover { background: var(--color-tab-close-hover-bg); color: var(--color-tab-close-hover-text); }
 .tab-new { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
 .tab-new:hover { border-color: var(--color-accent); color: var(--color-text); }
-.panel-toggle { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+/* margin-left: auto 而不是紧跟在最后一个标签后面的 2px——面板收起时这是唯一的
+   展开入口，钉在 `.tabbar`（display:flex）行的最右缘：面板展开后收起交给面板顶栏
+   自己最左缘的按钮（ConversationPanel.tsx 的 .conv-collapse-toggle），窗口变宽/变窄
+   时两个入口在屏幕上几乎是同一个位置，视觉连续（用户原话："它应该……顶着那个
+   右边的格"，见 .superpowers/sdd/reorder-and-toggle-fix-report.md）。字号从既有的
+   13px 微调到 14px：☰ 比原来的 ‹ 视觉重量更轻，需要略大一点才能在同样 24×26 的
+   按钮里读起来分量相当。 */
+.panel-toggle { flex: none; align-self: flex-start; width: 24px; height: 26px; margin-left: auto; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); color: var(--color-text-dim); font-size: 14px; line-height: 1; cursor: default; }
 .panel-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 /* 底部常驻状态栏（StatusBar.tsx，spec §5.2）：`.main` 里与 `.tabbar`/`.content` 并列
@@ -505,11 +512,21 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    起算是同一个位置），抓取区整块向右（面板内部）铺开到 9px，不再跨边界。 */
 .conv-panel-resize-handle { position: absolute; top: 0; bottom: 0; left: 0; width: 1px; padding: 0 8px 0 0; box-sizing: content-box; background: transparent; background-clip: content-box; cursor: col-resize; z-index: 2; }
 .conv-panel-resize-handle:hover, .conv-panel-resize-handle:active { background-color: var(--color-accent); }
-.conv-header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
+/* 不再用 justify-content: space-between——ConversationPanel.tsx 把折叠按钮
+   （.conv-collapse-toggle）挪到了这个头部最左端（对话标题之前），用户诉求是它要贴着
+   面板最左缘、与 TabBar.tsx 收起态那个按钮（贴窗口最右缘）在屏幕上连续。space-between
+   会把三个直接子元素（按钮/标题/操作组）在整行里均匀撑开，标题会被顶到中间、按钮和
+   操作组各自贴边，不是想要的效果；改成默认起始对齐 + gap，让按钮和标题紧挨在一起，
+   操作组（.conv-header-actions）改用 margin-left:auto 单独推到最右缘，效果不受
+   hasThread 是否渲染额外按钮影响。 */
+.conv-header { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
 .conv-title { font-size: 13px; font-weight: 600; }
-.conv-header-actions { flex: none; display: flex; align-items: center; gap: 6px; }
-.conv-refresh, .conv-timeline-toggle { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
-.conv-refresh:hover, .conv-timeline-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
+.conv-header-actions { flex: none; display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.conv-refresh, .conv-timeline-toggle, .conv-collapse-toggle { flex: none; width: 24px; height: 24px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-elevated); color: var(--color-text-dim); font-size: 13px; line-height: 1; cursor: default; }
+.conv-refresh:hover, .conv-timeline-toggle:hover, .conv-collapse-toggle:hover { border-color: var(--color-accent); color: var(--color-text); }
+/* ✕ 比原来的 › 视觉重量更轻，字号单独微调到 14px，让它在同样 24×24 的按钮里读起来
+   分量相当；颜色沿用上面共享规则的主题变量，这里只覆盖字号。 */
+.conv-collapse-toggle { font-size: 14px; }
 /* 时间线区（日期分组列表）与正文区共同的父容器，撑满头部之下的剩余高度；引入这层
    包裹只是为了给拖拽分隔条提供一个可测量的"内容区高度"（见 ConversationPanel.tsx 的
    timelineHeightCap /contentRef），本身不承担视觉样式。 */

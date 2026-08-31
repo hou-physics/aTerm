@@ -25,6 +25,7 @@ import { useLibrary } from './store/library'
 import { useSessions } from './store/sessions'
 import { useStatusStore } from './store/status'
 import { useTabs } from './store/tabs'
+import { pasteTo } from './terminalPaste'
 
 // 元数据刷新的最小间隔。15s：足够让底栏在一轮对话内跟上，又不会让 list_projects
 // 的头尾读取变成持续负载。
@@ -218,7 +219,12 @@ export default function App() {
         setDropPaneId(null)
         const write = resolveDropWrite(panes, paneId, payload.paths)
         if (!write) return // 落在窗格区之外、窗格不可写、或 paths 为空：整个忽略
-        void ptyWrite(write.ptyId, write.text)
+        // 优先当一次「粘贴」投递（见 terminalPaste.ts）：term.paste() 会按目标终端当前是否
+        // 开启括号粘贴模式自动包裹标记，Claude TUI 下才会被识别成图片附件而不是一行路径
+        // 文本（逐字符 ptyWrite 永远不会触发这个识别）。pasteTo 返回 false 只应发生在
+        // TerminalView 还没来得及注册粘贴入口这一理论缝隙——退回 ptyWrite 是保底，不能让
+        // 用户拖进来的文件凭空消失。
+        if (!pasteTo(write.ptyId, write.text)) void ptyWrite(write.ptyId, write.text)
       })
       if (disposed) un() // 卸载竞态：await 期间组件已卸载时立即注销
       else unlisten = un

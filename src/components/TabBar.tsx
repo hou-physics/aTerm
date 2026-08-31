@@ -476,14 +476,26 @@ export function TabBar() {
         </button>
       </div>
       {restTabs.map(renderTab)}
-      <button
-        type="button"
-        className="panel-toggle"
-        onClick={() => togglePanel()}
-        title={panelCollapsed ? '显示对话面板 (⌘J)' : '隐藏对话面板 (⌘J)'}
-      >
-        {panelCollapsed ? '‹' : '›'}
-      </button>
+      {/* 展开之后，收起交给面板自己顶栏的按钮（ConversationPanel.tsx 的
+          conv-collapse-toggle）——"收起某个东西的控件应该长在那个东西身上"。这个
+          按钮因此只在面板已收起时才渲染，只负责展开，不再兼任收起。
+          符号用 ☰（原来的 ‹ 反直觉——面板是向右把窗口撑开，箭头却指着左，用户已选定
+          改用汉堡图标；收起态展开、展开态收起分别是 ☰/✕，两个符号本身就在提示"点了
+          会发生什么"，不需要再靠箭头方向影射位置）。位置钉在标签栏最右缘（见 App.css
+          的 .panel-toggle margin-left:auto）——面板展开后收起入口紧接着挪到面板顶栏
+          最左缘（ConversationPanel.tsx），窗口变宽/变窄时两个入口在屏幕上几乎是同一个
+          位置，视觉连续（用户原话："它应该顶着那个右边的格……展开之后，它应该顶着
+          左边的格"，见 .superpowers/sdd/reorder-and-toggle-fix-report.md）。 */}
+      {panelCollapsed && (
+        <button
+          type="button"
+          className="panel-toggle"
+          onClick={() => togglePanel()}
+          title="显示对话面板 (⌘J)"
+        >
+          ☰
+        </button>
+      )}
       {/* 窗格拖出成独立标签（设计文档 §5-C）落在标签栏上时的插入位置指示，见上方
           TabBarDropIndicator 注释。渲染顺序放最后，画在其它标签栏元素之上，
           不依赖 z-index（与 .pane-drop-indicator 在 App.tsx 里的取舍一致）。 */}

@@ -136,6 +136,7 @@ type TabsState = {
   detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
   splitTabPanes(tabId: string): string[] | null
   reorderTab(tabId: string, rawTargetIndex: number): boolean
+  reorderPane(tabId: string, paneId: string, targetPaneId: string): boolean
   startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string; sessionId?: string }): Promise<void>
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
@@ -442,6 +443,57 @@ export const useTabs = create<TabsState>((set, get) => ({
     const insertion = reorderInsertIndex(order, tabId, rawTargetIndex)
     if (insertion === srcIdx) return false
     set((s) => ({ tabs: moveArrayItem(s.tabs, srcIdx, insertion) }))
+    return true
+  },
+  // 同标签内拖动窗格标题栏：用户描述的"交换位置"诉求（拖一个框到右边，两个位置就都
+  // 自动交换）落地成"把源窗格移到目标窗格当前所在的下标"——两个窗格时这就是严格对调，
+  // 正是用户描述的效果；三个及以上窗格时是"顺次插入"而不是两两对调（把最左边那个拖到
+  // 最右＝它移到最右端、其余顺次前移，而不是跟最右那个对调、中间那个纹丝不动）。
+  // targetPaneId 来自 paneDrop.ts 的 resolveReorderTarget（TabPanes.tsx 在光标仍停留于
+  // 源标签自己的窗格行内时就地解出的落点，与 movePanesToTab/fillEmptyPane 是同一手势、
+  // 不同分支）——整块窗格都是落点，不带 side，这正是本次修复的要点：上一轮直接复用
+  // 了给"跨标签插入新窗格"设计的 resolveDropTarget（半侧语义），落点先按 side 经
+  // dropInsertionIndex 换算成下标、再经 reorderInsertIndex 换算"移除拖拽源后是否要
+  // 前移一格"，两步叠加后目标窗格的某一侧恰好会换算回源窗格原来的下标——变成用户
+  // 描述的"只有拖到某个 critical 位置才能成功"，且指示条也被画成半侧色块（见
+  // .superpowers/sdd/reorder-and-toggle-fix-report.md）。
+  //
+  // 换算不再需要 dropInsertionIndex/reorderInsertIndex 那两步：targetPaneId 在数组里
+  // 的下标就是 moveArrayItem 该用的 toIndex——moveArrayItem 是"先移除源元素、再在
+  // toIndex 处插入"，源下标小于目标下标时移除会让目标位置整体前移一格，再插回 toIndex
+  // 这个（移除前的）原始下标，效果正是"源元素落在目标原来的位置、目标跟着让出来的
+  // 空隙顺次前移"；源下标大于目标下标时移除不影响 toIndex 之前的位置，插入同样落在
+  // 目标原来的下标上。两个方向算出来的都是"源元素最终停在目标窗格原来的下标"，与两
+  // 窗格时的"对调"、三窗格时的"顺次插入"两种描述完全吻合，不需要再手写一层换算。
+  //
+  // paneWidths 必须跟着同一次 moveArrayItem 操作一起挪——否则窗格换了位置、宽度却留在
+  // 原下标，视觉上会错位；没有 paneWidths（理论上不会发生：能拖动窗格标题栏说明至少
+  // 有 2 个窗格，此时 paneWidths 恒已由别的路径填好）时原样保留 undefined，不主动补
+  // equalPaneWidths——窗格数量没变，不该触发"重新等分"。activePaneId 保持指向被拖的
+  // 窗格本身：它换了位置，但仍是焦点，不需要像 closePane 那样重新计算。
+  //
+  // 以下情况返回 false 且不产生新的 tabs 引用（与 moveArrayItem/movePanesToTab 拖到
+  // 自己标签时的既有惯例一致，真正的空操作不制造新对象）：标签不存在或非 term；源/
+  // 目标窗格有一个不属于该标签；源窗格就是目标窗格本身（"拖到自己身上"，targetIdx
+  // 恒等于 srcIdx）。
+  reorderPane: (tabId, paneId, targetPaneId) => {
+    const tab = get().tabs.find((t) => t.id === tabId)
+    if (!tab || tab.kind !== 'term') return false
+    const paneIds = tab.panes.map((p) => p.id)
+    const srcIdx = paneIds.indexOf(paneId)
+    const targetIdx = paneIds.indexOf(targetPaneId)
+    if (srcIdx === -1 || targetIdx === -1 || srcIdx === targetIdx) return false
+    set((s) => ({
+      tabs: s.tabs.map((t) => {
+        if (t.id !== tabId) return t
+        return {
+          ...t,
+          panes: moveArrayItem(t.panes, srcIdx, targetIdx),
+          paneWidths: t.paneWidths ? moveArrayItem(t.paneWidths, srcIdx, targetIdx) : t.paneWidths,
+          activePaneId: paneId,
+        }
+      }),
+    }))
     return true
   },
   // 窗格选择器（设计文档 §5-A）选定后调用：给此前没有 ptyId 的窗格补上真正的终端。
