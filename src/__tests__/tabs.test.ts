@@ -825,19 +825,22 @@ describe('useTabs — reorderTab：标签拖拽排序（纯数组挪动落盘）
 })
 
 // 同标签内拖动窗格标题栏：用户描述的"交换位置"诉求（我拖一个框到右边，两个位置就都
-// 自动交换），落地成"按落点重排"而不是严格两两对调——两个窗格时两者完全等价，就是
-// 用户描述的效果；三个及以上窗格时按落点插入更符合直觉（见 TabPanes.tsx 接线处的
-// 详细论证）。落点换算复用 reorderTab 同一套 reorderInsertIndex（"移除拖拽源后，
-// 目标下标要不要前移一格"是同一个问题），只是 minIndex 传 0——窗格顺序没有"主页标签
-// 恒排第一"那种钳制。交互层接线在 PaneDetach.test.tsx。
+// 自动交换），落地成"把源窗格移到目标窗格当前所在的下标"——两个窗格时这就是严格
+// 对调，就是用户描述的效果；三个及以上窗格时是顺次插入（见 TabPanes.tsx 接线处的
+// 详细论证）。targetPaneId 是目标窗格的 id 本身，不再是 {paneId, side} 那种带半侧
+// 语义的落点——上一轮直接复用了给"跨标签插入新窗格"设计的 resolveDropTarget，产生
+// 了用户真机验收报告的"只有拖到某个 critical 位置才能成功"的缺陷（见 paneDrop.ts
+// 里 resolveReorderTarget 的注释与 .superpowers/sdd/reorder-and-toggle-fix-report.md）。
+// 交互层接线（含"左半/右半/正中结果一致"这条直接对应用户报告的回归用例）在
+// PaneDetach.test.tsx。
 describe('useTabs — reorderPane：同标签内拖动窗格标题栏按落点重排', () => {
-  it('两个窗格：拖 p1 落在 p2 右半侧——对调，下标与 paneWidths 都跟着换，焦点仍是被拖的 p1', () => {
+  it('两个窗格：拖 p1 到 p2 身上——对调，下标与 paneWidths 都跟着换，焦点仍是被拖的 p1', () => {
     const p1 = makePane({ title: 'P1' })
     const p2 = makePane({ title: 'P2' })
     const tab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id, paneWidths: [0.4, 0.6] })
     useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
 
-    const ok = useTabs.getState().reorderPane(tab.id, p1.id, { paneId: p2.id, side: 'right' })
+    const ok = useTabs.getState().reorderPane(tab.id, p1.id, p2.id)
 
     expect(ok).toBe(true)
     const t = useTabs.getState().tabs.find((x) => x.id === tab.id)!
@@ -846,14 +849,14 @@ describe('useTabs — reorderPane：同标签内拖动窗格标题栏按落点�
     expect(t.activePaneId).toBe(p1.id) // 换了位置，但仍是焦点
   })
 
-  it('三个窗格：把第一个拖到最右（落在最后一个窗格右半侧）——顺次前移成 2,3,1，不是与最后一个对调', () => {
+  it('三个窗格：把第一个拖到第三个身上——顺次前移成 2,3,1，不是与最后一个对调，paneWidths 跟随', () => {
     const p1 = makePane({ title: 'P1' })
     const p2 = makePane({ title: 'P2' })
     const p3 = makePane({ title: 'P3' })
     const tab = makeTermTab({ panes: [p1, p2, p3], activePaneId: p1.id, paneWidths: [0.2, 0.3, 0.5] })
     useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
 
-    const ok = useTabs.getState().reorderPane(tab.id, p1.id, { paneId: p3.id, side: 'right' })
+    const ok = useTabs.getState().reorderPane(tab.id, p1.id, p3.id)
 
     expect(ok).toBe(true)
     const t = useTabs.getState().tabs.find((x) => x.id === tab.id)!
@@ -869,33 +872,21 @@ describe('useTabs — reorderPane：同标签内拖动窗格标题栏按落点�
     useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
     const before = useTabs.getState().tabs
 
-    const ok = useTabs.getState().reorderPane(tab.id, p1.id, { paneId: p1.id, side: 'left' })
+    const ok = useTabs.getState().reorderPane(tab.id, p1.id, p1.id)
 
     expect(ok).toBe(false)
     expect(useTabs.getState().tabs).toBe(before)
   })
 
-  it('换算后落回原位（p1 拖到 p2 左半侧——p1 本就在 p2 左边）：同样 no-op，不产生新引用', () => {
-    const p1 = makePane()
-    const p2 = makePane()
-    const tab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id })
-    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
-    const before = useTabs.getState().tabs
-
-    const ok = useTabs.getState().reorderPane(tab.id, p1.id, { paneId: p2.id, side: 'left' })
-
-    expect(ok).toBe(false)
-    expect(useTabs.getState().tabs).toBe(before)
-  })
-
-  it('非 term 标签 / 找不到标签 / 找不到源窗格：拒绝，返回 false', () => {
+  it('非 term 标签 / 找不到标签 / 找不到源窗格 / 找不到目标窗格：拒绝，返回 false', () => {
     const p1 = makePane()
     const tab = makeTermTab({ panes: [p1], activePaneId: p1.id })
     useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
 
-    expect(useTabs.getState().reorderPane('home', p1.id, { paneId: p1.id, side: 'left' })).toBe(false)
-    expect(useTabs.getState().reorderPane('does-not-exist', p1.id, { paneId: p1.id, side: 'left' })).toBe(false)
-    expect(useTabs.getState().reorderPane(tab.id, 'does-not-exist', { paneId: p1.id, side: 'left' })).toBe(false)
+    expect(useTabs.getState().reorderPane('home', p1.id, p1.id)).toBe(false)
+    expect(useTabs.getState().reorderPane('does-not-exist', p1.id, p1.id)).toBe(false)
+    expect(useTabs.getState().reorderPane(tab.id, 'does-not-exist', p1.id)).toBe(false)
+    expect(useTabs.getState().reorderPane(tab.id, p1.id, 'does-not-exist')).toBe(false)
   })
 })
 

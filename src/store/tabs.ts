@@ -136,7 +136,7 @@ type TabsState = {
   detachPaneToNewTab(tabId: string, paneId: string, insertAt?: number): string | null
   splitTabPanes(tabId: string): string[] | null
   reorderTab(tabId: string, rawTargetIndex: number): boolean
-  reorderPane(tabId: string, paneId: string, target: DropTarget): boolean
+  reorderPane(tabId: string, paneId: string, targetPaneId: string): boolean
   startPaneTerminal(tabId: string, paneId: string, o: { title: string; cwd?: string; inject?: string; threadKey?: string; dirName?: string; rootKey?: string; sessionId?: string }): Promise<void>
   closePane(tabId: string, paneId: string, confirmFn?: ConfirmFn): Promise<void>
   focusPane(tabId: string, paneId: string): void
@@ -446,18 +446,25 @@ export const useTabs = create<TabsState>((set, get) => ({
     return true
   },
   // 同标签内拖动窗格标题栏：用户描述的"交换位置"诉求（拖一个框到右边，两个位置就都
-  // 自动交换）落地成"按落点重排"，不是严格的两两对调——两个窗格时两者完全等价，正是
-  // 用户描述的效果；三个及以上窗格时按落点插入更符合直觉（把最左边那个拖到最右＝它
-  // 移到最右端、其余顺次前移，而不是跟最右那个对调、中间那个纹丝不动）。target 来自
-  // paneDrop.ts 的 resolveDropTarget（TabPanes.tsx 在光标仍停留于源标签自己的窗格行
-  // 内时就地解出的落点，与 movePanesToTab/fillEmptyPane 是同一手势、不同分支）。
+  // 自动交换）落地成"把源窗格移到目标窗格当前所在的下标"——两个窗格时这就是严格对调，
+  // 正是用户描述的效果；三个及以上窗格时是"顺次插入"而不是两两对调（把最左边那个拖到
+  // 最右＝它移到最右端、其余顺次前移，而不是跟最右那个对调、中间那个纹丝不动）。
+  // targetPaneId 来自 paneDrop.ts 的 resolveReorderTarget（TabPanes.tsx 在光标仍停留于
+  // 源标签自己的窗格行内时就地解出的落点，与 movePanesToTab/fillEmptyPane 是同一手势、
+  // 不同分支）——整块窗格都是落点，不带 side，这正是本次修复的要点：上一轮直接复用
+  // 了给"跨标签插入新窗格"设计的 resolveDropTarget（半侧语义），落点先按 side 经
+  // dropInsertionIndex 换算成下标、再经 reorderInsertIndex 换算"移除拖拽源后是否要
+  // 前移一格"，两步叠加后目标窗格的某一侧恰好会换算回源窗格原来的下标——变成用户
+  // 描述的"只有拖到某个 critical 位置才能成功"，且指示条也被画成半侧色块（见
+  // .superpowers/sdd/reorder-and-toggle-fix-report.md）。
   //
-  // 落点换算分两步：dropInsertionIndex 先把 {paneId, side} 换成"未移除拖拽源"的原始
-  // 下标（与 movePanesToTab 用的是同一个函数，那边源/目标是两个不同数组，不需要第二
-  // 步）；这里源和目标是同一个数组，还需要 reorderInsertIndex 做"移除拖拽源后，目标
-  // 下标要不要前移一格"的换算——与标签拖拽排序（reorderTab）是同一个问题，直接复用
-  // 那个函数，不再另写一份；minIndex 传 0，因为窗格顺序没有"主页标签恒排第一"那种
-  // 钳制（reorderTab 默认的 minIndex=1 是标签栏专属的业务规则）。
+  // 换算不再需要 dropInsertionIndex/reorderInsertIndex 那两步：targetPaneId 在数组里
+  // 的下标就是 moveArrayItem 该用的 toIndex——moveArrayItem 是"先移除源元素、再在
+  // toIndex 处插入"，源下标小于目标下标时移除会让目标位置整体前移一格，再插回 toIndex
+  // 这个（移除前的）原始下标，效果正是"源元素落在目标原来的位置、目标跟着让出来的
+  // 空隙顺次前移"；源下标大于目标下标时移除不影响 toIndex 之前的位置，插入同样落在
+  // 目标原来的下标上。两个方向算出来的都是"源元素最终停在目标窗格原来的下标"，与两
+  // 窗格时的"对调"、三窗格时的"顺次插入"两种描述完全吻合，不需要再手写一层换算。
   //
   // paneWidths 必须跟着同一次 moveArrayItem 操作一起挪——否则窗格换了位置、宽度却留在
   // 原下标，视觉上会错位；没有 paneWidths（理论上不会发生：能拖动窗格标题栏说明至少
@@ -466,26 +473,23 @@ export const useTabs = create<TabsState>((set, get) => ({
   // 窗格本身：它换了位置，但仍是焦点，不需要像 closePane 那样重新计算。
   //
   // 以下情况返回 false 且不产生新的 tabs 引用（与 moveArrayItem/movePanesToTab 拖到
-  // 自己标签时的既有惯例一致，真正的空操作不制造新对象）：标签不存在或非 term；源
-  // 窗格不属于该标签；换算出的目标下标与源下标相同——涵盖"拖到自己身上"（不论落在
-  // 自己的左半还是右半，dropInsertionIndex→reorderInsertIndex 两步换算后都会退回原
-  // 下标）与"落回原位"两种情况。
-  reorderPane: (tabId, paneId, target) => {
+  // 自己标签时的既有惯例一致，真正的空操作不制造新对象）：标签不存在或非 term；源/
+  // 目标窗格有一个不属于该标签；源窗格就是目标窗格本身（"拖到自己身上"，targetIdx
+  // 恒等于 srcIdx）。
+  reorderPane: (tabId, paneId, targetPaneId) => {
     const tab = get().tabs.find((t) => t.id === tabId)
     if (!tab || tab.kind !== 'term') return false
     const paneIds = tab.panes.map((p) => p.id)
     const srcIdx = paneIds.indexOf(paneId)
-    if (srcIdx === -1) return false
-    const rawIndex = dropInsertionIndex(paneIds, target)
-    const insertion = reorderInsertIndex(paneIds, paneId, rawIndex, 0)
-    if (insertion === srcIdx) return false
+    const targetIdx = paneIds.indexOf(targetPaneId)
+    if (srcIdx === -1 || targetIdx === -1 || srcIdx === targetIdx) return false
     set((s) => ({
       tabs: s.tabs.map((t) => {
         if (t.id !== tabId) return t
         return {
           ...t,
-          panes: moveArrayItem(t.panes, srcIdx, insertion),
-          paneWidths: t.paneWidths ? moveArrayItem(t.paneWidths, srcIdx, insertion) : t.paneWidths,
+          panes: moveArrayItem(t.panes, srcIdx, targetIdx),
+          paneWidths: t.paneWidths ? moveArrayItem(t.paneWidths, srcIdx, targetIdx) : t.paneWidths,
           activePaneId: paneId,
         }
       }),

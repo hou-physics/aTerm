@@ -6,6 +6,7 @@ import {
   pointInRect,
   resolveDropMode,
   resolveDropTarget,
+  resolveReorderTarget,
   resolveTabBarInsertIndex,
   type PaneSlotRect,
 } from './paneDrop'
@@ -47,6 +48,32 @@ describe('resolveDropTarget：光标位置命中哪个窗格的左/右半侧', (
   })
   it('没有任何窗格（例如当前标签是 home，无 panes）恒返回 null', () => {
     expect(resolveDropTarget([], 100, 50)).toBeNull()
+  })
+})
+
+// 同标签内窗格重排（TabPanes.tsx）专用的落点解析：整块命中，不分左右半侧——用户
+// 真机验收报告的根因（见 paneDrop.ts 顶部对应函数的注释）：resolveDropTarget 的半侧
+// 换算叠加 dropInsertionIndex/reorderInsertIndex 两步下标换算后，目标窗格的某一侧会
+// 恰好换算回源窗格原来的下标，变成"只有某个 critical 位置才能拖成功"。这里直接验证
+// 修复本身：命中同一个窗格的左边缘、正中、右边缘应该返回完全相同的结果。
+describe('resolveReorderTarget：同标签内窗格重排——整块命中，不分左右半侧', () => {
+  it('命中同一个窗格的左边缘、正中、右边缘，结果一致（不再有"半侧"这回事）', () => {
+    expect(resolveReorderTarget(THREE, 300, 50)).toBe('p1') // 左边缘（左闭）
+    expect(resolveReorderTarget(THREE, 449, 50)).toBe('p1') // 中点左侧
+    expect(resolveReorderTarget(THREE, 450, 50)).toBe('p1') // 恰好中点——resolveDropTarget 在这里会翻到 'right'
+    expect(resolveReorderTarget(THREE, 599, 50)).toBe('p1') // 右边缘前一像素（右开）
+  })
+  it('命中第一个/第三个窗格', () => {
+    expect(resolveReorderTarget(THREE, 100, 50)).toBe('p0')
+    expect(resolveReorderTarget(THREE, 700, 50)).toBe('p2')
+  })
+  it('光标不在任何窗格范围内（水平或垂直）返回 null', () => {
+    expect(resolveReorderTarget(THREE, -10, 50)).toBeNull()
+    expect(resolveReorderTarget(THREE, 900, 50)).toBeNull()
+    expect(resolveReorderTarget(THREE, 100, 100)).toBeNull() // 上闭下开，恰好等于 height 算行外
+  })
+  it('没有任何窗格时恒返回 null', () => {
+    expect(resolveReorderTarget([], 100, 50)).toBeNull()
   })
 })
 
@@ -115,6 +142,10 @@ describe('dropIndicatorPreviewRect：落点指示条按落点语义选择覆盖�
   it('fill：覆盖整个窗格，不切半，与 side 无关', () => {
     expect(dropIndicatorPreviewRect(rect, 'fill', 'left')).toEqual(rect)
     expect(dropIndicatorPreviewRect(rect, 'fill', 'right')).toEqual(rect)
+  })
+  it('reorder：同样覆盖整个窗格，不切半，与 side 无关（同标签内重排，见 resolveReorderTarget）', () => {
+    expect(dropIndicatorPreviewRect(rect, 'reorder', 'left')).toEqual(rect)
+    expect(dropIndicatorPreviewRect(rect, 'reorder', 'right')).toEqual(rect)
   })
   it('insert：与既有 dropIndicatorRect 一致，按 side 切半', () => {
     expect(dropIndicatorPreviewRect(rect, 'insert', 'left')).toEqual(dropIndicatorRect(rect, 'left'))

@@ -160,10 +160,17 @@ describe('TabPanes — 拖出窗格标题栏成为独立标签（设计文档 §
 // 用户描述的"交换位置"诉求（"我拖一个框到右边，然后它两个位置就都自动交换"）：同
 // 标签内拖动窗格标题栏，松手时光标仍落在源标签自己的窗格行内——上面那个 describe 块
 // 里"没有真的拖出去，不产生任何变化"这条用例此前验证的正是这条分支，但那条用例没有
-// mock 真实的窗格矩形（只 mock 了 row/tabbar），resolveDropTarget 因此恒解不出落点，
+// mock 真实的窗格矩形（只 mock 了 row/tabbar），resolveReorderTarget 因此恒解不出落点，
 // 落回"什么都不做"，与这里的新行为并不冲突。这里补上真实的窗格矩形，验证这条分支
 // 现在真的会调用 reorderPane；reorderPane 本身的换算逻辑（对调/顺次重排/no-op）已经
 // 在 tabs.test.ts 单独测过，这里只测接线——正确的分支被触发、参数正确。
+//
+// 用户真机验收报告的回归（见 .superpowers/sdd/reorder-and-toggle-fix-report.md）：
+// 上一轮把这条重排接线直接复用了给"跨标签插入新窗格"设计的 resolveDropTarget（半侧
+// 语义），导致①指示条被画成半个窗格的色块、②落点换算叠加两步下标运算后，目标窗格
+// 的某一侧会恰好换算回源窗格原来的下标——变成"只有拖到某个 critical 位置才能成功"。
+// 下面第一条用例直接对应这个报告：拖到目标窗格的左半、右半、正中，结果必须完全一致
+// ——这条曾经在改回 resolveDropTarget 时验证过会变红（见 report.md 的红/绿证据）。
 describe('TabPanes — 同标签内拖动窗格标题栏：按落点重排（用户描述的"交换位置"诉求）', () => {
   const TAB = {
     id: 'tab-a', kind: 'term' as const, title: '2 个对话',
@@ -177,30 +184,63 @@ describe('TabPanes — 同标签内拖动窗格标题栏：按落点重排（用
     p2: { left: 300, top: 40, width: 300, height: 300 },
   }
 
-  it('松手时光标落在源标签自己窗格行内的另一个窗格上：调用 reorderPane 重排，而不是拆成独立标签', async () => {
+  it.each([
+    ['左半', 310],
+    ['正中', 450],
+    ['右半', 590],
+  ])('落到目标窗格的%s（x=%d）：结果一致——都是对调，不是只有某个 critical 位置才成功', async (_label, x) => {
     useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
     await renderApp()
     mockRects(PANE_RECTS)
 
-    // 把 P1 拖到 P2 矩形 [300,600) 的右半侧（中点 450）
-    await drag(titlebarFor('P1'), { x: 100, y: 60 }, { x: 500, y: 60 })
+    // P2 矩形是 [300,600)——310/450/590 分别落在它的左半、正中（半侧语义下恰好是
+    // 曾经必须命中的那个 critical 分界点）、右半，三者应该产生完全相同的结果。
+    await drag(titlebarFor('P1'), { x: 100, y: 60 }, { x, y: 60 })
 
     expect(useTabs.getState().tabs).toHaveLength(2) // 没有拆出新标签（home + tab-a）
-    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
-    expect(t.panes.map((p) => p.id)).toEqual(['p2', 'p1']) // 对调
+    const t = useTabs.getState().tabs.find((x2) => x2.id === 'tab-a')!
+    expect(t.panes.map((p) => p.id)).toEqual(['p2', 'p1']) // 对调，三处结果一致
     expect(t.activePaneId).toBe('p1') // 被拖的窗格换了位置，但仍是焦点
   })
 
-  it('落在 P2 左半侧（P1 本就在 P2 左边）：换算后落回原位，no-op，顺序不变', async () => {
+  it('三个窗格：把第一个拖到第三个身上——顺序变成 2,3,1，paneWidths 跟随', async () => {
+    // 三个宽度互不相同，这样"跟随"这件事才是可观察的（等分宽度排列组合后无从区分）。
+    const THREE_TAB = {
+      id: 'tab-a', kind: 'term' as const, title: '3 个对话',
+      panes: [
+        { id: 'p1', ptyId: 'pty-1', title: 'P1' },
+        { id: 'p2', ptyId: 'pty-2', title: 'P2' },
+        { id: 'p3', ptyId: 'pty-3', title: 'P3' },
+      ],
+      activePaneId: 'p1',
+      paneWidths: [0.2, 0.3, 0.5],
+    }
+    useTabs.setState({ tabs: [HOME, THREE_TAB], activeId: 'tab-a' })
+    await renderApp()
+    mockRects({
+      'row:tab-a': { left: 0, top: 40, width: 900, height: 300 },
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      p1: { left: 0, top: 40, width: 300, height: 300 },
+      p2: { left: 300, top: 40, width: 300, height: 300 },
+      p3: { left: 600, top: 40, width: 300, height: 300 },
+    })
+
+    await drag(titlebarFor('P1'), { x: 100, y: 60 }, { x: 700, y: 60 }) // 落在 P3 矩形内
+
+    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
+    expect(t.panes.map((p) => p.id)).toEqual(['p2', 'p3', 'p1'])
+    expect(t.paneWidths).toEqual([0.3, 0.5, 0.2]) // 宽度跟着各自的窗格一起挪，不是留在原下标
+  })
+
+  it('拖到自己身上：no-op，tabs 引用不变', async () => {
     useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
     await renderApp()
     mockRects(PANE_RECTS)
+    const before = useTabs.getState().tabs
 
-    // P2 矩形 [300,600) 的左半侧（中点 450），落在 400
-    await drag(titlebarFor('P1'), { x: 100, y: 60 }, { x: 400, y: 60 })
+    await drag(titlebarFor('P1'), { x: 100, y: 60 }, { x: 200, y: 60 }) // 落回 P1 自己的矩形 [0,300)
 
-    const t = useTabs.getState().tabs.find((x) => x.id === 'tab-a')!
-    expect(t.panes.map((p) => p.id)).toEqual(['p1', 'p2']) // 未变
+    expect(useTabs.getState().tabs).toBe(before)
   })
 
   it('回归保护：拖出窗格行外（即便此刻已经有真实的窗格矩形可解析）仍然走既有的拆分逻辑，不是重排', async () => {
@@ -235,7 +275,11 @@ describe('TabPanes — 拖动窗格标题栏期间显示落点指示（同标签
     p2: { left: 300, top: 40, width: 300, height: 300 },
   }
 
-  it('悬停源标签自己窗格行内的另一个窗格：显示落点指示（半侧覆盖），松手后消失', async () => {
+  // 用户真机验收报告的另一半（见 .superpowers/sdd/reorder-and-toggle-fix-report.md）：
+  // 半侧色块正是用户描述的"它上面会显示两个操作提示"——同标签内重排没有"插在哪一侧"
+  // 这个概念，指示条必须覆盖整个目标窗格。不管悬停在 p2 的哪个 x 坐标（这里用右半侧
+  // 的 500 只是随手取一个点，覆盖范围与具体 x 无关），指示条都应该是 p2 的完整矩形。
+  it('悬停源标签自己窗格行内的另一个窗格：显示落点指示（覆盖整个窗格），松手后消失', async () => {
     useTabs.setState({ tabs: [HOME, TAB], activeId: 'tab-a' })
     await renderApp()
     mockRects(PANE_RECTS)
@@ -243,14 +287,14 @@ describe('TabPanes — 拖动窗格标题栏期间显示落点指示（同标签
 
     await act(async () => {
       fireEvent.pointerDown(titlebar, { clientX: 100, clientY: 60, pointerId: 1 })
-      fireEvent.pointerMove(titlebar, { clientX: 500, clientY: 60, pointerId: 1 }) // 落在 p2 右半侧
+      fireEvent.pointerMove(titlebar, { clientX: 500, clientY: 60, pointerId: 1 }) // 落在 p2 范围内（右半侧，但重排不分半侧）
     })
 
     const indicator = document.querySelector('.pane-drop-indicator') as HTMLElement
     expect(indicator).toBeTruthy()
     expect(indicator.classList.contains('pane-drop-indicator-refused')).toBe(false)
-    expect(indicator.style.left).toBe('450px') // p2 [300,600) 右半侧起点
-    expect(indicator.style.width).toBe('150px') // 半侧宽度
+    expect(indicator.style.left).toBe('300px') // p2 [300,600) 整个窗格的起点，不是半侧的 450px
+    expect(indicator.style.width).toBe('300px') // 整格宽度，不是半侧的 150px
 
     await act(async () => {
       fireEvent.pointerUp(titlebar, { clientX: 500, clientY: 60, pointerId: 1 })

@@ -9,7 +9,7 @@ import {
   type RefObject,
 } from 'react'
 import { attachDragSafetyNet } from '../dragSafetyNet'
-import { DRAG_THRESHOLD_PX, pointInRect, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
+import { DRAG_THRESHOLD_PX, pointInRect, resolveReorderTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getPaneRowRect, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
 import { clampDividerDrag, equalPaneWidths, usablePaneAreaWidth } from '../paneLayout'
 import { useDnd } from '../store/dnd'
@@ -148,15 +148,20 @@ function PaneTitleBar({
       } else {
         useDnd.getState().setTabBarIndex(null)
         // 光标还在窗格区：实时解出同标签内的落点（用户描述的"交换位置"诉求，见
-        // store/tabs.ts 的 reorderPane），驱动 DropIndicator.tsx 显示半侧覆盖的指示——
-        // 与 TabBar.tsx/Sidebar.tsx 跨标签拖放共用同一套 target/dropMode 机制。这里
-        // 恒用 'insert' 语义（半侧覆盖），不像跨标签拖放那样区分 'fill'：目标窗格是否
-        // 已有 ptyId 与这次操作无关——不管落在哪个窗格上，做的都是"把被拖的窗格插到它
-        // 旁边"，不是"用被拖的内容取代目标窗格"。解析不到落点（光标已经不在任何窗格
-        // 范围内，例如正飞向窗格区之外）时二者都清空，与上面标签栏分支同一处理。
-        const paneTarget = resolveDropTarget(getPaneSlotRects(tab), e.clientX, e.clientY)
-        useDnd.getState().setTarget(paneTarget)
-        useDnd.getState().setDropMode(paneTarget ? 'insert' : null)
+        // store/tabs.ts 的 reorderPane），驱动 DropIndicator.tsx 显示整格覆盖的指示——
+        // 与 TabBar.tsx/Sidebar.tsx 跨标签拖放共用同一套 target/dropMode 机制，但落点
+        // 解析用的是 resolveReorderTarget（整块命中，不带 side），不是 resolveDropTarget
+        // ——同标签内重排没有"插在目标窗格左边还是右边"这回事，目标窗格本身就是唯一的
+        // 落点（用户真机验收报告的根因，见 paneDrop.ts 里 resolveReorderTarget 的注释）。
+        // dropMode 恒用 'reorder'（整格覆盖），不像跨标签拖放那样区分 'insert'/'fill'：
+        // 目标窗格是否已有 ptyId 与这次操作无关，不管落在哪个窗格上做的都是"把被拖的
+        // 窗格换到这个位置"。DropTarget 要求 side 字段，这里随手填一个占位值——
+        // dropIndicatorPreviewRect 在 'reorder' 模式下不读它，见该函数注释。解析不到
+        // 落点（光标已经不在任何窗格范围内，例如正飞向窗格区之外）时二者都清空，与
+        // 上面标签栏分支同一处理。
+        const targetPaneId = resolveReorderTarget(getPaneSlotRects(tab), e.clientX, e.clientY)
+        useDnd.getState().setTarget(targetPaneId ? { paneId: targetPaneId, side: 'left' } : null)
+        useDnd.getState().setDropMode(targetPaneId ? 'reorder' : null)
       }
     },
     [tab, pane.title],
@@ -184,10 +189,11 @@ function PaneTitleBar({
         // 状态），这里必须重新解析一次落点，不能指望读 store——同 detach 分支读
         // tabBarIndex 得在 endDrag() 之前提前取出是同一个理由，只是这里的落点状态在
         // 拖拽过程中每次 pointermove 都会变，没有"提前取出"这个选项，只能重新算一遍。
+        // 用 resolveReorderTarget（整块命中，不带 side），理由同上方 onPointerMove。
         // 解析不到落点（理论上不会：这个分支已经确认光标落在行内，行内必然落在某个
         // 窗格矩形里）时维持原来的"什么都不做"。
-        const target = resolveDropTarget(getPaneSlotRects(tab), e.clientX, e.clientY)
-        if (target) useTabs.getState().reorderPane(tab.id, pane.id, target)
+        const targetPaneId = resolveReorderTarget(getPaneSlotRects(tab), e.clientX, e.clientY)
+        if (targetPaneId) useTabs.getState().reorderPane(tab.id, pane.id, targetPaneId)
         return
       }
       detach(tabBarIndex ?? undefined)
