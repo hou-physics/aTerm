@@ -41,6 +41,42 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+
+    // ============================================================================
+    // [ime] 临时诊断仪表 —— 定位「中文输入法首个 ？/（ 需按两次才出字」问题，取证专用。
+    // 不是修复代码。会在每次按键/合成事件时打印控制台日志，带性能开销与噪音。
+    // TODO(ime-probe): 根因定位后必须整段删除（含下方 cleanup 里对应的注销代码）。
+    // ============================================================================
+    const imeLog = (line: string) => { console.log(`[ime] t=${performance.now().toFixed(1)} ${line}`) }
+    const onImeWinKeyDown = (e: KeyboardEvent) => {
+      imeLog(`win-keydown key=${JSON.stringify(e.key)} code=${e.keyCode} composing=${e.isComposing} prevented=${e.defaultPrevented}`)
+    }
+    window.addEventListener('keydown', onImeWinKeyDown, true)
+    const imeTextarea = el.querySelector('textarea')
+    const onImeTaKeyDown = (e: KeyboardEvent) => {
+      imeLog(`ta-keydown  key=${JSON.stringify(e.key)} code=${e.keyCode} composing=${e.isComposing} prevented=${e.defaultPrevented}`)
+    }
+    const onImeCompStart = (e: CompositionEvent) => { imeLog(`compositionstart data=${JSON.stringify(e.data)}`) }
+    const onImeCompUpdate = (e: CompositionEvent) => { imeLog(`compositionupdate data=${JSON.stringify(e.data)}`) }
+    const onImeCompEnd = (e: CompositionEvent) => { imeLog(`compositionend data=${JSON.stringify(e.data)}`) }
+    const onImeInput = (e: Event) => {
+      const ie = e as InputEvent
+      imeLog(`ta-input inputType=${JSON.stringify(ie.inputType)} data=${JSON.stringify(ie.data)} value=${JSON.stringify(imeTextarea?.value)}`)
+    }
+    if (imeTextarea) {
+      imeTextarea.addEventListener('keydown', onImeTaKeyDown, true)
+      imeTextarea.addEventListener('compositionstart', onImeCompStart)
+      imeTextarea.addEventListener('compositionupdate', onImeCompUpdate)
+      imeTextarea.addEventListener('compositionend', onImeCompEnd)
+      imeTextarea.addEventListener('input', onImeInput)
+    } else {
+      console.log('[ime] textarea 未找到')
+    }
+    const imeOnDataDisposable = term.onData((d) => { imeLog(`onData ${JSON.stringify(d)}`) })
+    // ============================================================================
+    // [ime] 仪表安装结束（cleanup 见本 effect 末尾的注销代码，同样标了 [ime]）
+    // ============================================================================
+
     el.classList.toggle('alt-screen', term.buffer.active.type === 'alternate')
     try {
       const webgl = new WebglAddon()
@@ -150,6 +186,16 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       if (resizeFrame) cancelAnimationFrame(resizeFrame)
       if (fontSizeFrame) cancelAnimationFrame(fontSizeFrame)
       window.removeEventListener('keydown', onDiagKeyDown)
+      // [ime] 临时诊断仪表注销 —— 与上方安装处成对，定位完成后随整段一起删除。
+      window.removeEventListener('keydown', onImeWinKeyDown, true)
+      if (imeTextarea) {
+        imeTextarea.removeEventListener('keydown', onImeTaKeyDown, true)
+        imeTextarea.removeEventListener('compositionstart', onImeCompStart)
+        imeTextarea.removeEventListener('compositionupdate', onImeCompUpdate)
+        imeTextarea.removeEventListener('compositionend', onImeCompEnd)
+        imeTextarea.removeEventListener('input', onImeInput)
+      }
+      imeOnDataDisposable.dispose()
       bufferChangeDisposable.dispose()
       ro.disconnect(); detach(); unsubTheme(); unsubFontSize(); unregisterPaste(); term.dispose()
     }
