@@ -81,12 +81,44 @@ describe('findIdentifierOccurrences', () => {
     expect(occ).toHaveLength(1)
     expect(occ[0]).toEqual({ file: 'a.ts', line: 1, text: 'win.setSize(1, 2)' })
   })
-  it('静态 import 与动态 import 两种写法都能命中，因为两者都会留下标识符本身', () => {
-    const files = {
-      static_: "import { setSize } from '@tauri-apps/api/window'",
-      dynamic: "const { setSize } = await import('@tauri-apps/api/window')",
+
+  it('只匹配"调用形态"（标识符后紧跟左括号），不匹配对象字面量的键', () => {
+    const files = { 'a.ts': "const handlers = { close: () => {} }" }
+    expect(findIdentifierOccurrences('close', files)).toHaveLength(0)
+  })
+
+  it('不匹配 JSX/HTML 属性名或普通变量名（标识符后面不是左括号）', () => {
+    const files = { 'a.tsx': '<span title={title}>{title}</span>\nconst theme = pick()' }
+    expect(findIdentifierOccurrences('title', files)).toHaveLength(0)
+    expect(findIdentifierOccurrences('theme', files)).toHaveLength(0)
+  })
+
+  it('解构之后完全没有前缀的裸调用必须命中——这是本次收紧要保住的场景', () => {
+    // 对应 src/store/layout.ts 的真实写法：
+    //   const { currentMonitor } = await import('@tauri-apps/api/window')
+    //   const monitor = await currentMonitor()
+    // 前面没有任何点号或接收者，匹配不能要求任何前缀字符。
+    const files = { 'layout.ts': 'const monitor = await currentMonitor()' }
+    expect(findIdentifierOccurrences('currentMonitor', files)).toHaveLength(1)
+  })
+
+  it('带接收者的调用（win.xxx(...) 这类写法）也要命中', () => {
+    const files = { 'layout.ts': 'await win.setSize(new PhysicalSize(w, h))' }
+    expect(findIdentifierOccurrences('setSize', files)).toHaveLength(1)
+  })
+
+  it('标识符与左括号之间隔着单层泛型实参也要命中——对应 listen<T>(...)/create<T>(...) 这类真实写法', () => {
+    const files = { 'a.ts': "await listen<{ id: string; data: string }>('pty-output', cb)" }
+    expect(findIdentifierOccurrences('listen', files)).toHaveLength(1)
+  })
+
+  it('静态 import 与动态 import 两种写法都能命中，因为两者最终都会留下一次调用', () => {
+    const staticStyle = { 'a.ts': "import { setSize } from '@tauri-apps/api/window'\nwin.setSize(1, 2)" }
+    const dynamicStyle = {
+      'b.ts': "const { currentMonitor } = await import('@tauri-apps/api/window')\nawait currentMonitor()",
     }
-    expect(findIdentifierOccurrences('setSize', files)).toHaveLength(2)
+    expect(findIdentifierOccurrences('setSize', staticStyle)).toHaveLength(1)
+    expect(findIdentifierOccurrences('currentMonitor', dynamicStyle)).toHaveLength(1)
   })
 })
 

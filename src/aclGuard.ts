@@ -112,16 +112,37 @@ export interface IdentifierOccurrence {
   text: string
 }
 
-/** 在一批源码文件里按"整词"搜一个标识符——不会把它当成更长标识符的子串来匹配
- *  （'setSize' 不会命中 'windowSetSize' 里的那段），但没法区分调用对象是不是真的
- *  Tauri 句柄（'obj.setSize()' 与 'win.setSize()' 在纯文本层面看起来一样）——这正是
- *  需要豁免表兜底误报的原因。天然覆盖静态 import 与动态 import 两种写法，因为两者
- *  最终都会在源码文本里留下这个标识符本身。 */
+/** 在一批源码文件里搜"看起来像一次调用"的标识符出现——`camelName` 后面（可以隔零个
+ *  或多个空白）紧跟一个左括号：既覆盖带接收者的调用（`win.` 加标识符加括号那种写法），
+ *  也覆盖解构之后完全没有前缀的裸调用（直接就是标识符加括号）。
+ *
+ *  第一版曾经是纯粹的整词匹配（不看标识符后面跟了什么），结果短标识符（豁免表里那些
+ *  例子）把 CSS 类名字符串、对象字面量的键、JSX 属性名、普通变量名全部当成命中，只能
+ *  整表豁免——而豁免是按标识符文本生效的，一旦豁免了某个标识符，之后就算真的出现同名
+ *  的真实调用，闸门也会一并放过，等于对最容易在多窗口场景（V3.2 会大量用到窗口的
+ *  创建/关闭/显隐/居中这批命令）踩雷的那批命令失效。收紧成"调用形态"之后，对象字面量
+ *  的键（标识符后面是冒号）、JSX/HTML 属性（标识符后面是等号）、普通变量名（标识符
+ *  后面既不是空白+左括号也不是泛型+左括号）都不再匹配，同时仍然覆盖真实调用。
+ *
+ *  必须保住的一个具体场景：`src/store/layout.ts` 里
+ *  `const { getCurrentWindow, currentMonitor, ... } = await import(...)` 解构之后，
+ *  紧接着 `await` 加该标识符加一对空括号，前面完全没有点号前缀——所以这里的匹配没有
+ *  要求任何前缀字符，只要求"标识符本身 + 左括号"这个形态出现。
+ *
+ *  仍然没法区分调用接收者是不是真的 Tauri 句柄——一个无关对象上同名方法的调用，在纯
+ *  文本层面和真实的 Tauri 调用长得一样，这是文本匹配天然的局限，剩下的豁免表条目就是
+ *  为了兜底这一类。天然覆盖静态 import 与动态 import 两种写法，因为两者最终都会在
+ *  源码文本里留下"标识符 + 左括号"这个调用形态本身。 */
 export function findIdentifierOccurrences(
   camelName: string,
   files: Record<string, string>,
 ): IdentifierOccurrence[] {
-  const re = new RegExp(`\\b${camelName}\\b`)
+  // 标识符和左括号之间允许隔一段单层泛型实参（`listen<{ id: string }>(...)`、
+  // `create<DndState>(...)` 这类在本仓库真实出现的写法）——不接受这一层会把这些调用
+  // 判定成"没有紧跟左括号"而漏掉，属于漏报，比多留几条豁免危险得多。只处理单层
+  // （`[^<>]*` 不递归），嵌套泛型（`Array<Foo<Bar>>` 这种）匹配不到，是本方案剩下的
+  // 已知盲区之一，见报告"盲区"一节。
+  const re = new RegExp(`\\b${camelName}(?:\\s*<[^<>]*>)?\\s*\\(`)
   const occurrences: IdentifierOccurrence[] = []
   for (const [file, content] of Object.entries(files)) {
     const lines = content.split('\n')
@@ -149,7 +170,7 @@ export interface CheckAclCoverageParams {
 }
 
 /** 主检查：对 manifest 里每一条 core:<mod>:allow-<cmd>——
- *    生产代码里出现了它的 camelCase 标识符
+ *    生产代码里出现了它的 camelCase 标识符的调用形态（标识符后紧跟左括号）
  *    且它不在豁免表里
  *    且它没有被 capabilities 展开后的有效权限集合覆盖
  *  ——判定为一条违规。 */

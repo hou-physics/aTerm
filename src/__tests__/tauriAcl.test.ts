@@ -62,41 +62,32 @@ function collectProductionFiles(dir: string, out: Record<string, string> = {}): 
 }
 
 // 豁免表：每一条都是先跑出真实误报、逐条读代码核对过之后才加的，理由见报告
-// tauri-acl-guard-report.md 的第 1 节（含"为什么不是真漏权限"的判断依据）。
+// tauri-acl-guard-report.md 的第 1 节（含"收紧前 → 收紧后"的对比表）。
 //
-// 豁免的代价、也是这道闸门的已知盲区：豁免按"标识符文本"生效，不看调用对象——如果
-// 将来真的有人写出一个货真价实的 win.close()/win.show() 调用，这张表会连它也一起
-// 放过。缩小这个盲区需要解析调用表达式而不是搜标识符文本，但那正是我们放弃的方案
-// （见 aclGuard.ts 顶部注释：调用表达式形态太多，正则必然漏，而这正是当初真出过事的
-// 动态 import 那条路径）。
+// v2：匹配从"标识符整词出现"收紧成"标识符 + 左括号"（看起来像一次调用）之后，
+// 原来 20 个标识符（23 条 identifier 检查项）的豁免表缩到了下面这 9 条——
+// `close`/`new`/`emit`/`insert`/`items`/`name`/`size`/`text`/`theme`/`title`/
+// `version` 不再需要豁免，因为它们原来的命中全是对象字面量的键、JSX/HTML 属性、
+// 普通变量名，收紧之后自然不再匹配（不需要靠豁免表人工排除）。
+//
+// 剩下这 9 条豁免的代价、也是这道闸门现在的已知盲区：豁免按"标识符 + 调用形态"生效，
+// 不看调用接收者——如果将来真的有人在某个 Tauri 句柄上调用同名方法（比如真的需要
+// `Menu.get(...)`），这张表会把它也一起放过。缩小这个盲区需要解析调用表达式的接收者
+// 类型而不是搜文本，那需要接入 TS 的类型检查器，成本远超这道闸门的定位（vitest 里跑的
+// 快速仓库自洽性检查）——见 aclGuard.ts 顶部与 findIdentifierOccurrences 的注释。
 const EXEMPTIONS: Record<string, string> = {
   'core:path:allow-basename':
     'src/time.ts 自己的 basename() 字符串工具函数（从相对路径 ./time 导入），与 @tauri-apps/api/path 无关。',
-  'core:window:allow-close':
-    "命中全是 CSS 类名/局部标识符（'.tab-close'、closeTab()、onClose 等），代码里没有 win.close() 调用。",
-  'core:resources:allow-close':
-    "'close' 的另一个来源模块（core:resources），命中同一批字符串，理由同上。",
-  'core:window:allow-create': "命中的是 zustand 的 create()（import { create } from 'zustand'），与窗口创建无关。",
-  'core:event:allow-emit': '命中全在中文注释里，描述的是 Rust 后端会 emit 事件；前端代码没有调用 emit()。',
-  'core:menu:allow-get': '命中全是 Map.get()/zustand get() 状态访问器，与 Menu.get() 无关。',
-  'core:menu:allow-insert': "命中的是 DropMode 联合类型里的字符串字面量 'insert'，不是菜单命令。",
-  'core:menu:allow-items': '命中的是 ContextMenu/sessionList 里字段名叫 items 的 props，不是菜单命令。',
-  'core:path:allow-join': 'Array.prototype.join()/字符串 join() 的调用，与 @tauri-apps/api/path 的 join 无关。',
-  'core:app:allow-name': "命中的是 DOM className='name'、library.rename() 的形参 name 等，不是 app 名称命令。",
-  'core:image:allow-new':
-    'JS 关键字 new（new Uint8Array/new Set/new PhysicalSize 等）——image/menu/tray 三个模块的 allow-new 共享同一个 camelCase 名字 "new"，全部同源误报。',
-  'core:menu:allow-new': '同上，同一批 new 关键字命中。',
-  'core:tray:allow-new': '同上，同一批 new 关键字命中。',
-  'core:menu:allow-remove': '命中的是 DOM classList.remove()，不是菜单命令。',
+  'core:window:allow-create':
+    "命中的是 zustand 的 create<State>(...)（import { create } from 'zustand'），与窗口创建无关；" +
+    '此前用整词匹配漏掉了这条泛型写法的调用形态，收紧后反而重新命中——保留豁免。',
+  'core:menu:allow-get': '命中全是 Map.get(...)/zustand get() 状态访问器（含 store 内部到处调用的 get()），与 Menu.get() 无关。',
+  'core:path:allow-join': 'Array.prototype.join(...)/字符串 join(...) 的调用，与 @tauri-apps/api/path 的 join 无关。',
+  'core:menu:allow-remove': '命中的是 DOM classList.remove(...)，不是菜单命令。',
   'core:path:allow-resolve': '命中的是 Promise.resolve()，与 @tauri-apps/api/path 的 resolve 无关。',
-  'core:image:allow-rgba': "命中的是模板字符串里拼 CSS 颜色用的字面量 'rgba('，不是 Image.rgba() 调用。",
-  'core:tray:allow-set-menu': 'React 的 setMenu 状态 setter（useState 生成的），不是托盘命令。',
-  'core:window:allow-show': '命中的是 store/hint.ts 自己的提示气泡 show() 方法，不是窗口的 show()。',
-  'core:image:allow-size': '命中的是保存 win.outerSize() 结果的局部变量 size，不是对 Image.size() 的调用。',
-  'core:menu:allow-text': '命中的都是无关字段/CSS 变量（Turn.text、--color-*-text 等），不是菜单命令。',
-  'core:window:allow-theme': '命中的是本仓库自己的换肤系统（store/theme.ts、ThemeSwitcher 等），不是窗口的 theme()。',
-  'core:window:allow-title': '命中的是标签页/会话标题、原生 title 提示属性等一大批无关字段，不是窗口标题命令。',
-  'core:app:allow-version': '命中的是 status store 自己的 version 字段与 modelNames.ts 的局部变量，不是 app 版本命令。',
+  'core:image:allow-rgba': "命中的是模板字符串里拼 CSS 颜色用的字面量 'rgba(...)'，不是对 Image.rgba() 的调用。",
+  'core:tray:allow-set-menu': 'React 的 setMenu(...) 状态 setter（useState 生成的），不是托盘命令。',
+  'core:window:allow-show': '命中的是 store/hint.ts 自己的提示气泡 show(...) 方法，不是窗口的 show()。',
 }
 
 describe('Tauri ACL 覆盖闸门', () => {
