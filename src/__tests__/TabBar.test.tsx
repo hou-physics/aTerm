@@ -1277,20 +1277,33 @@ describe('TabBar — 回归（Fix 1）：安全网的 pointerup 触发不应抢�
     })
     expect(useDnd.getState().target).not.toBeNull()
 
-    // 第一步：只让安全网的 window 级监听器单独处理这次 pointerup，中间只 flush 微任务
-    // ——旧的 queueMicrotask 写法会在这一步就抢跑，同步把 dragRef 清空。
+    // 两个阶段必须挤在同一个 act() 回调里，不能像本文件历史版本那样各自套一层独立
+    // await act(...)（调查记录：.superpowers/sdd/tabbar-flaky-report.md）。真实浏览器里
+    // 一次原生 pointerup 的捕获→目标→冒泡三个阶段是在同一个同步任务内跑完的，中间只有
+    // HTML 规范要求的一次 microtask checkpoint，没有任何宏任务边界——这正是 dragSafetyNet.ts
+    // 顶部那段"为什么必须用 setTimeout(fn,0) 而不是 queueMicrotask"注释所依据的心智模型：
+    // 安全网在捕获阶段排入的 setTimeout(0) 根本没有机会插进目标/冒泡阶段之前。而 React 19
+    // 的 act()——见 node_modules/react/cjs/react.development.js 的 enqueueTask——在
+    // Node/CJS 环境下是用真正的 setImmediate（另一个宏任务）来结束一次
+    // `await act(async () => …)` 的，不只是等回调里的微任务链跑完。若把下面这两步拆成
+    // 两个各自 await 的 act() 调用，就等于在"模拟的捕获阶段"和"模拟的目标/冒泡阶段"之间
+    // 人为插入了一个真实浏览器里不存在的宏任务边界——safetyNet 的 setTimeout(0) 与 act()
+    // 自己的 setImmediate 从此在这个人为边界里赛跑，谁先触发不确定（Node 官方文档原话：
+    // 两者都从主模块同步代码里调用时，先后顺序不确定，受进程当时的实际性能影响）。全量
+    // 并行下的 CPU 争用会把这个不确定性放大成约 8~12% 的低频失败：安全网的计时器偶尔会
+    // 抢先于 act() 的 setImmediate 触发，在真正的 fireEvent.pointerUp(b, …) 还没跑之前
+    // 就把 dragRef 清空。合并成一个 act()、只用一次 await Promise.resolve() 让出微任务
+    // （不进入宏任务队列，setTimeout(0) 没有机会被处理）不仅消除了这场竞态，也更忠实于
+    // 真实浏览器"同一任务内完成派发"的行为——拆成两次 act() 才是那个不存在于现实里的
+    // 任务边界。这个坑值得钉住：不要为了"看起来更像分步骤"又把它拆开。
     await act(async () => {
       window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, cancelable: true }))
-      await Promise.resolve()
-    })
-
-    // 第二步：组件自己冒泡阶段的处理器现在才跑——修复前，上一步已经把 dragRef 清空，
-    // 这里会因为 `!drag || !drag.dragging` 直接 early-return，drop 根本不会发生。
-    await act(async () => {
+      await Promise.resolve() // 只让出一次微任务——safetyNet 的 setTimeout(0) 进不来
       fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 })
     })
-    // flush 一次宏任务：即便安全网还留有尚未触发的 setTimeout（例如上一步已经通过组件
-    // 自己的 endDrag() 摘掉了监听器/取消了计时器），这里确保不会有任何迟到的副作用。
+    // flush 一次宏任务：即便安全网还留有尚未触发的 setTimeout（正常路径下，上一步已经
+    // 通过组件自己的 endDrag() 摘掉了监听器/取消了计时器），这里确保不会有任何迟到的
+    // 副作用。
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0))
     })
