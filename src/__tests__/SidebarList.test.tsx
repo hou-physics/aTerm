@@ -16,23 +16,13 @@ vi.mock('../store/status', () => ({
   useStatusStore: (selector: (s: { statuses: Map<string, unknown> }) => unknown) => selector({ statuses: new Map() }),
   threadStatusKey: (dirName: string, rootKey: string) => `${dirName}::${rootKey}`,
 }))
-// 这个 mock 的形状必须与 App.test.tsx 里那份逐字一致——Sidebar 会渲染 <HooksControl/>，
-// 它同时 import 了 hooksPhase 与 useHooksInstall，而 store 模块在加载时还会发起一次
-// hooksStatus() 的 IPC（`hooksInstallReady`）。三个导出缺任何一个都会在 import 期就抛错，
-// 表现为"整个测试文件跑不起来"，而不是某条断言失败。
-vi.mock('../store/hooksInstall', () => ({
-  hooksInstallReady: Promise.resolve(),
-  hooksPhase: () => null,
-  useHooksInstall: Object.assign(() => null, {
-    getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }),
-  }),
-}))
 
 import * as ipc from '../ipc'
 import { Sidebar } from '../components/Sidebar'
 import { useLibrary } from '../store/library'
 import { blockKey } from '../store/overview'
 import { useSessions } from '../store/sessions'
+import { useSettings } from '../store/settings'
 import { useTabs } from '../store/tabs'
 import { makeThread } from './factories'
 
@@ -180,5 +170,26 @@ describe('侧栏空态（终审必修 3a）', () => {
     render(<Sidebar />)
     expect(screen.queryByText(/尚未发现 Claude Code 会话/)).toBeNull()
     expect(screen.queryByText(/已从列表移除全部会话/)).toBeNull()
+  })
+})
+
+// Task 5：侧栏底部清空——主题选择器（ThemeSwitcher.tsx）与 hooks 手动入口
+// （HooksInstall.tsx 的 HooksControl）都已复制进新的设置浮层（Task 3/4：
+// AppearanceSection.tsx / HooksSection.tsx），旧的两个组件在这里应当彻底不再渲染，
+// 换成一个打开设置浮层的齿轮按钮。
+describe('Sidebar — 底部清空为设置按钮（Task 5）', () => {
+  it('侧栏不再渲染主题选择器与 hooks 控件', () => {
+    seed(1)
+    render(<Sidebar />)
+    expect(screen.queryByText('Hooks：')).toBeNull()
+    expect(document.querySelector('.theme-switcher')).toBeNull()
+  })
+
+  it('侧栏底部有设置按钮，点击后打开设置浮层', () => {
+    useSettings.setState({ open: false })
+    seed(1)
+    render(<Sidebar />)
+    fireEvent.click(screen.getByRole('button', { name: '设置' }))
+    expect(useSettings.getState().open).toBe(true)
   })
 })

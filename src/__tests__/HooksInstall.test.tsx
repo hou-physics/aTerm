@@ -150,68 +150,16 @@ describe('HooksPromptBar — 只在未安装/已过期时出现（spec §6）', 
   })
 })
 
-describe('HooksControl — 设置区常驻手动入口（不受提示条是否被关闭影响）', () => {
-  it('未安装：显示「未安装」与「安装」按钮', async () => {
-    hooksStatusMock.mockResolvedValueOnce(NOT_INSTALLED)
-    const { HooksControl } = await freshComponents()
-
-    render(<HooksControl />)
-
-    expect(screen.getByText(/未安装/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: '安装' })).toBeTruthy()
-  })
-
-  it('已安装但过期：显示「待更新」与「更新」按钮', async () => {
-    hooksStatusMock.mockResolvedValueOnce(OUTDATED)
-    const { HooksControl } = await freshComponents()
-
-    render(<HooksControl />)
-
-    expect(screen.getByText(/待更新/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: '更新' })).toBeTruthy()
-  })
-
-  it('已安装且最新：显示「已安装」与「卸载」按钮', async () => {
-    hooksStatusMock.mockResolvedValueOnce(UP_TO_DATE)
-    const { HooksControl } = await freshComponents()
-
-    render(<HooksControl />)
-
-    expect(screen.getByText(/已安装/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: '卸载' })).toBeTruthy()
-  })
-
-  it('点击「卸载」调用 uninstall_hooks()，随后状态按最新结果刷新', async () => {
-    hooksStatusMock.mockResolvedValueOnce(UP_TO_DATE).mockResolvedValueOnce(NOT_INSTALLED)
-    uninstallHooksMock.mockResolvedValueOnce({ backupPath: '/tmp/backup.bak', removed: true })
-    const { HooksControl } = await freshComponents()
-    render(<HooksControl />)
-
-    fireEvent.click(screen.getByRole('button', { name: '卸载' }))
-
-    await waitFor(() => {
-      expect(uninstallHooksMock).toHaveBeenCalledTimes(1)
-    })
-    await waitFor(() => {
-      expect(screen.getByText(/未安装/)).toBeTruthy()
-      expect(screen.getByRole('button', { name: '安装' })).toBeTruthy()
-    })
-  })
-
-  it('提示条被关闭之后（dismissed 持久化为真），设置区入口依旧提供「安装」——不被永久拿走', async () => {
-    mockLocalStorage({ 'aterm-hooks-prompt-dismissed': '1' })
-    hooksStatusMock.mockResolvedValueOnce(NOT_INSTALLED)
-    const { HooksPromptBar, HooksControl } = await freshComponents()
-
-    render(
-      <>
-        <HooksPromptBar />
-        <HooksControl />
-      </>,
-    )
-
-    expect(screen.queryByLabelText('关闭提示')).toBeNull() // 提示条因已被关闭而不渲染
-    expect(screen.getByText(/未安装/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: '安装' })).toBeTruthy() // 但设置区入口仍在
-  })
-})
+// HooksControl（设置区常驻手动入口）连同它这一整块测试已在 Task 5 删除：组件迁到
+// settings/HooksSection.tsx（整体复制，行为/文案/状态标签逐字不变），三条「状态
+// 展示」用例已经在 SettingsSections.test.tsx 的 HooksSection 描述块里有逐字等价的
+// 覆盖（Task 4 就已经加上，与本文件删掉的三条只是渲染对象从 HooksControl 换成
+// HooksSection）；「点击『卸载』调用 uninstall_hooks()」这条评审点名要求先迁移、
+// 确认非恒真后才允许删除本处旧版——已迁入 SettingsSections.test.tsx 的 HooksSection
+// 描述块，验证过程见 task-5-report.md。「提示条关闭后设置区入口仍可用」那条组合
+// 用例没有迁移：它验证的是 HooksControl 不读 dismissed 字段，而 HooksSection 从
+// HooksControl 整体复制而来，同样从未读取 dismissed（可查 settings/HooksSection.tsx
+// 全文——没有任何地方出现这个标识符），这一点不是运行时行为、是组件从不消费该字段
+// 这一结构性事实，不需要单独用例断言；HooksPromptBar 与 HooksSection 现在也不再
+// 出现在同一处 DOM 里（前者在 HomePage.tsx，后者在 SettingsPanel.tsx），组合渲染
+// 两者本身也不再反映真实使用场景。

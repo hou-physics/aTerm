@@ -349,30 +349,6 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   to { transform: rotate(360deg); }
 }
 
-/* hooks 安装器设置区手动入口（spec §6）：与 .theme-switcher 同一处"底部设置角"，
-   同一套 margin-top/padding-top/border-top 分隔条写法，视觉上两者依次堆叠、观感统一。 */
-.hooks-control {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--color-border);
-}
-.hooks-control-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--color-text-dim); }
-.hooks-control-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hooks-control-action {
-  flex: none;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border);
-  background: var(--color-elevated);
-  color: var(--color-text-dim);
-  font-family: inherit;
-  font-size: 11.5px;
-  cursor: default;
-}
-.hooks-control-action:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
-.hooks-control-action:disabled { opacity: .6; }
-.hooks-control-error { margin-top: 6px; font-size: 11px; color: var(--color-text); word-break: break-word; }
-
 /* hooks 安装提示条（spec §6）：主页顶部，边框而非阴影的既有扁平风格，与 .card 同一基调。
    flex-wrap 让失败时的错误信息独占一行，不挤压说明文字/按钮。 */
 .hooks-prompt {
@@ -418,53 +394,30 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .hooks-prompt-dismiss:hover { border-color: var(--color-accent); color: var(--color-text); }
 .hooks-prompt-error { flex: 0 0 100%; font-size: 11.5px; color: var(--color-text); }
 
-.theme-switcher {
-  position: relative;
+/* Task 5：侧栏底部清空后的唯一常驻控件——齿轮按钮，点击打开设置浮层
+   （SettingsPanel.tsx）。取代此前依次堆叠在这里的 .hooks-control/.theme-switcher，
+   沿用同一套 margin-top/padding-top/border-top 分隔条写法；图标是字符（⚙），不是
+   内联 SVG，与 TabBar.tsx 的 ›/‹/＋/☰、SettingsPanel.tsx 的 × 同一惯例。 */
+.sidebar-settings-button {
+  flex: none;
+  align-self: flex-start;
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--color-border);
-}
-.theme-switcher-trigger {
-  width: 100%;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border);
-  background: var(--color-elevated);
+  justify-content: center;
+  border: none;
+  background: transparent;
   color: var(--color-text-dim);
-  font-family: inherit;
+  font-size: 15px;
+  line-height: 1;
   cursor: default;
-  text-align: left;
 }
-.theme-switcher-trigger:hover {
-  border-color: var(--color-accent);
-  color: var(--color-text);
-}
-.theme-switcher-dot { flex: none; width: 16px; height: 16px; border-radius: 5px; border: 1px solid var(--color-border); }
-.theme-switcher-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
-.theme-switcher-name { font-size: 12.5px; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.theme-switcher-mode { font-size: 10.5px; color: var(--color-text-faint); }
+.sidebar-settings-button:hover { color: var(--color-text); }
 
-/* 主题选择面板：从左下角触发按钮向上展开，浮在侧栏内容之上（sidebar 无 overflow 裁剪，
-   不会被裁掉）。整体走应用一贯的"边框而非阴影"扁平风格。 */
-.theme-picker {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 6px);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: min(420px, 70vh);
-  padding: 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-panel);
-  overflow-y: auto;
-  z-index: 3;
-}
 .theme-picker-modes { flex: none; display: flex; gap: 4px; }
 .theme-picker-modes button {
   flex: 1;

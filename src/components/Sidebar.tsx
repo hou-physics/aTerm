@@ -13,13 +13,12 @@ import { useLayout } from '../store/layout'
 import { useLibrary } from '../store/library'
 import { blockKey } from '../store/overview'
 import { useSessions } from '../store/sessions'
+import { useSettings } from '../store/settings'
 import { useThreadStatus } from '../store/status'
 import { useTabs } from '../store/tabs'
 import { basename, formatRelative } from '../time'
 import { ContextMenu } from './ContextMenu'
-import { HooksControl } from './HooksInstall'
 import { StatusDot } from './StatusDot'
-import { ThemeSwitcher } from './ThemeSwitcher'
 
 // id：每次 pointerdown 分配的单调递增拖拽序号，见 onItemPointerDown 与
 // dragSafetyNet.ts 顶部"调用方每次挂网时……"那段注释——isDragActive() 靠它辨认
@@ -327,8 +326,19 @@ export function Sidebar() {
           </div>
         )}
       </div>
-      <HooksControl />
-      <ThemeSwitcher />
+      {/* 主题选择器（ThemeSwitcher.tsx）与 hooks 手动入口（HooksInstall.tsx 的
+          HooksControl）都已复制进设置浮层（AppearanceSection.tsx / HooksSection.tsx，
+          见 SettingsPanel.tsx），侧栏底部不再需要它们，换成打开设置浮层的唯一入口。
+          图标沿用本文件既有的字符图标惯例（TabBar.tsx 的 ›/‹/＋/☰、SettingsPanel.tsx
+          的 ×），不是内联 SVG。 */}
+      <button
+        type="button"
+        className="sidebar-settings-button"
+        aria-label="设置"
+        onClick={() => useSettings.getState().openSettings()}
+      >
+        ⚙
+      </button>
       {menu && (
         <ContextMenu
           x={menu.x}
@@ -354,7 +364,8 @@ export function Sidebar() {
                 useLibrary.getState().removeSession(key)
                 // 可撤销轻提示，与 HomePage.tsx「隐藏项目」同一惯例（action 字段见
                 // store/hint.ts）。restoreSession 此前是零调用点的死代码——这是它
-                // 唯一的落地入口。
+                // 第一个落地入口（第二个是 settings/ProjectsSection.tsx 的「恢复」
+                // 按钮，Task 4 加的）。
                 useHint.getState().show('已从列表移除', {
                   label: '撤销',
                   onClick: () => useLibrary.getState().restoreSession(key),
