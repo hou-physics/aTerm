@@ -1,12 +1,14 @@
 import { useEffect, useRef } from 'react'
 import { useSettings } from '../store/settings'
 import { AppearanceSection } from './settings/AppearanceSection'
+import { TerminalSection } from './settings/TerminalSection'
+import { ProjectsSection } from './settings/ProjectsSection'
+import { HooksSection } from './settings/HooksSection'
 
-// 应用内设置浮层的容器。四个内容分区（外观 / 终端 / 项目与会话 / Hooks）本任务只留
-// 占位——分别由后续任务把 <AppearanceSection />（Task 3）、<TerminalSection /> /
-// <ProjectsSection /> / <HooksSection />（Task 4，三个合并一个任务，组件都放在
-// src/components/settings/ 目录）挂进来，替换掉下面对应的占位 div。这里只负责浮层
-// 本身：开关、遮罩、Esc/点遮罩关闭、焦点管理（含 Tab 焦点陷阱）。
+// 应用内设置浮层的容器。四个内容分区（外观 / 终端 / 项目与会话 / Hooks）：
+// <AppearanceSection />（Task 3）、<TerminalSection /> / <ProjectsSection /> /
+// <HooksSection />（Task 4，三个合并一个任务，组件都放在 src/components/settings/
+// 目录）。这里只负责浮层本身：开关、遮罩、Esc/点遮罩关闭、焦点管理（含 Tab 焦点陷阱）。
 
 // R1 修复 A：aria-modal="true" 是在向读屏软件承诺"背景内容已失活"，光有属性、Tab 仍
 // 能跑到浮层背后是说谎。Task 3/4 马上要往四个空分区里塞真正的交互控件，届时"Tab 能
@@ -149,12 +151,15 @@ export function SettingsPanel() {
           <section className="settings-section" aria-label="外观">
             <AppearanceSection />
           </section>
-          {/* Task 4：终端分区——<TerminalSection />（滚动速度等） */}
-          <section className="settings-section" aria-label="终端" />
-          {/* Task 4：项目与会话分区——<ProjectsSection />（隐藏项目 / 已移除会话） */}
-          <section className="settings-section" aria-label="项目与会话" />
-          {/* Task 4：Hooks 分区——<HooksSection />（hooks 安装器迁入） */}
-          <section className="settings-section" aria-label="Hooks" />
+          <section className="settings-section" aria-label="终端">
+            <TerminalSection />
+          </section>
+          <section className="settings-section" aria-label="项目与会话">
+            <ProjectsSection />
+          </section>
+          <section className="settings-section" aria-label="Hooks">
+            <HooksSection />
+          </section>
         </div>
       </div>
     </div>

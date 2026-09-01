@@ -147,10 +147,11 @@ function persistTimelineCollapsed(v: boolean) {
 
 const WHEEL_MULTIPLIER_KEY = 'aterm-wheel-multiplier'
 // Claude TUI 自己接管鼠标上报时，每个真实滚轮事件的放大倍数。原为 3，用户反馈过快。
-// 滑块 UI 留到 V3.2（届时会有设置入口）；值先进 store 是为了那时的滑块是纯 UI 增量。
+// 滑块 UI 落在 src/components/settings/TerminalSection.tsx（V3.2a 设置浮层）；
+// MIN/MAX 导出给那里的 <input type="range"> 引用，UI 层不得另写字面量。
 export const WHEEL_MULTIPLIER_DEFAULT = 1.5
-const WHEEL_MULTIPLIER_MIN = 1
-const WHEEL_MULTIPLIER_MAX = 6
+export const WHEEL_MULTIPLIER_MIN = 1
+export const WHEEL_MULTIPLIER_MAX = 6
 
 function clampWheelMultiplier(n: number): number {
   if (!Number.isFinite(n)) return WHEEL_MULTIPLIER_DEFAULT

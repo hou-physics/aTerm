@@ -170,9 +170,14 @@ describe('SettingsPanel', () => {
       useSettings.setState({ open: true })
       const { container } = render(<SettingsPanel />)
       const dialog = screen.getByRole('dialog')
-      // 拔掉所有可聚焦元素（关闭按钮 + Task 3 起 AppearanceSection 塞进来的真实控件），
-      // 模拟"面板内没有可聚焦元素"这一边界。
-      container.querySelectorAll('button').forEach((b) => b.remove())
+      // 拔掉所有可聚焦元素，模拟"面板内没有可聚焦元素"这一边界。清空
+      // .settings-panel-body 的 innerHTML（而不是逐个找 button 移除）+ 移除关闭
+      // 按钮——Task 4 起 TerminalSection 塞进来的是 <input type="range">，不是
+      // button，`querySelectorAll('button').forEach(remove)` 清不掉它，这个边界会
+      // 悄悄失效（面板内其实还剩一个可聚焦的滑块）。这样写不依赖分区内控件的具体
+      // 标签，往后分区里加什么控件都不用回来改这条测试。
+      container.querySelector('.settings-panel-body')!.innerHTML = ''
+      screen.getByRole('button', { name: '关闭设置' }).remove()
       dialog.focus()
       expect(document.activeElement).toBe(dialog)
 

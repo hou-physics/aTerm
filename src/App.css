@@ -508,6 +508,58 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    那个类是给侧栏浮出的弹层用的（position:absolute），这里只是静态内容，不需要。 */
 .appearance-section { display: flex; flex-direction: column; gap: 10px; }
 
+/* Task 4：终端分区（TerminalSection.tsx）——滚动速度滑块，本仓库首次引入
+   type="range"。原生轨道/滑块交给 accent-color 接管主题色（引用 --color-accent，
+   不是字面量色值），不必逐一画皮肤。 */
+.terminal-section { display: flex; flex-direction: column; gap: 10px; }
+.terminal-section-row { display: flex; align-items: center; gap: 10px; }
+.terminal-section-label { flex: none; font-size: 12px; color: var(--color-text-dim); }
+.terminal-section-slider { flex: 1; accent-color: var(--color-accent); }
+.terminal-section-value { flex: none; min-width: 32px; text-align: right; font-size: 12px; color: var(--color-text-dim); font-variant-numeric: tabular-nums; }
+
+/* Task 4：项目与会话分区（ProjectsSection.tsx）——隐藏项目 / 已移除会话的"一次看全"
+   入口，行为委托给既有 store action（unhideProject/restoreSession），这里只是
+   列表展示 + 按钮，不重复实现任何判断。 */
+.projects-section { display: flex; flex-direction: column; gap: 14px; }
+.projects-section-group { display: flex; flex-direction: column; gap: 6px; }
+.projects-section-group-label { font-size: 10.5px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; }
+.projects-section-empty { font-size: 12px; color: var(--color-text-faint); }
+.projects-section-list { display: flex; flex-direction: column; gap: 1px; max-height: 160px; overflow-y: auto; list-style: none; margin: 0; padding: 0; }
+.projects-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; }
+.projects-section-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--color-text); }
+.projects-section-action {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-elevated);
+  color: var(--color-text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: default;
+}
+.projects-section-action:hover { border-color: var(--color-accent); color: var(--color-text); }
+
+/* Task 4：Hooks 分区（HooksSection.tsx）——视觉上照抄 .hooks-control 系列样式，但
+   换了一套类名前缀（hooks-section-*），不复用原类名：HooksControl 连同它的样式在
+   Task 5 会一起变成死代码，这组类名要能独立于它的生死。 */
+.hooks-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--color-text-dim); }
+.hooks-section-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hooks-section-action {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-elevated);
+  color: var(--color-text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: default;
+}
+.hooks-section-action:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
+.hooks-section-action:disabled { opacity: .6; }
+.hooks-section-error { margin-top: 6px; font-size: 11px; color: var(--color-text); word-break: break-word; }
+
 .conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .conv-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
 /* 抓取区必须整块落在 .conv-panel 的盒子内：祖先 .conv-panel-dock 有 overflow:hidden，
