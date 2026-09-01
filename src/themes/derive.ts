@@ -188,6 +188,17 @@ export function deriveUiVars(theme: Theme): Record<string, string> {
   const statusAwaiting = pickStatusColor(theme, panel, ANSI_YELLOW, ANSI_BRIGHT_YELLOW)
   const statusDone = pickStatusColor(theme, panel, ANSI_GREEN, ANSI_BRIGHT_GREEN)
 
+  // 设置浮层（V3.2a）背后的全屏遮罩。跟 panel/elevated/border 不同，遮罩不能跟着
+  // isDark 选择推移方向去贴近 bg 自身的明暗基调——浅色主题下那会把它推向白，起不到
+  // "压暗背景、把注意力交给浮层"的作用。遮罩语义上永远是"压暗"，所以固定把 bg
+  // 朝黑（而非 extreme）大幅推移（0.85），既保留一点主题自身色相（不是纯 #000，
+  // 贴合本文件其余变量"从主题派生"而非改用绝对色的风格），又足够暗以承担遮罩职责。
+  // 透明度按 isDark 区分：浅色主题背景本身明亮，暗遮罩的亮度反差已经很大，0.5 足够；
+  // 深色主题背景本就偏暗，遮罩与背景亮度接近、单靠同一透明度视觉分离感会变弱，
+  // 因此调高到 0.65，维持两种模式下"浮层已打开"的可感知强度大致相当。
+  const scrimBase = mixHex(bg, '#000000', 0.85)
+  const scrim = withAlpha(scrimBase, isDark ? 0.65 : 0.5)
+
   return {
     '--color-bg': bg,
     '--color-panel': panel,
@@ -205,6 +216,7 @@ export function deriveUiVars(theme: Theme): Record<string, string> {
     '--color-status-running': statusRunning,
     '--color-status-awaiting': statusAwaiting,
     '--color-status-done': statusDone,
+    '--color-scrim': scrim,
   }
 }
 
@@ -226,6 +238,7 @@ export const UI_VAR_NAMES = [
   '--color-status-running',
   '--color-status-awaiting',
   '--color-status-done',
+  '--color-scrim',
 ] as const
 
 // xterm ITheme 的 16 色属性名，顺序对应 Theme.ansi 的 0-15（黑红绿黄蓝紫青白 × 2）；
