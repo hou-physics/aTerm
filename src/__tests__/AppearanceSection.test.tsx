@@ -61,4 +61,20 @@ describe('AppearanceSection', () => {
     fireEvent.click(screen.getByTitle('Gruvbox Dark'))
     expect(useTheme.getState().singleThemeId).toBe('gruvbox-dark')
   })
+
+  // Task 5 R1 修复：迁移自 ThemeSwitcher.test.tsx 用例③「single 模式展开时只显示
+  // 一个主题列表」，原用例断言了四件事，删除 ThemeSwitcher 时只保留了第 4 项
+  // （选主题会写进 store，即上面那条），前三项（single 模式下"亮色"/"暗色"不出现、
+  // "主题"出现）净丢失了覆盖——若 AppearanceSection.tsx 的 single 分支条件将来被
+  // 误写成同时命中 dual 分支（例如 `mode !== 'default'`），这里补上的三条断言能
+  // 分别单独抓住这类回归，不依赖"选主题"这条动作型断言（那条即使 dual/single
+  // 两块同时渲染也照样能通过，起不到形状检查的作用）。三条断言逐一做过独立变异
+  // 验证，见 task-5-report.md「修复轮 R1」。
+  it('single 模式只渲染"主题"一个列表，不渲染 dual 模式的"亮色"/"暗色"', () => {
+    useTheme.setState({ mode: 'single', singleThemeId: 'nord' })
+    render(<AppearanceSection />)
+    expect(screen.queryByText('亮色')).toBeNull()
+    expect(screen.queryByText('暗色')).toBeNull()
+    expect(screen.queryByText('主题')).not.toBeNull()
+  })
 })

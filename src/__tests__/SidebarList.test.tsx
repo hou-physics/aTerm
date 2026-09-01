@@ -181,7 +181,15 @@ describe('Sidebar — 底部清空为设置按钮（Task 5）', () => {
   it('侧栏不再渲染主题选择器与 hooks 控件', () => {
     seed(1)
     render(<Sidebar />)
-    expect(screen.queryByText('Hooks：')).toBeNull()
+    // Task 5 R1 修复：原来这里写的是 screen.queryByText('Hooks：')，评审变异验证
+    // 发现这条断言恒为 null——Testing Library 的 queryByText 要求文本节点内容与
+    // 查询串逐字相等，而真实渲染里"Hooks："从不单独成一个文本节点，永远是
+    // "Hooks：未安装"这样的拼接结果（HooksControl 的 JSX 是
+    // `Hooks：{phase ? STATE_LABEL[phase] : '查询中…'}`，"Hooks："与状态词是两个
+    // 相邻但不合并的 JSX 表达式），所以这条断言与 Hooks 控件是否被渲染毫无关系。
+    // 改成与下面 .theme-switcher 同一路子的类名选择器——HooksControl 的根元素是
+    // `<div className="hooks-control">`，直接查这个类名，不依赖具体文案怎么拼。
+    expect(document.querySelector('.hooks-control')).toBeNull()
     expect(document.querySelector('.theme-switcher')).toBeNull()
   })
 
