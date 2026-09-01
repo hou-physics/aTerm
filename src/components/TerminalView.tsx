@@ -41,6 +41,72 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
+
+    // ============================================================================
+    // [ime] macOS 中文输入法首字符绕行 —— 详细取证与推导过程见
+    // .superpowers/sdd/ime-fix-report.md；私有字段假设的钉子测试见
+    // src/__tests__/xtermKeyDownSeenGuard.test.ts；监听器注册/注销的测试见
+    // src/__tests__/TerminalView.imeBeforeInputGuard.test.tsx。
+    //
+    // 现象：用中文输入法在终端里打第一个 ？/（ 之类的全角标点，需要按两次才出字；
+    // 之后每个都正常。只有终端里会，主页搜索框不受影响。
+    //
+    // 根因是 @xterm/xterm 自身的上游缺陷，不是这个仓库的代码问题：xterm 在 textarea 的
+    // input 事件处理里（_inputEvent）用这条门禁判断"这次插入是不是已经在别处处理过了"：
+    //   (!e.composed || !this._keyDownSeen)
+    // input 事件的 composed 恒为 true，所以这条门禁实际只看 `!this._keyDownSeen`——
+    // "看到过 keydown 就不发"。而 `_keyDownSeen` 只有两处赋值：_keyDown() 里置 true，
+    // _keyUp() 里置 false——xterm 隐含假定 input 一定发生在这次按键自己的 keydown 之后。
+    //
+    // 但真机取证显示：macOS 中文输入法打标点时，input 早于这次按键自己的 keydown 到达
+    // （顺序是 beforeinput → input → keydown code=229）。于是 `_keyDownSeen` 反映的其实
+    // 是"上一个键"的状态——用户按住 Shift 打第一个标点时，Shift 的 keydown 刚把标志置
+    // true、还没来得及 keyup，这个标点字符就被上面那条门禁悄悄丢弃了；标点自己的 keyup
+    // 会清掉标志，所以第二次按同一个键就正常放行——这正是"要按两次才出字"的由来。
+    //
+    // 绕行思路：赶在 input 事件到达之前，把 `_keyDownSeen` 强行置回 false，造出一个
+    // "没见过 keydown"的假象，放行这次插入。选在 beforeinput（发生在 input 之前）、且
+    // 注册在终端容器元素（textarea 的父元素，也就是这个 effect 里的 el）上、且是捕获
+    // 阶段：DOM 捕获阶段从 window 往下走，父元素上的监听器先于 textarea 上的监听器
+    // 执行；而 xterm 自己的 input 监听器就注册在 textarea 上（捕获阶段，term.open() 时
+    // 就已经挂上）。挂在 textarea 上不行——同一节点同相位按注册顺序，xterm 比我们先
+    // 注册，会抢先跑完。
+    //
+    // 为什么不会让普通按键（空格、字母……）变成发送两次：_inputEvent 里在这条门禁
+    // 之后还有一道独立的守卫 `if (this._keyPressHandled) return false`。普通可打印字符
+    // 会先经过 keydown → keypress 路径——_keyPress() 在那里已经把数据发送出去、并把
+    // _keyPressHandled 置 true；beforeinput/input 随后才到达，此时 _keyPressHandled
+    // 仍是 true，这道守卫会拦下第二次发送（_keyPressHandled 只在 _keyPress() 置 true、
+    // _keyUp() 置 false 两处被赋值，已核对成立）。而中文输入法合成插入的标点不会触发
+    // keypress 事件，_keyPressHandled 在这一轮里从未被置 true，所以门禁一放行就能送达。
+    //
+    // 防御性检测：`_keyDownSeen` 是 xterm 完全未公开的私有字段，升级后随时可能改名或
+    // 删除。取不到时绝不能抛错、更不能静默失败得让这个功能一次都没工作过——本仓库在
+    // Tauri 权限那次已经吃过一次这种亏（见 e476b35/ff9d734/src/__tests__/tauriAcl.test.ts
+    // 顶部注释），同样的错不能再犯第二遍。所以这里只 console.warn 一次留下痕迹，然后
+    // 什么都不做：这条绕行会失效、中文输入法首字符会丢，但不会把整个终端打崩。
+    // src/__tests__/xtermKeyDownSeenGuard.test.ts 钉住了这个私有字段的名字还在——升级后
+    // 一旦被改名，那条测试会当场变红，而不是让这个问题悄悄回归。
+    // ============================================================================
+    let imeKeyDownSeenWarned = false
+    const onImeBeforeInput = (e: Event) => {
+      const ie = e as InputEvent
+      if (ie.inputType !== 'insertText' || !ie.data) return
+      const core = (term as unknown as { _core?: { _keyDownSeen?: boolean } })._core
+      if (!core || typeof core._keyDownSeen !== 'boolean') {
+        if (!imeKeyDownSeenWarned) {
+          imeKeyDownSeenWarned = true
+          console.warn(
+            '[ime] xterm._core._keyDownSeen 取不到（@xterm/xterm 内部结构可能已变化）——' +
+              '中文输入法首字符绕行本次跳过，不再重试。见 src/__tests__/xtermKeyDownSeenGuard.test.ts。',
+          )
+        }
+        return
+      }
+      core._keyDownSeen = false
+    }
+    el.addEventListener('beforeinput', onImeBeforeInput, true)
+
     el.classList.toggle('alt-screen', term.buffer.active.type === 'alternate')
     try {
       const webgl = new WebglAddon()
@@ -150,6 +216,8 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       if (resizeFrame) cancelAnimationFrame(resizeFrame)
       if (fontSizeFrame) cancelAnimationFrame(fontSizeFrame)
       window.removeEventListener('keydown', onDiagKeyDown)
+      // [ime] 中文输入法首字符绕行注销 —— 与上方 el.addEventListener 成对，见那段注释。
+      el.removeEventListener('beforeinput', onImeBeforeInput, true)
       bufferChangeDisposable.dispose()
       ro.disconnect(); detach(); unsubTheme(); unsubFontSize(); unregisterPaste(); term.dispose()
     }
