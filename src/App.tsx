@@ -9,6 +9,7 @@ import { DragGhost } from './components/DragGhost'
 import { DropIndicator } from './components/DropIndicator'
 import { HomePage } from './components/HomePage'
 import { OverviewPage } from './components/OverviewPage'
+import { SettingsPanel } from './components/SettingsPanel'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
 import { TabBar } from './components/TabBar'
@@ -305,6 +306,11 @@ export default function App() {
           store/dragGhost.ts）：position:fixed，挂在树里任何位置效果都一样，渲染顺序
           放最后确保画在最上层。 */}
       <DragGhost />
+      {/* 应用内设置浮层（store/settings.ts 的 open 控制开关）：position:fixed 铺满
+          视口，挂在 .app 最外层、渲染顺序最后——需要盖住包括拖拽指示在内的一切
+          （z-index 50，全仓库最高，见 App.css）。SettingsPanel 内部在 open 为
+          false 时返回 null，这里始终无条件渲染即可。 */}
+      <SettingsPanel />
     </div>
   )
 }
