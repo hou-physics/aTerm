@@ -502,6 +502,12 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .theme-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--color-border); }
 .theme-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Task 3：外观分区（AppearanceSection.tsx），内嵌在 SettingsPanel 里，不是弹层。
+   复用 .theme-picker-modes / .theme-picker-group-label / .theme-picker-list /
+   .theme-row / .theme-swatch 等既有主题选择器样式，但不复用 .theme-picker 本身——
+   那个类是给侧栏浮出的弹层用的（position:absolute），这里只是静态内容，不需要。 */
+.appearance-section { display: flex; flex-direction: column; gap: 10px; }
+
 .conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .conv-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
 /* 抓取区必须整块落在 .conv-panel 的盒子内：祖先 .conv-panel-dock 有 overflow:hidden，

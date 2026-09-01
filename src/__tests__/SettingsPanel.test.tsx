@@ -111,7 +111,11 @@ describe('SettingsPanel', () => {
   describe('Tab 焦点陷阱', () => {
     it('面板内只有一个可聚焦元素（当前只有关闭按钮）时，Tab 停在原地', async () => {
       useSettings.setState({ open: true })
-      render(<SettingsPanel />)
+      const { container } = render(<SettingsPanel />)
+      // Task 3 起 AppearanceSection 往 .settings-panel-body 里塞了真实控件（模式按钮/
+      // 主题列表），面板不再天然只有关闭按钮一个可聚焦元素。手动清空 body 内容，重建
+      // "只有一个可聚焦元素"这个边界——与下面"没有可聚焦元素"用例同一 idiom。
+      container.querySelector('.settings-panel-body')!.innerHTML = ''
       const closeBtn = screen.getByRole('button', { name: '关闭设置' })
       closeBtn.focus()
 
@@ -164,10 +168,11 @@ describe('SettingsPanel', () => {
 
     it('面板内没有可聚焦元素时，Tab 不抛异常、焦点钳在面板本身', async () => {
       useSettings.setState({ open: true })
-      render(<SettingsPanel />)
+      const { container } = render(<SettingsPanel />)
       const dialog = screen.getByRole('dialog')
-      // 拔掉唯一的可聚焦元素，模拟"面板内没有可聚焦元素"这一边界。
-      screen.getByRole('button', { name: '关闭设置' }).remove()
+      // 拔掉所有可聚焦元素（关闭按钮 + Task 3 起 AppearanceSection 塞进来的真实控件），
+      // 模拟"面板内没有可聚焦元素"这一边界。
+      container.querySelectorAll('button').forEach((b) => b.remove())
       dialog.focus()
       expect(document.activeElement).toBe(dialog)
 

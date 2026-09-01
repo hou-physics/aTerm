@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useSettings } from '../store/settings'
+import { AppearanceSection } from './settings/AppearanceSection'
 
 // 应用内设置浮层的容器。四个内容分区（外观 / 终端 / 项目与会话 / Hooks）本任务只留
 // 占位——分别由后续任务把 <AppearanceSection />（Task 3）、<TerminalSection /> /
@@ -145,8 +146,9 @@ export function SettingsPanel() {
           </button>
         </div>
         <div className="settings-panel-body">
-          {/* Task 3：外观分区——<AppearanceSection />（主题模式 + 主题选择器迁入） */}
-          <section className="settings-section" aria-label="外观" />
+          <section className="settings-section" aria-label="外观">
+            <AppearanceSection />
+          </section>
           {/* Task 4：终端分区——<TerminalSection />（滚动速度等） */}
           <section className="settings-section" aria-label="终端" />
           {/* Task 4：项目与会话分区——<ProjectsSection />（隐藏项目 / 已移除会话） */}
