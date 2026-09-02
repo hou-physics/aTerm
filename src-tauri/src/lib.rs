@@ -152,6 +152,17 @@ fn insert_settings_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     };
     let items = app_submenu.items()?;
     let Some(insert_at) = settings_insertion_index(items.len()) else {
+        // 与上面两处"压根拿不到菜单/子菜单"的静默 `return Ok(())` 不同：那两处是环境
+        // 缺失（例如根本没有菜单），这里是**菜单形状异常于预期**——item_count < 2 只会
+        // 在未来某次 tauri/muda 升级改变了默认菜单项数时发生（当前固定 8 项）。那种情况
+        // 下"设置…"会悄无声息地不被插入，⌘, 不可用，但没有任何日志线索可查——留一句
+        // 警告，说明发生了什么、以及后果（仍可通过侧栏齿轮按钮打开设置浮层，不影响
+        // 应用可用性，所以仍然只降级不 panic）。
+        eprintln!(
+            "警告：App 子菜单项数（{}）少于预期，未插入\"设置…\"菜单项，⌘, 不可用\
+             （仍可通过侧栏齿轮按钮打开设置）",
+            items.len()
+        );
         return Ok(());
     };
     let separator = PredefinedMenuItem::separator(app)?;
@@ -159,6 +170,45 @@ fn insert_settings_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
         MenuItem::with_id(app, SETTINGS_MENU_ITEM_ID, "设置…", true, Some("Command+,"))?;
     app_submenu.insert_items(&[&separator, &settings_item], insert_at)?;
     Ok(())
+}
+
+/// macOS 专属：`setup()` 里菜单初始化的唯一入口，把"必须先 `replace_quit_menu_item`、
+/// 再 `insert_settings_menu_item`"这条顺序不变式绑进一个函数里。
+///
+/// 为什么用结构而不是测试来守：这条顺序要求本身没法用 `cargo test` 自动化覆盖——
+/// `tauri::test::mock_builder()` 会 `.enable_macos_default_menu(false)`，mock 出来的
+/// `App` 没有真菜单可插，手工搭一份 8 项菜单成本高，且 mock runtime 未必忠实复现
+/// AppKit 行为（见 `settings_insertion_index`/`insert_settings_menu_item` 上方注释、
+/// `reveal.rs` 的同类先例）。原来这两次调用是 `setup()` 里两条独立语句，靠注释提醒
+/// 顺序——评审实测过：把这两行对调，`cargo build`/`cargo test` 照样全绿（120 passed，
+/// 0 failed），没有任何自动化信号能拦住这个回归。收进一个函数、顺序写死在函数体内部
+/// 之后，顺序和解释它的这段注释从此相邻——比隔着 `setup()` 里其它语句的两条独立调用
+/// 难破坏得多（想写错顺序，必须先看到、再无视紧挨着的这段注释去手动调换下面两行）。
+///
+/// `replace_quit_menu_item`/`insert_settings_menu_item` 两个函数本身保持独立、各自仍可
+/// 单测（`settings_insertion_index` 的单测见文件末尾 `#[cfg(test)]` 模块）——这里只负责
+/// 按正确顺序把它们粘在一起，不合并两者的实现，也不改动各自原有的失败即降级逻辑与
+/// 警告文案。
+#[cfg(target_os = "macos")]
+fn setup_macos_menu<R: tauri::Runtime>(app: &tauri::App<R>) {
+    // 启动可用性优先于 ⌘Q 确认：这里替换的是 Tauri 默认菜单的内部结构（见
+    // replace_quit_menu_item 上方的详细注释），一旦未来某次 tauri/muda 升级改变了默认
+    // 菜单的项数/顺序导致这里返回 Err，原先的 `?` 会让它经由 `.setup()` 直接冒泡，被
+    // `.build().expect(...)` 当场 panic 掉——应用直接无法启动，这比它想防护的问题
+    // （⌘Q 未经确认就退出）严重得多。因此改为失败即降级：打印警告后继续启动，此时 ⌘Q
+    // 会退回系统默认行为（bypass 掉关闭确认弹窗，但至少应用能正常打开）。
+    if let Err(e) = replace_quit_menu_item(app) {
+        eprintln!(
+            "警告：替换 Quit 菜单项失败，⌘Q 将退回系统默认行为（不会弹出关闭确认）：{e}"
+        );
+    }
+
+    // 必须排在 replace_quit_menu_item 之后：见本函数上方注释——它假设看到的子菜单仍是
+    // 默认菜单固定的那个顺序。同样的失败即降级理由（应用能打开比菜单项齐全重要）：
+    // 这里返回 Err 只打印警告，不让 `?`/`.expect(...)` 把它变成启动期 panic。
+    if let Err(e) = insert_settings_menu_item(app) {
+        eprintln!("警告：插入\"设置…\"菜单项失败，⌘, 将不可用：{e}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -220,29 +270,11 @@ pub fn run() {
             // 不影响正确性，放在最前面只是顺序上更自然。
             app.manage(status::start(app.handle()));
 
+            // macOS 专属菜单初始化（替换 Quit + 插入"设置…"）：两步之间有硬性顺序
+            // 依赖，收在同一个函数里按固定顺序执行，理由与失败即降级的写法见
+            // setup_macos_menu 上方的注释。
             #[cfg(target_os = "macos")]
-            {
-                // 启动可用性优先于 ⌘Q 确认：这里替换的是 Tauri 默认菜单的内部结构（见
-                // replace_quit_menu_item 上方的详细注释），一旦未来某次 tauri/muda 升级
-                // 改变了默认菜单的项数/顺序导致这里返回 Err，原先的 `?` 会让它经由
-                // `.setup()` 直接冒泡，被 `.build().expect(...)` 当场 panic 掉——应用
-                // 直接无法启动，这比它想防护的问题（⌘Q 未经确认就退出）严重得多。
-                // 因此改为失败即降级：打印警告后继续启动，此时 ⌘Q 会退回系统默认行为
-                // （bypass 掉关闭确认弹窗，但至少应用能正常打开）。
-                if let Err(e) = replace_quit_menu_item(app) {
-                    eprintln!(
-                        "警告：替换 Quit 菜单项失败，⌘Q 将退回系统默认行为（不会弹出关闭确认）：{e}"
-                    );
-                }
-
-                // 必须排在 replace_quit_menu_item 之后：见 insert_settings_menu_item
-                // 上方的注释——它假设看到的子菜单仍是默认菜单固定的那个顺序。同样的
-                // 失败即降级理由（应用能打开比菜单项齐全重要）：这里返回 Err 只打印
-                // 警告，不让 `?`/`.expect(...)` 把它变成启动期 panic。
-                if let Err(e) = insert_settings_menu_item(app) {
-                    eprintln!("警告：插入\"设置…\"菜单项失败，⌘, 将不可用：{e}");
-                }
-            }
+            setup_macos_menu(app);
             Ok(())
         })
         .build(tauri::generate_context!())
