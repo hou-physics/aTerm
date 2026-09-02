@@ -44,8 +44,13 @@ export const WINDOW_CLOSE_EVENT = 'window-close-requested'
 /** 纯函数：关闭一个终端窗口前的确认文案。与 buildExitConfirmMessage（关闭整个应用）
  *  刻意用不同措辞——这两件事的后果差着一整个应用，文案必须让用户一眼看出自己在关的是
  *  哪个。0 个存活会话时根本不弹确认（见 handleWindowCloseRequested），所以这里不需要
- *  "没有会话"那一档文案。 */
+ *  "没有会话"那一档文案。
+ *
+ *  单复数分档（R1/M5）：与同仓库的 buildTabCloseConfirmMessage 一致。只有一个会话时说
+ *  "会终止它们"是明显的病句，而这句话出现在一个会真的杀掉用户进程的确认框上——读起来
+ *  像机器拼出来的文案会让人怀疑自己看懂没有。 */
 export function buildWindowCloseConfirmMessage(liveCount: number): string {
+  if (liveCount <= 1) return '进程仍在运行，关闭这个窗口会终止它。确定关闭？'
   return `还有 ${liveCount} 个会话在运行，关闭这个窗口会终止它们。确定关闭？`
 }
 
@@ -69,8 +74,10 @@ export function ownedPtyIds(): string[] {
 // 堆出第二个对话框。
 let closeInFlight = false
 
-/** 收到"这个窗口被请求关闭"之后的完整流程：清点自己持有的存活会话 → 有的话弹确认 →
- *  终止它们 → 真正关掉窗口。
+/** 收到"这个窗口被请求关闭"之后的完整流程：确认这条事件是发给自己的 → 清点自己持有的
+ *  存活会话 → 有的话弹确认 → 终止它们 → 真正关掉窗口。
+ *
+ *  @param toLabel Rust 侧 emit_window_close_requested 放进载荷里的目标窗口 label。
  *
  *  导出是为了让测试直接 await 完整流程（与 handleCloseRequested 同一惯例）。
  *
@@ -79,16 +86,21 @@ let closeInFlight = false
  *
  *  用户在确认框上点"取消"：直接返回，窗口留着（Rust 侧已经 prevent_close 过了，不做
  *  任何事就等于取消这次关闭）。 */
-export async function handleWindowCloseRequested(): Promise<void> {
+export async function handleWindowCloseRequested(toLabel: string): Promise<void> {
   if (closeInFlight) return
   closeInFlight = true
   try {
     const label = await currentWindowLabel()
     // 主窗口不走这条路：它的关闭 = 退出应用，归 closeRequest.ts 那条既有路径管。Rust
-    // 侧也不会给主窗口发这个事件——这里再挡一次是因为定向投递本身不可靠（不传 target
-    // 的 listen 是 Any 目标，对 emit_to 的 label 过滤无条件命中，考据见 windowHandoff.ts
-    // 顶部）。漏掉这一层，主窗口会在别的窗口关闭时把**自己**的会话全 kill 掉再自毁。
+    // 侧也不会给主窗口发这个事件——这里再挡一次是因为定向投递本身不可靠（见下一条）。
     if (!isTornOutWindow(label)) return
+    // **这条事件是不是发给我的**（R1/I2）。`emit_to` 不是私有信道：不传 options 的
+    // listen 落成 `{ kind: 'Any' }`，对 emit_to 的 label 过滤无条件命中（Ruling 8 的
+    // 考据见 windowHandoff.ts 顶部）。上面那道 isTornOutWindow 挡得住主窗口，**挡不住
+    // 兄弟 term 窗口**——term-2 拿到发给 term-1 的这条事件时，"我是拖出来的窗口"对它
+    // 同样为真，它会把**自己**的全部会话杀光再自毁。交接协议为此比对 payload.toLabel，
+    // 这条事件一视同仁。注册侧的 target 是第一层，这里是第二层，缺一不可。
+    if (toLabel !== label) return
     const owned = ownedPtyIds()
     const alive = await Promise.all(owned.map((id) => ptyIsAlive(id).catch(() => false)))
     const liveIds = owned.filter((_, i) => alive[i])
@@ -96,10 +108,25 @@ export async function handleWindowCloseRequested(): Promise<void> {
       const { confirm } = await import('@tauri-apps/plugin-dialog')
       const ok = await confirm(buildWindowCloseConfirmMessage(liveIds.length), { title: 'aTerm' })
       if (!ok) return
-      // 并发终止：互相独立的 kill 没有理由排队（与 closeTab 里同一写法）。单个失败不该
-      // 拖垮其余的，也不该让窗口关不掉——已经死掉的 PTY 会让 pty_kill 返回 Err。
-      await Promise.all(liveIds.map((id) => ptyKill(id).catch((err) => { console.warn('关窗终止会话失败', id, err) })))
     }
+    // **重新取一次快照**（R1/M1，与 Ruling 9 同一条规矩：不拿陈旧快照去做破坏性操作）。
+    // 上面那份 owned 取在 N 次 ptyIsAlive 往返 + 一个可能开了很久的确认框**之前**，这段
+    // 时间里窗口里的标签完全可能变：用户开了新标签（按旧快照杀就会漏掉它 → 窗口销毁后
+    // 那个 PTY 成了谁都看不到的后台孤儿），或者某个标签刚进入交接（按旧快照杀就会杀掉
+    // 新窗口刚接管的会话）。ownedPtyIds() 这两件事都已经处理好，重取一次即可。
+    //
+    // 存活也重查一次，理由相同：上面那份 alive 同样是陈旧的。多一轮 IPC 在"关窗"这条
+    // 一次性路径上完全不值得计较，而省下它就意味着要拿旧答案去决定杀谁。
+    //
+    // 并发终止：互相独立的 kill 没有理由排队（与 closeTab 里同一写法）。单个失败不该
+    // 拖垮其余的，也不该让窗口关不掉。
+    const doomed = ownedPtyIds()
+    const doomedAlive = await Promise.all(doomed.map((id) => ptyIsAlive(id).catch(() => false)))
+    await Promise.all(
+      doomed
+        .filter((_, i) => doomedAlive[i])
+        .map((id) => ptyKill(id).catch((err) => { console.warn('关窗终止会话失败', id, err) })),
+    )
     await destroyTermWindow(label)
   } catch (err) {
     console.error('关闭窗口失败', err)
@@ -117,7 +144,11 @@ export async function handleWindowCloseRequested(): Promise<void> {
 export const windowCloseReady: Promise<void> = (async () => {
   const label = await currentWindowLabel()
   if (!isTornOutWindow(label)) return
-  await listen(WINDOW_CLOSE_EVENT, handleWindowCloseRequested, { target: label })
+  // 载荷是目标窗口的 label（Rust 侧 emit_window_close_requested）。target option 是
+  // 第一层防线，handler 里的 toLabel 比对是第二层——理由见 handleWindowCloseRequested。
+  await listen<string>(WINDOW_CLOSE_EVENT, (e) => {
+    void handleWindowCloseRequested(e.payload)
+  }, { target: label })
 })()
   .then(() => undefined)
   .catch((err) => { console.error('窗口关闭监听注册失败', err) })

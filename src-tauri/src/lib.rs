@@ -92,8 +92,18 @@ fn emit_close_requested(app_handle: &AppHandle) {
 /// 前端（src/windowClose.ts）：它清点自己持有的存活会话、必要时弹确认、终止它们，最后
 /// 调 `destroy_term_window` 真正关掉自己。这与主窗口关闭走
 /// `prevent_close` → 前端确认 → `confirm_exit` 是**同一套**既有模式，不是新引入的机制。
+///
+/// **载荷是目标窗口自己的 label**（R1/I2）。看上去冗余——`emit_to` 的第一个参数已经是它
+/// 了——但那正是 Ruling 8 反复钉过的那件事：`emit_to` **不是私有信道**。不传 options 的
+/// JS `listen` 落成 `{ kind: 'Any' }`，而 Any 目标的监听器对 `emit_to` 的 label 过滤
+/// **无条件命中**（tauri 2.11.5 `event/listener.rs` 的 `match_any_or_filter`）。也就是说，
+/// 定向这件事的唯一防线是接收侧那一个 `target` option；漏了它，`term-2` 会收到发给
+/// `term-1` 的这条事件，而"我是不是拖出来的窗口"这个判断对它同样为真——于是它会把
+/// **自己**的全部会话杀掉再自毁。交接协议（`term-window-handoff`）为此加了
+/// `payload.toLabel` 比对，这条事件必须一视同仁：收到的一方拿载荷里的 label 与
+/// `currentWindowLabel()` 比一次，对不上就什么都不做。
 fn emit_window_close_requested(app_handle: &AppHandle, label: &str) {
-    let _ = app_handle.emit_to(label, "window-close-requested", ());
+    let _ = app_handle.emit_to(label, "window-close-requested", label);
 }
 
 /// 前端（src/windowClose.ts）在"已经终止完本窗口自己持有的 PTY"之后调用：真正关掉这个
@@ -200,7 +210,7 @@ fn new_term_window_label() -> String {
 fn main_window_config(windows: &[tauri::utils::config::WindowConfig]) -> tauri::utils::config::WindowConfig {
     windows
         .iter()
-        .find(|w| w.label == "main")
+        .find(|w| w.label == MAIN_WINDOW_LABEL)
         .or_else(|| windows.first())
         .cloned()
         .unwrap_or_else(|| tauri::utils::config::WindowConfig {
@@ -1007,6 +1017,62 @@ mod tests {
         // 同一时间粒度内），第二个窗口的 label 会撞上第一个——多窗口场景下这意味着
         // WebviewWindowBuilder::new 会因 label 重复而创建失败/覆盖已有窗口。
         assert_ne!(a, b, "两次生成的 label 不能相同，否则第二个窗口会撞上第一个");
+    }
+
+    // MAIN_WINDOW_LABEL：⌘Q / 主窗口关闭那条链的整条命脉（R1/I3）。
+    //
+    // V3.3 之前 emit_close_requested 是 `emit` 广播，谁在监听都收得到，这个常量写成什么
+    // 都无所谓。改成 `emit_to(MAIN_WINDOW_LABEL, …)` 之后它变成了定向投递的**目标地址**：
+    // 一旦它与主窗口的真实 label 对不上，RunEvent::ExitRequested 会照常 prevent_exit，
+    // 而那条事件发给了一个不存在的窗口、没有任何前端在听——**应用彻底退不出去**，且
+    // 全部单测照样绿（没有任何用例把两侧钉在一起）。这两条测试就是那颗钉子。
+    //
+    // 主窗口的真实 label 由两件事共同决定，所以分两条各钉一件：
+
+    #[test]
+    fn tauri_still_derives_the_label_this_module_hard_codes() {
+        // 其一：tauri 的**隐式默认值**。tauri.conf.json 的窗口条目没有 label 字段（见下
+        // 一条测试），运行期的 label 因此来自 tauri-utils 的 default_window_label()。
+        // 会因为什么失败：升级 tauri 时那个默认推导变了（例如改成 "window-0"）。
+        assert_eq!(
+            tauri::utils::config::WindowConfig::default().label,
+            MAIN_WINDOW_LABEL,
+            "tauri 对窗口 label 的默认推导变了，⌘Q 的定向投递会打在空处"
+        );
+    }
+
+    #[test]
+    fn main_window_in_tauri_conf_resolves_to_the_hard_coded_label() {
+        // 其二：tauri.conf.json 自己。会因为什么失败：有人给主窗口加一句
+        // `"label": "primary"`——那一刻 emit_to("main") 就发给了一个不存在的窗口。
+        // 直接读真实配置文件，与 theme_mode_labels_match_frontend_appearance_section
+        // 读真实前端源码是同一惯例：不在测试里重抄一份配置，那样两边会各自漂移。
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 应由 cargo 设置");
+        let path = std::path::Path::new(&manifest_dir).join("tauri.conf.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败：{e}", path.display()));
+        let config: serde_json::Value =
+            serde_json::from_str(&source).expect("tauri.conf.json 应是合法 JSON");
+        let windows = config["app"]["windows"]
+            .as_array()
+            .expect("tauri.conf.json 的 app.windows 应是数组");
+        assert!(!windows.is_empty(), "app.windows 不能为空，否则没有主窗口");
+        // 缺省 label 的窗口条目由 tauri 推导成 default_window_label()（上一条测试已把它
+        // 钉成 MAIN_WINDOW_LABEL）；显式写了 label 的必须自己等于它。至少要有一个窗口
+        // 最终解析成 MAIN_WINDOW_LABEL，否则"关掉主窗口 = 退出应用"这条链没有落点。
+        let resolved: Vec<String> = windows
+            .iter()
+            .map(|w| match w.get("label").and_then(|l| l.as_str()) {
+                Some(explicit) => explicit.to_string(),
+                None => tauri::utils::config::WindowConfig::default().label,
+            })
+            .collect();
+        assert!(
+            resolved.iter().any(|l| l == MAIN_WINDOW_LABEL),
+            "tauri.conf.json 里没有任何窗口的 label 解析成 {MAIN_WINDOW_LABEL}，\
+             emit_close_requested 的定向投递会打在空处、⌘Q 将无法退出应用（实际解析结果：{resolved:?}）"
+        );
     }
 
     // is_term_window_label：destroy_term_window 的准入校验（V3.3 Task 5）。这条命令能

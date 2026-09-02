@@ -4,10 +4,13 @@ import { currentWindowLabel } from './windowLabel'
 
 // 纯函数，不依赖 Tauri：给定"仍存活的会话数"，拼出确认弹窗的文案。抽出来单独导出
 // 就是为了不必启动整套 Tauri/事件监听也能测这段文案逻辑。
+//
+// 单复数分档（R1/M5）：与 store/tabs.ts 的 buildTabCloseConfirmMessage 一致。只剩一个
+// 会话时说"会终止它们"是明显的病句，而这句话出现在一个会真的杀掉用户进程的确认框上。
 export function buildExitConfirmMessage(liveCount: number): string {
-  return liveCount > 0
-    ? `还有 ${liveCount} 个会话在运行，关闭 aTerm 会终止它们。确定关闭？`
-    : '确定关闭 aTerm？'
+  if (liveCount <= 0) return '确定关闭 aTerm？'
+  if (liveCount === 1) return '还有 1 个会话在运行，关闭 aTerm 会终止它。确定关闭？'
+  return `还有 ${liveCount} 个会话在运行，关闭 aTerm 会终止它们。确定关闭？`
 }
 
 // 数一数**整个应用**里还有多少个存活的会话（V3.3 设计文档 §5.2）。

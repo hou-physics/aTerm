@@ -23,10 +23,15 @@ vi.mock('../ipc', () => ({
   ptyAliveCount: vi.fn(async () => 0),
   confirmExit: vi.fn(async () => {}),
 }))
-// 当前窗口 label：closeRequest 只用它决定监听的 target。jsdom 里
-// @tauri-apps/api/window 不可用，windowLabel 自己会兜底成 'main'，这里显式替身是为了
-// 让"target 就是本窗口 label"这条断言有区分力（换成别的 label 就该看得出来）。
-vi.mock('../windowLabel', () => ({ currentWindowLabel: vi.fn(async () => 'main') }))
+// 当前窗口 label：closeRequest 只用它决定监听的 target。
+//
+// **刻意不用 'main'**（R1/I1）。用 'main' 时初始值恰好等于目标值——windowLabel 在 jsdom
+// 里的兜底值也是 'main'，而 Rust 侧 emit_to 的目标同样是 "main"——于是"target 取的是本
+// 窗口 label"这条断言变成恒真：把实现改成写死 `{ target: 'main' }`，976 条测试照样全绿，
+// 而那正是"多窗口下每个拖出窗口各弹一个退出确认框"这个已修缺陷的原样回归。换成一个
+// 拖出来的窗口 label，这条断言才真的在问"你是不是读了本窗口的 label"。
+const TEST_WINDOW_LABEL = 'term-9'
+vi.mock('../windowLabel', () => ({ currentWindowLabel: vi.fn(async () => 'term-9') }))
 
 import * as ipc from '../ipc'
 import { buildExitConfirmMessage, closeRequestReady, handleCloseRequested } from '../closeRequest'
@@ -44,7 +49,12 @@ describe('buildExitConfirmMessage（纯函数，不依赖 Tauri）', () => {
 
   it('有存活会话时文案里报出具体数量', () => {
     expect(buildExitConfirmMessage(3)).toBe('还有 3 个会话在运行，关闭 aTerm 会终止它们。确定关闭？')
-    expect(buildExitConfirmMessage(1)).toBe('还有 1 个会话在运行，关闭 aTerm 会终止它们。确定关闭？')
+  })
+
+  // R1/M5：只剩一个会话时"会终止它们"是病句，与 store/tabs.ts 的
+  // buildTabCloseConfirmMessage 一样按数量分档。
+  it('只剩一个会话时用单数措辞', () => {
+    expect(buildExitConfirmMessage(1)).toBe('还有 1 个会话在运行，关闭 aTerm 会终止它。确定关闭？')
   })
 })
 
@@ -63,7 +73,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
   // 命中——多窗口下同一次 ⌘Q 会在每个窗口各弹一个确认框。
   it('监听限定 target 为本窗口 label（否则每个拖出来的窗口都会各弹一个退出确认框）', async () => {
     await closeRequestReady
-    expect(listenTargets['app-close-requested']).toEqual({ target: 'main' })
+    expect(listenTargets['app-close-requested']).toEqual({ target: TEST_WINDOW_LABEL })
   })
 
   it('统计的是**全应用**存活 PTY 数（Rust 的 pty_alive_count），不再遍历本窗口标签', async () => {
