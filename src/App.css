@@ -661,7 +661,7 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .settings-panel {
   display: flex;
   flex-direction: column;
-  width: 560px;
+  width: 680px;
   max-width: 90vw;
   max-height: 80vh;
   border: 1px solid var(--color-border);
@@ -695,15 +695,50 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   cursor: default;
 }
 .settings-panel-close:hover { border-color: var(--color-accent); color: var(--color-text); }
-/* 内容区自己滚动，遮罩/面板外壳都不滚——四个分区（Task 3/4）依次叠放在这里。 */
+/* v3-2b：标题栏下方分两栏——左侧固定宽度分类列表 + 右侧自适应详情（macOS 系统设置
+   那种布局，取代此前"四个分区平铺在一列里全展开滚动"）。.settings-panel-content
+   本身不滚动、不改变高度，只有右侧 .settings-panel-body 内容多了自己滚，左侧
+   .settings-panel-nav 固定在原地，不会跟着详情内容一起被滚出视野。 */
+.settings-panel-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.settings-panel-nav {
+  flex: none;
+  width: 160px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-right: 1px solid var(--color-border);
+  overflow-y: auto;
+}
+.settings-panel-nav-item {
+  display: flex;
+  align-items: center;
+  text-align: left;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: 12.5px;
+  cursor: default;
+}
+.settings-panel-nav-item:hover { color: var(--color-text); background: var(--color-elevated); }
+/* 选中态：与 .theme-picker-modes button.active 同一套配色语言（accent 底 + on-accent
+   字），全仓库对"当前选中"的统一表达。 */
+.settings-panel-nav-item.active { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
+/* 右侧详情：SettingsPanel.tsx 一次只挂载当前选中分类的那一个分区组件（条件渲染，
+   不是 CSS 隐藏），其余三个分区完全不在 DOM 里。内容多了自己滚，不影响左侧分类
+   列表的固定位置。 */
 .settings-panel-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
   padding: 4px 0;
 }
-.settings-section { padding: 14px; border-bottom: 1px solid var(--color-border); }
-.settings-section:last-child { border-bottom: none; }
+.settings-section { padding: 14px; }
