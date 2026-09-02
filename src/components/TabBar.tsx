@@ -290,8 +290,12 @@ export function TabBar() {
     // 意义），ghost 继续跟手（与既有拖拽体验一致），然后直接 return——不再执行下面
     // 任何一条窗口内落点分支，从而保证"落点回到窗口内时完全退回既有逻辑"（下面这些
     // 分支本身一个字节都没有改动）。
+    // R2/M5：只有 term 标签能被拖出成新窗口。总览标签（kind === 'overview'）没有窗格、
+    // 没有 PTY，tearOutTab 对它是空操作——此前它照样会进入 tearOut 状态、照样显示
+    // 「松开在新窗口打开」，松手却什么都不发生：一个明确的视觉承诺配一个无声的空操作。
+    // 在判定这一层就排除掉，总览标签因此完全走下面既有的标签栏排序分支，行为不变。
     const windowRect = { width: window.innerWidth, height: window.innerHeight }
-    const tearOut = shouldTearOut({ x: e.clientX, y: e.clientY }, windowRect, tabs.length - 1)
+    const tearOut = dragTab.kind === 'term' && shouldTearOut({ x: e.clientX, y: e.clientY }, windowRect, tabs.length - 1)
     useDnd.getState().setTearOut(tearOut)
     if (tearOut) {
       useDnd.getState().setTarget(null)

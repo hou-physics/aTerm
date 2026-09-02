@@ -22,6 +22,29 @@
 //      TerminalView 自己 attachPty），然后 emitTo 回 ack
 //   5. 旧窗口收到 ack 后移除该标签，**但不 kill PTY**
 //
+// ## emitTo 不是私有信道（R2/C1，本文件最容易被想当然的一点）
+//
+// `emitTo(label, …)` 看起来像"只有那个 label 的窗口收得到"，**但对不带 options 的
+// `listen` 完全失效**。逐层核实过：
+//   1. `@tauri-apps/api/event.js` 的 `listen(event, handler)` 不传 options 时，target
+//      落成 `{ kind: 'Any' }`；
+//   2. `tauri-2.11.5/src/event/plugin.rs:14-21` 把这个 target 原样存进 `listen_js`；
+//   3. `event/listener.rs:269-292` 的 `emit_js_filter` **遍历全部 webview**，每个 handler
+//      走 `match_any_or_filter`；
+//   4. `listener.rs:306-311`：`*target == EventTarget::Any || filter(…)`——target 为 Any
+//      的监听器**无条件命中**，label 过滤对它形同虚设。
+//
+// 后果曾是本任务最严重的缺陷：已开着 term-1 时再从主窗口拖出第二个标签，`emitTo('term-2')`
+// 的载荷 term-1 也会收到、也会接管、还会回 ack —— 同一个标签同时出现在两个窗口，两边各自
+// attachPty 同一个 ptyId；用户去关掉多余那个，`closeTab` 会 kill 掉正在跑的 claude 会话。
+//
+// 因此这里做**两层**防护，缺一不可：
+//   - 注册侧：`listen(HANDOFF_EVENT, …, { target: label })`，让这个监听器不再是 Any
+//     （已核实不会误伤 ready 广播：`emit` 的 filter 为 None，AnyLabel 目标的监听器照收）；
+//   - 处理侧：`handleHandoff` 开头比对 `payload.toLabel` 是不是本窗口，不是就直接返回，
+//     **不建标签、也不回 ack**。
+//   - ack 同理带上"新窗口自己的 label"，发起方按它认领（`tearOutTab` 的 ack 监听）。
+//
 // ## 交接期间的输出：既不丢、也不重复（R1 修正）
 //
 // pty-output 是 app.emit 全应用广播（src-tauri/src/pty.rs:28），不是定向某个窗口，新
@@ -35,7 +58,8 @@
 // alt-screen，重复的转义序列会把画面搞乱，比丢一小段更糟。
 import { invoke } from '@tauri-apps/api/core'
 import { emit, emitTo, listen } from '@tauri-apps/api/event'
-import { discardBuffered, ptyEventsReady, seedScrollback } from './ptyBuffer'
+import { lastPtySize, ptyResize } from './ipc'
+import { discardBuffered, ignorePtyOutput, ptyEventsReady, seedScrollback } from './ptyBuffer'
 import { useHint } from './store/hint'
 import { useSessions } from './store/sessions'
 import { type AdoptedPane, type Tab, useTabs } from './store/tabs'
@@ -59,6 +83,9 @@ export const HANDOFF_EVENT = 'term-window-handoff'
 export const HANDOFF_ACK_EVENT = 'term-window-handoff-ack'
 
 export type HandoffReady = { label: string }
+/** ack 里的 label 是**接管方自己的** label（R2/C1 之三），不是把载荷里的 toLabel 原样
+ *  回带——后者只是"发起方以为它是谁"，回带过去等于让发起方自说自话地确认自己。发起方
+ *  的 ack 监听按这个 label 认领，串扰或错投的 ack 一律不认。 */
 export type HandoffAck = { label: string }
 
 /** 交接载荷里的单个窗格。
@@ -118,7 +145,12 @@ export const ACK_TIMEOUT_MS = 5_000
 
 // ── 窗口身份 ────────────────────────────────────────────────────────────────
 
-/** 当前窗口的 label，模块加载时就开始解析、全模块共用这一份结果。
+/** 当前窗口的 label。
+ *
+ *  每次调用都重新读一次（`import()` 本身由模块加载器缓存，重复调用不会重复下载/求值），
+ *  不做模块级缓存：这个值在 R2 之后是**安全判定的一部分**（handleHandoff 用它比对
+ *  payload.toLabel），缓存一个安全判定的输入只会让"它什么时候被算出来的"变成又一件要
+ *  推理的事，而这里省下的是一次 Map 查找级别的开销。
  *
  *  用 `await import(...)` 而不是顶层静态 import：`@tauri-apps/api/window` 与
  *  `@tauri-apps/api/webviewWindow` 这两个模块在本仓库里此前只出现在动态 import 里
@@ -131,17 +163,13 @@ export const ACK_TIMEOUT_MS = 5_000
  *  预览里那个对象根本不存在、会同步抛 TypeError——这个模块是 App.tsx 的顶层
  *  side-effect 导入，抛出去会连累整个应用起不来，所以兜底成 'main'（"当作主窗口"是
  *  最保守的答案：主窗口不会去抢接管，见 isTornOutWindow）。 */
-const currentLabel: Promise<string> = (async () => {
+export async function currentWindowLabel(): Promise<string> {
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window')
     return getCurrentWindow().label
   } catch {
     return 'main'
   }
-})()
-
-export function currentWindowLabel(): Promise<string> {
-  return currentLabel
 }
 
 /** 这个窗口是不是"被标签拖出创建的"。
@@ -228,6 +256,13 @@ async function closeSpawnedWindow(label: string): Promise<void> {
   }
 }
 
+// 正在交接中的标签 id（R2/M6）。整个握手是异步的（建窗 + 两次带超时的等待，最坏十几
+// 秒），期间标签仍然留在标签栏里、照样能被再拖一次——那会并发建出第二个窗口、发第二份
+// 载荷，两次交接争同一个标签，谁先回 ack 谁把标签删掉，另一次随后对着一个已经不在的
+// 标签走回滚。锁在 tearOutTab 这一层而不是手势层：手势层只有一处调用，而这里是唯一
+// 入口，挡在这里对未来的调用方也成立。
+const handoffInFlight = new Set<string>()
+
 /** 把一个标签拖出成新窗口（设计文档 §4.2 的六步）。TabBar.tsx 在 pointerup 命中
  *  拖出判定时调用。
  *
@@ -240,6 +275,8 @@ async function closeSpawnedWindow(label: string): Promise<void> {
 export async function tearOutTab(tabId: string, screenPoint: { x: number; y: number }): Promise<boolean> {
   const tab = useTabs.getState().tabs.find((t) => t.id === tabId)
   if (!tab || tab.kind !== 'term') return false
+  if (handoffInFlight.has(tabId)) return false
+  handoffInFlight.add(tabId)
 
   const fromLabel = await currentWindowLabel()
 
@@ -249,6 +286,10 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
   // IPC 往返，如果改成建窗之后再注册，新窗口完全可能在注册完成之前就把就绪事件发
   // 出来，那次交接会一路等到超时、然后把一个其实已经好好起来的窗口关掉。
   let label: string | null = null
+  // 载荷是否真的发出去过：决定回滚时要不要把 PTY 尺寸拧回来（见下面 catch 分支）。
+  let emitted = false
+  let handedOffPaneIds: string[] = []
+  let handedOffPtyIds: string[] = []
   const seenReady = new Set<string>()
   const ready = deferred<void>()
   const ack = deferred<void>()
@@ -259,6 +300,8 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
     seenReady.add(l)
     if (label !== null && l === label) ready.resolve()
   })
+  // ack 认领（R2/C1 之三）：载荷里的 label 是**接管方自己报出来的** label，与我们刚
+  // create_term_window 拿到的那个对上才算数——串扰过来的、或别的窗口发的 ack 一律不认。
   const unlistenAck = await listen<HandoffAck>(HANDOFF_ACK_EVENT, (e) => {
     if (label !== null && e.payload?.label === label) ack.resolve()
   })
@@ -280,6 +323,10 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
     // 漏掉新加的那个（它的 PTY 就成了孤儿）。取不到就当这次交接失败，走下面的回滚。
     const fresh = useTabs.getState().tabs.find((t) => t.id === tabId)
     if (!fresh || fresh.kind !== 'term') throw new Error(`标签 ${tabId} 在交接过程中已消失`)
+    // 交接出去的**具体是哪些窗格**要记下来（R2/I2）：等 ack 期间用户还能给这个标签
+    // ⌘D 加窗格，收尾时只能移除这里记下的这些，不能按 tab id 整块删。
+    handedOffPaneIds = fresh.panes.map((p) => p.id)
+    handedOffPtyIds = fresh.panes.map((p) => p.ptyId).filter((id): id is string => Boolean(id))
     const payload: HandoffPayload = {
       fromLabel,
       toLabel: label,
@@ -287,11 +334,16 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
       panes: buildHandoffPanes(fresh),
     }
     await emitTo(label, HANDOFF_EVENT, payload)
+    emitted = true
 
     // 第 4 步（在新窗口那边跑）→ 第 5 步：等接管确认（带超时）。**只有等到这里才
     // 允许动本窗口的标签**。
     await withTimeout(ack.promise, ACK_TIMEOUT_MS)
-    useTabs.getState().removeTabKeepingPty(tabId)
+    useTabs.getState().removeTabKeepingPty(tabId, handedOffPaneIds)
+    // 交接完成，本窗口从此不再关心这些 PTY 的输出（R2/I3）。pty-output 是全应用广播，
+    // 不登记的话它们会一直往本窗口的 buffers 里堆——而本窗口再也不会 attachPty 这些
+    // id，没有任何路径会清空它，拖走一个持续刷屏的会话就是一条无界增长的内存曲线。
+    for (const ptyId of handedOffPtyIds) ignorePtyOutput(ptyId)
     return true
   } catch (err) {
     // 任一步失败或超时：标签一个字节都不动，把已经建出来的新窗口关掉，给一条可见
@@ -299,9 +351,22 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
     // 入口的拒绝提示同一处渲染，不另造一套提示机制）。
     console.warn('标签拖出交接失败，标签保留在原窗口', tabId, err)
     if (label !== null) await closeSpawnedWindow(label)
+    // 载荷已经发出去过 ⇒ 新窗口可能已经接管过一轮：它的 TerminalView 挂载时 fit() 并把
+    // PTY 拧成了**它自己**的几何。新窗口关掉之后，旧窗口的 xterm 尺寸没变、
+    // ResizeObserver 不触发、active 也没变，PTY 就永远停在错误的列宽上，用户会在"交接
+    // 失败、标签留在原窗口"之后看到一个排版错乱的终端，很容易误判成会话坏了（R2/I4）。
+    // 用本窗口自己最近一次请求过的尺寸拧回来——每个窗口是独立 JS 上下文，lastPtySize
+    // 只记本窗口发出过的 pty_resize，不会被新窗口那次污染（见 ipc.ts）。
+    if (emitted) {
+      for (const ptyId of handedOffPtyIds) {
+        const size = lastPtySize(ptyId)
+        if (size) void ptyResize(ptyId, size.cols, size.rows)
+      }
+    }
     useHint.getState().show(label === null ? '新窗口创建失败，标签已留在原窗口' : '新窗口没能接管这个标签，已留在原窗口')
     return false
   } finally {
+    handoffInFlight.delete(tabId)
     unlistenReady()
     unlistenAck()
   }
@@ -327,6 +392,13 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
  *  超时回滚，标签留在原处。这比"回了 ack、旧窗口删掉标签、新窗口其实什么都没有"
  *  要好——后者正是绝不允许出现的"两个窗口都没有这个标签"。 */
 export async function handleHandoff(payload: HandoffPayload): Promise<void> {
+  // R2/C1 之一：这份载荷是不是发给**我**的。emitTo 的 label 过滤对 target 为 Any 的
+  // 监听器完全失效（考据见文件顶部），所以定向投递这件事在处理侧必须再验一次——不是
+  // 防御性冗余，是同一条防线的第二层：漏掉它，已经开着的另一个 term-* 窗口会把别人的
+  // 标签也接管一份，同一个 ptyId 在两个窗口各 attachPty 一次，用户关掉多余那个时
+  // closeTab 会 kill 掉正在跑的会话。不是发给我的：不建标签、也**不回 ack**（回了就
+  // 等于替真正的接管方给了保证，发起方会据此删掉自己的标签）。
+  if (payload.toLabel !== (await currentWindowLabel())) return
   for (const pane of payload.panes) {
     if (!pane.ptyId) continue
     discardBuffered(pane.ptyId)
@@ -342,7 +414,11 @@ export async function handleHandoff(payload: HandoffPayload): Promise<void> {
   }))
   const tabId = useTabs.getState().adoptTerminalTab({ panes: adopted, activePaneIndex: payload.activePaneIndex })
   if (!tabId) return
-  await emitTo(payload.fromLabel, HANDOFF_ACK_EVENT, { label: payload.toLabel } satisfies HandoffAck)
+  // ack 报的是**本窗口自己的** label（R2/C1 之三），不是把 payload.toLabel 原样回带——
+  // 后者只是"发起方以为接管方是谁"，回带过去等于让发起方自说自话地确认自己。走到这里
+  // 时上面那道校验已经保证两者相等，用 currentWindowLabel() 是让"谁在确认"这件事由
+  // 确认者自己说出来，而不是从对方的话里抄一遍。
+  await emitTo(payload.fromLabel, HANDOFF_ACK_EVENT, { label: await currentWindowLabel() } satisfies HandoffAck)
 }
 
 /** 新窗口启动时的接管入口（App.tsx 顶层 side-effect 导入触发）。
@@ -365,8 +441,13 @@ export const windowHandoffReady: Promise<void> = (async () => {
   const label = await currentWindowLabel()
   if (!isTornOutWindow(label)) return
   await ptyEventsReady
+  // target 必须限定成本窗口（R2/C1 之二）：不传 options 的 listen 会落成
+  // `{ kind: 'Any' }`，而 Any 目标的监听器对 emitTo 的 label 过滤**无条件命中**（考据
+  // 见文件顶部）——那样每个 term-* 窗口都会收到发给别人的接管载荷。传字符串时
+  // @tauri-apps/api 会包成 `{ kind: 'AnyLabel', label }`；已核实这不会误伤上面那条
+  // ready 广播：`emit` 走的是 filter 为 None 的路径，AnyLabel 目标的监听器照收。
   await listen<HandoffPayload>(HANDOFF_EVENT, (e) => {
     void handleHandoff(e.payload).catch((err) => { console.error('接管交接载荷失败', err) })
-  })
+  }, { target: label })
   await emit(HANDOFF_READY_EVENT, { label } satisfies HandoffReady)
 })().catch((err) => { console.error('窗口交接监听注册失败', err) })

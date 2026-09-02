@@ -6,9 +6,22 @@ const sinks = new Map<string, Sink>()
 const buffers = new Map<string, Uint8Array[]>()
 const exited = new Set<string>()
 const exitSinks = new Map<string, () => void>()
+// 已经交接给别的窗口、本窗口不再关心其输出的 PTY（V3.3 Task 4 R2/I3）。
+//
+// pty-output 是 app.emit 全应用广播（pty.rs:28），交接之后这个 PTY 的输出仍然会源源不断
+// 送到旧窗口；而旧窗口的标签已经移除、TerminalView 已卸载（sinks 里没有它了），于是每
+// 一条都被 else 分支塞进 buffers——而旧窗口**再也不会** attachPty 这个 id，没有任何路径
+// 会清空它。把一个持续刷屏的会话拖出去，原窗口的内存就随该会话的输出量无限增长。
+//
+// 这是"移除标签但不 kill PTY"这条新路径独有的问题：此前唯一移除终端标签的路径是
+// closeTab，它会 kill 掉 PTY，输出自然就停了。
+//
+// 只丢弃、不 unlisten：监听是所有 PTY 共用的一个全局监听器，不能为某一个 id 摘掉。
+const ignored = new Set<string>()
 
 export const ptyEventsReady: Promise<void> = (async () => {
   await listen<{ id: string; data: string }>('pty-output', (e) => {
+    if (ignored.has(e.payload.id)) return // 已交接出去：直接丢弃，既不投递也不缓存
     const bytes = b64ToBytes(e.payload.data)
     const sink = sinks.get(e.payload.id)
     if (sink) sink(bytes)
@@ -42,6 +55,15 @@ export function discardBuffered(id: string): void {
   buffers.delete(id)
 }
 
+/** 登记"这个 PTY 已经交接给别的窗口了，本窗口此后收到它的输出一律丢弃"。
+ *
+ *  与 discardBuffered 成对使用（见 windowHandoff.ts 交接成功那一步）：前者清掉已经攒下
+ *  的，后者挡住此后还会不断到来的。只清一次是不够的——广播不会停。 */
+export function ignorePtyOutput(id: string): void {
+  ignored.add(id)
+  buffers.delete(id)
+}
+
 // 交接的第二步：把旧窗口序列化出来的滚屏排进这个 PTY 待回放缓冲的**最前面**，而不是
 // 直接写进终端。理由是时序：新窗口这边此刻还没有任何 <TerminalView> 挂载（标签是紧接着
 // 这一步才进 store 的），拿不到 term 实例可写。unshift 而不是 push：紧随其后到达的实时
@@ -66,6 +88,11 @@ export function seedScrollback(id: string, text: string): void {
 }
 
 export function attachPty(id: string, sink: Sink, onExit: () => void): () => void {
+  // 本窗口重新为这个 id 挂上终端 ⇒ 它显然又关心这个 PTY 的输出了，撤销 ignorePtyOutput
+  // 的登记。当前版本（V3.3）不支持把标签从别的窗口拖回来，正常不会走到这里；写上是为了
+  // 让"已忽略"不是一个此进程内再也无法恢复的终态——否则以后真做了"拖回来"，会得到一个
+  // 静默不刷新的死终端，而且完全没有报错线索。
+  ignored.delete(id)
   const replayed = buffers.get(id) ?? []
   buffers.delete(id)
   replayed.forEach(sink)

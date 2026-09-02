@@ -449,6 +449,46 @@ describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () 
     // 标签的窗格区"用例），没有任何标签/窗格状态发生变化。
     expect(useTabs.getState().tabs).toEqual([HOME, TAB_A])
   })
+
+  // R2/M5：总览标签没有窗格、没有 PTY，tearOutTab 对它是空操作。此前它照样会进入
+  // tearOut 状态、照样显示「松开在新窗口打开」，松手却什么都不发生——一个明确的视觉
+  // 承诺配一个无声的空操作。现在在判定这一层就排除掉。
+  it('拖总览标签移出窗口边界：不进入 tearOut 状态、不出提示、松手也不发起交接（它没有窗格可搬）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, OVERVIEW_TAB], activeId: 'tab-a' })
+    await renderApp()
+    const ov = tabEl('总览页')
+
+    await act(async () => {
+      fireEvent.pointerDown(ov, { clientX: 300, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(ov, { clientX: 2000, clientY: 10, pointerId: 1 }) // 移出窗口边界
+    })
+
+    expect(useDnd.getState().tearOut).toBe(false)
+    expect(document.querySelector('.tabbar-tear-out')).toBeNull()
+
+    await act(async () => {
+      fireEvent.pointerUp(ov, { clientX: 2000, clientY: 10, pointerId: 1 })
+    })
+
+    expect(tearOutTab).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-ov'])
+  })
+
+  // 同一次改动的另一半：term 标签的拖出判定必须原样保留（别把 M5 的收紧写成"谁都不
+  // 能拖出"）。
+  it('term 标签移出窗口边界仍然照常进入 tearOut 状态（M5 的收紧只针对总览标签）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, OVERVIEW_TAB, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 400, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 2000, clientY: 10, pointerId: 1 })
+    })
+
+    expect(useDnd.getState().tearOut).toBe(true)
+    expect(document.querySelector('.tabbar-tear-out')).not.toBeNull()
+  })
 })
 
 // 标签右键菜单（设计文档新增）：复用 TabPanes.tsx 窗格标题栏那一份 ContextMenu 组件

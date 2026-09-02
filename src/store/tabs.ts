@@ -143,7 +143,7 @@ type TabsState = {
   setPaneWidths(tabId: string, widths: number[]): void
   reconcilePanes(projects: ProjectInfo[], aliases: Record<string, string>): void
   adoptTerminalTab(o: { panes: AdoptedPane[]; activePaneIndex: number }): string | null
-  removeTabKeepingPty(id: string): boolean
+  removeTabKeepingPty(id: string, paneIds: string[]): boolean
 }
 
 // 跨窗口交接（V3.3 设计文档 §4.2，见 src/windowHandoff.ts）过来的窗格描述：与 Pane
@@ -643,25 +643,50 @@ export const useTabs = create<TabsState>((set, get) => ({
     set((s) => ({ tabs: [...s.tabs, tab], activeId: id }))
     return id
   },
-  // 跨窗口交接的发送端收尾（V3.3 设计文档 §4.2 第 6 步）：把标签从**本窗口**移除，
-  // 但**绝不 kill 它的 PTY**——那些会话此刻已经被新窗口接管、正在继续跑，kill 掉就是
-  // 直接杀死用户正在运行的 claude 进程。
+  // 跨窗口交接的发送端收尾（V3.3 设计文档 §4.2 最后一步）：把**这次确实交接出去的那些
+  // 窗格**从本窗口移除，但**绝不 kill 它们的 PTY**——那些会话此刻已经被新窗口接管、正在
+  // 继续跑，kill 掉就是直接杀死用户正在运行的 claude 进程。
   //
   // 因此这里不能复用 closeTab：它的整个职责就是"确认后终止 PTY"，语义正好相反。与
   // movePanesToTab 移除源标签那一步是同一类操作（窗格只是换了个持有者，没有任何 PTY
   // 被终止，也不该弹确认），区别只在于新的持有者在另一个窗口里、不在本窗口的 store。
   //
+  // **R2/I2：按窗格 id 精确移除，不是按 tab id 整块删。** 交接是异步的：从"打包载荷"
+  // 到"收到 ack"之间还隔着 emitTo 和最长 5s 的等待，用户完全可能在这期间 ⌘D 给这个标签
+  // 加了个新窗格并选定了会话。整块删会把那个**没有交接出去**的窗格一起删掉，它的 PTY
+  // 于是两个窗口都没有——正是本任务绝不允许出现的状态。剩余窗格非空时保留标签本身，
+  // 并按剩余窗格重新等分宽度、重算标题、必要时改焦点（与 closePane 的既有收尾一致）。
+  //
   // 调用方（windowHandoff.ts）必须在**收到新窗口的接管确认之后**才调这个方法，顺序
   // 反了会在接管失败时凭空吃掉用户一个正在运行的会话。activeId 的兜底与 closeTab
   // 逐字相同（主页标签恒存在，tabs 不可能为空）。
-  removeTabKeepingPty: (id) => {
+  removeTabKeepingPty: (id, paneIds) => {
     const tab = get().tabs.find((t) => t.id === id)
     if (!tab || tab.kind === 'home') return false
-    set((s) => {
-      const tabs = s.tabs.filter((t) => t.id !== id)
-      const activeId = s.activeId === id ? tabs[tabs.length - 1].id : s.activeId
-      return { tabs, activeId }
-    })
+    const handed = new Set(paneIds)
+    const remaining = tab.panes.filter((p) => !handed.has(p.id))
+    if (remaining.length === tab.panes.length) return false // 一个都没交接出去：不动
+    if (remaining.length === 0) {
+      set((s) => {
+        const tabs = s.tabs.filter((t) => t.id !== id)
+        const activeId = s.activeId === id ? tabs[tabs.length - 1].id : s.activeId
+        return { tabs, activeId }
+      })
+      return true
+    }
+    set((s) => ({
+      tabs: s.tabs.map((t) => {
+        if (t.id !== id) return t
+        const activePaneId = handed.has(t.activePaneId ?? '') ? remaining[0].id : t.activePaneId
+        return {
+          ...t,
+          panes: remaining,
+          activePaneId,
+          paneWidths: remaining.length > 1 ? equalPaneWidths(remaining.length) : undefined,
+          title: deriveTabTitle(remaining, t.title),
+        }
+      }),
+    }))
     return true
   },
 }))

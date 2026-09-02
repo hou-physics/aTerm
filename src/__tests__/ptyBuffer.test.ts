@@ -186,3 +186,53 @@ describe('ptyBuffer.seedScrollback（跨窗口交接的滚屏落地）', () => {
     expect(s.calls.map((b) => decoder.decode(b))).toEqual(['scrollback-history'])
   })
 })
+
+// V3.3 Task 4 R2/I3：标签交接给别的窗口之后，本窗口既不该再投递、也不该再缓存这个 PTY
+// 的输出——pty-output 是全应用广播，而本窗口的 TerminalView 已经卸载、且再也不会
+// attachPty 这个 id，没有任何路径会清空 buffers。只清一次不够，广播不会停。
+describe('ptyBuffer.ignorePtyOutput（已交接出去的 PTY）', () => {
+  it('登记之后到达的输出既不缓存也不投递：attachPty 什么都收不到', async () => {
+    const { attachPty, ignorePtyOutput } = await freshModule()
+
+    ignorePtyOutput('G1')
+    for (let i = 0; i < 100; i++) handlers['pty-output']({ payload: { id: 'G1', data: toB64('spam') } })
+
+    const s = trackedSink()
+    attachPty('G1', s.sink, () => {})
+    expect(s.calls).toHaveLength(0)
+  })
+
+  it('登记时把已经攒下的那份也一并清掉（不是只挡住后来的）', async () => {
+    const { attachPty, ignorePtyOutput } = await freshModule()
+
+    handlers['pty-output']({ payload: { id: 'G2', data: toB64('buffered-before') } })
+    ignorePtyOutput('G2')
+
+    const s = trackedSink()
+    attachPty('G2', s.sink, () => {})
+    expect(s.calls).toHaveLength(0)
+  })
+
+  it('只影响被登记的那一个 id：别的 PTY 照常缓存与投递', async () => {
+    const { attachPty, ignorePtyOutput } = await freshModule()
+
+    ignorePtyOutput('G3')
+    handlers['pty-output']({ payload: { id: 'G3', data: toB64('dropped') } })
+    handlers['pty-output']({ payload: { id: 'G4', data: toB64('kept') } })
+
+    const s = trackedSink()
+    attachPty('G4', s.sink, () => {})
+    expect(s.calls.map((b) => new TextDecoder().decode(b))).toEqual(['kept'])
+  })
+
+  it('"已忽略"不是终态：本窗口再次为该 id 挂上终端后，输出恢复', async () => {
+    const { attachPty, ignorePtyOutput } = await freshModule()
+
+    ignorePtyOutput('G5')
+    const s = trackedSink()
+    attachPty('G5', s.sink, () => {})
+    handlers['pty-output']({ payload: { id: 'G5', data: toB64('back-again') } })
+
+    expect(s.calls.map((b) => new TextDecoder().decode(b))).toEqual(['back-again'])
+  })
+})

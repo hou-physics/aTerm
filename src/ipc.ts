@@ -44,7 +44,29 @@ export const readConversation = (dirName: string, rootKey: string) =>
 export const getSessionStatuses = () => invoke<SessionStatusPayload[]>('get_session_statuses')
 export const ptySpawn = (o: { cwd?: string; inject?: string; cols: number; rows: number }) => invoke<string>('pty_spawn', o)
 export const ptyWrite = (id: string, data: string) => invoke<void>('pty_write', { id, data })
-export const ptyResize = (id: string, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows })
+// 本窗口最近一次为每个 PTY 请求过的终端尺寸。
+//
+// 用途（V3.3 Task 4 R2/I4）：标签拖出的交接一旦在"新窗口已经接管过"之后回滚，新窗口
+// 那个 TerminalView 挂载时已经 fit() 并把 PTY 拧成了**它自己**的几何；新窗口关掉之后
+// 旧窗口的 xterm 尺寸没变、ResizeObserver 不触发、active 也没变，于是 PTY 永远停在错误
+// 的列宽上，旧窗口里的会话一直折行错乱，直到用户手动改窗口大小。回滚时要把尺寸拧回来，
+// 就需要知道"旧窗口自己的几何是多少"。
+//
+// 为什么记在这里就是对的：每个窗口是**独立的 JS 上下文**，这张表只会记下**本窗口**
+// 发出过的 pty_resize，新窗口的那次调用发生在它自己的上下文里，不会污染这张表。而
+// TerminalView（受保护文件，本任务不得改动）每次 fit 之后都会调用 ptyResize，所以这里
+// 拿到的恒是本窗口最后一次自己算出来的真实 cols/rows——不需要去读 xterm 实例，也不需要
+// 在受保护文件里新开一个尺寸注册表。
+const lastPtySizes = new Map<string, { cols: number; rows: number }>()
+
+export const ptyResize = (id: string, cols: number, rows: number) => {
+  lastPtySizes.set(id, { cols, rows })
+  return invoke<void>('pty_resize', { id, cols, rows })
+}
+
+/** 本窗口最近一次为该 PTY 请求过的尺寸；本窗口从未请求过（终端还没挂载/fit 过）时
+ *  返回 undefined。 */
+export const lastPtySize = (id: string): { cols: number; rows: number } | undefined => lastPtySizes.get(id)
 export const ptyKill = (id: string) => invoke<void>('pty_kill', { id })
 export const ptyIsAlive = (id: string) => invoke<boolean>('pty_is_alive', { id })
 export const confirmExit = () => invoke<void>('confirm_exit')
