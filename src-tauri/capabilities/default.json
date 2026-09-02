@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for the main window and term-* windows spawned by tab drag-out (create_term_window)",
+  "windows": ["main", "term-*"],
   "permissions": [
     "core:default",
     "opener:default",

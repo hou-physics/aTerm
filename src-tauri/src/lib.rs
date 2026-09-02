@@ -4,10 +4,12 @@ mod reveal;
 mod sessions;
 mod status;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tauri::menu::{CheckMenuItem, IsMenuItem, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 
 /// 供 `RunEvent::ExitRequested` 处理器与 `confirm_exit` 共用的一个开关：前端确认弹窗里
 /// 点了"确定关闭"之后、真正调用 `AppHandle::exit` 之前，`confirm_exit` 先把它置位。
@@ -61,6 +63,99 @@ fn emit_open_settings(app_handle: &AppHandle) {
 #[cfg(target_os = "macos")]
 fn emit_theme_mode(app_handle: &AppHandle, mode: &str) {
     let _ = app_handle.emit("menu-theme-mode", mode);
+}
+
+/// 拖出标签页时给新窗口分配的自增序号——`new_term_window_label` 用它拼出 `term-<n>`。
+///
+/// 没有用 `uuid` crate：仓库要求本任务不得新增依赖，而 `uuid` 虽然已经通过
+/// tauri/notify 等间接依赖出现在 `Cargo.lock` 里，若要在这里 `use uuid::...`，仍必须
+/// 在 `Cargo.toml` 的 `[dependencies]` 里新增一行显式声明——那就是名副其实的"新增
+/// 依赖"，即便它不会真的多下载/多编译一个新 crate。改用本仓库 `pty.rs::pty_spawn`
+/// 已经验证过的同一手法：进程内单调递增的 `AtomicU64` 计数器。这满足这里唯一需要
+/// 的不变式——窗口 label 只需要在应用这一次运行期间不重复（label 不跨进程/跨重启
+/// 持久化，重启后旧窗口早已不存在，序号从 1 重来不会与任何"仍然活着"的窗口冲突）。
+static NEXT_TERM_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 纯函数：生成新终端窗口的 label，形如 `term-<n>`。
+///
+/// 不接触任何 Tauri/窗口对象，因此可以像 `settings_insertion_index`/`validate_reveal_
+/// dir`（见 reveal.rs）那样直接单测，不需要构造真实 `App`。`create_term_window` 是
+/// 这个函数唯一的生产调用点。
+fn new_term_window_label() -> String {
+    format!("term-{}", NEXT_TERM_WINDOW_ID.fetch_add(1, Ordering::SeqCst))
+}
+
+/// 把一个标签页拖出主窗口时，创建接管它的新窗口。
+///
+/// ## 坐标契约：`x`/`y` 是逻辑（CSS）像素，不是物理像素，调用方不需要按
+/// `devicePixelRatio` 换算
+///
+/// 依据：已对照本机 `tauri 2.11.5` 源码 `src/webview/webview_window.rs` 里
+/// `WebviewWindowBuilder::position` 的文档字符串——"The initial position of the
+/// window in logical pixels."（`inner_size` 同一文件、同一措辞："Window size in
+/// logical pixels."）核实。
+///
+/// 这与 `src/store/layout.ts` 的 `runPanelResize` 刻意相反，容易搞反、所以在这里
+/// 写清楚：那段代码调用的是**已存在窗口**的 JS 端 API
+/// `win.setPosition(new PhysicalPosition(...))`——显式构造 `PhysicalPosition`
+/// 包装类型，因此要求物理像素，需要先把 CSS 像素的 `panelWidth` 乘上
+/// `window.devicePixelRatio` 才能传进去（该文件里那段注释："panelWidth 存的是 CSS
+/// 像素，而 outerPosition/outerSize/Monitor.workArea 全部是物理像素"）。而这里调用的
+/// 是**创建期**的 Rust 端 builder 方法，同一个 `f64` 参数在 `position`/`inner_size`
+/// 这两个方法上就是逻辑像素，没有 Physical/Logical 包装类型的选择余地——如果调用方
+/// （前端拖出手势）在传入前又乘了一次 dpr，Retina 屏（dpr=2）上新窗口就会出现在期望
+/// 位置 2 倍偏移处，且非 Retina 屏上又恰好正确，是最难查的那类缺陷（与 layout.ts 里
+/// 那条注释描述的坑同构，方向相反）。调用方应直接传入拖放事件里的 CSS 像素坐标
+/// （例如 `DragEvent.screenX`/`screenY`），不要再乘 dpr。
+///
+/// ## 尺寸与 URL
+///
+/// 尺寸不接受调用方指定，动态读取 `app.config()`（对应 `tauri.conf.json`）里 label
+/// 为 `"main"` 的窗口配置的宽高——`WindowConfig.width`/`height` 同样是逻辑像素
+/// （已对照 `tauri-utils` 源码 `src/config.rs` 核实其文档字符串："The window width/
+/// height in logical pixels."），与 `inner_size()` 的单位天然一致，不需要在这里做
+/// 任何换算。找不到 label 为 `"main"` 的配置项时退回配置数组第一项；数组整体为空时
+/// 退回硬编码的 1200×780（与当前 `tauri.conf.json` 主窗口配置一致的兜底值，纯粹
+/// 防御性代码，正常情况下不会走到）。URL 同样直接克隆自主窗口配置的 `url` 字段，
+/// 不在这里重新拼一份字面量——避免这里和 `tauri.conf.json` 各写一份、将来彼此漂移。
+///
+/// ## 失败即降级
+///
+/// `WebviewWindowBuilder::build()` 出错只把错误信息通过 `Err` 传回前端，绝不
+/// panic——与仓库里其它命令的一贯做法一致（`reveal_in_finder`、
+/// `set_theme_mode_checked` 等），也是本仓库明确要求的纪律：`core:window:allow-
+/// set-size` 未授权那次事故就是"该报错的地方被静默吞掉"，这里不重蹈覆辙。
+///
+/// 用 `async fn`：已对照 `WebviewWindowBuilder::new` 文档字符串核实——"On Windows,
+/// this function deadlocks when used in a synchronous command and event handlers
+/// ... You should use `async` commands and separate threads when creating
+/// windows."，仓库里 `count_subagents`（sessions/subagents.rs）已有 `async` 命令
+/// 先例，这里照官方建议同样写成 `async`。
+#[tauri::command]
+async fn create_term_window(app: AppHandle, x: f64, y: f64) -> Result<String, String> {
+    let label = new_term_window_label();
+
+    let main_window_config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .or_else(|| app.config().app.windows.first());
+
+    let (width, height, url, title) = match main_window_config {
+        Some(w) => (w.width, w.height, w.url.clone(), w.title.clone()),
+        None => (1200.0, 780.0, WebviewUrl::App("index.html".into()), "aTerm".to_string()),
+    };
+
+    WebviewWindowBuilder::new(&app, &label, url)
+        .title(title)
+        .position(x, y)
+        .inner_size(width, height)
+        .build()
+        .map_err(|e| format!("创建新窗口失败：{e}"))?;
+
+    Ok(label)
 }
 
 /// macOS 专属：把 Tauri 自动生成的默认菜单里那个"Quit"项换成一个自定义菜单项。
@@ -481,7 +576,8 @@ pub fn run() {
             status::installer::uninstall_hooks,
             reveal::reveal_in_finder,
             confirm_exit,
-            set_theme_mode_checked
+            set_theme_mode_checked,
+            create_term_window
         ])
         .setup(|app| {
             // 状态引擎（P2b）：起文件监听 + 后台刷新线程，注册管理状态。返回的句柄
@@ -743,5 +839,24 @@ mod tests {
             1,
             "任意时刻必须恰好一项勾选"
         );
+    }
+
+    // new_term_window_label：拖出标签页时新窗口的 label 生成规则，纯函数，不接触任何
+    // 真实 App/WebviewWindow（与 settings_insertion_index / validate_reveal_dir 同一
+    // 做法）。create_term_window 本身要构造真实窗口，未覆盖单测（先例见
+    // theme_mode_checked_states_overwrites_stale_state 上方注释里对 apply_theme_mode_
+    // checked 覆盖缺口的说明）。
+
+    #[test]
+    fn term_window_label_has_expected_shape() {
+        // 会因为什么失败：如果实现改成不带 "term-" 前缀（例如直接返回裸数字/uuid），
+        // starts_with 断言就会失败。
+        let a = new_term_window_label();
+        let b = new_term_window_label();
+        assert!(a.starts_with("term-"), "label 必须以 term- 开头，实际：{a}");
+        // 会因为什么失败：如果生成规则退化成常量或基于不够精细的时钟（两次调用落在
+        // 同一时间粒度内），第二个窗口的 label 会撞上第一个——多窗口场景下这意味着
+        // WebviewWindowBuilder::new 会因 label 重复而创建失败/覆盖已有窗口。
+        assert_ne!(a, b, "两次生成的 label 不能相同，否则第二个窗口会撞上第一个");
     }
 }
