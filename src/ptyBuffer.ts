@@ -24,14 +24,33 @@ export const ptyEventsReady: Promise<void> = (async () => {
   })
 })().then(() => undefined).catch((err) => { console.error('pty 事件监听注册失败', err) })
 
-// 标签被从别的窗口拖过来时（V3.3 设计文档 §4.2 第 5 步，见 src/windowHandoff.ts）：
-// 旧窗口序列化出来的滚屏要排在这个 PTY 待回放缓冲的**最前面**，而不是直接写进终端。
-// 理由是时序：新窗口这边此刻还没有任何 <TerminalView> 挂载（标签是紧接着这一步才进
-// store 的），拿不到 term 实例可写；而 pty-output 是 app.emit 全应用广播（pty.rs:28），
-// 本窗口的监听从 ptyEventsReady 就绪那一刻起就已经在往 buffers 里攒交接期间的实时
-// 输出了。把滚屏 unshift 到队首，随后 TerminalView 挂载时 attachPty 的既有回放逻辑
-// （上面那一行 replayed.forEach(sink)）就会先写历史、再写这期间的新输出，顺序天然
-// 正确——不需要在 TerminalView（受保护文件）里加任何"交接专用"的写入口。
+// 跨窗口交接（V3.3 设计文档 §4.2，见 src/windowHandoff.ts）的第一步：丢弃该 PTY 已经
+// 攒下的待回放缓冲。
+//
+// R1 之前的顺序是「建窗前序列化」，空档是整个建窗时间（数百毫秒）；R1 改成「收到新窗口
+// 的就绪事件之后才序列化」，空档缩到一次 IPC 往返，但代价是这段时间新窗口的 ptyBuffer
+// 已经在攒实时输出了——那部分内容同时也在快照里，直接回放会**重复**。Claude Code 跑在
+// alt-screen，重复的转义序列会把画面搞乱，比丢一小段更糟。
+//
+// 所以接管端必须：先 discardBuffered、再 seedScrollback、再让 TerminalView 去 attachPty。
+// 三步之间不留可插入的时机（都在 handleHandoff 的同一个同步块里），缓冲被清空之后
+// attachPty 的既有回放逻辑自然不会重放任何旧内容，此后的实时输出照常流入。
+//
+// 只丢缓冲，不碰 sinks/exited/exitSinks：这里要抹掉的是"交接期间攒下的、快照里已经
+// 有的那份重复"，不是这个 PTY 的其它任何状态。
+export function discardBuffered(id: string): void {
+  buffers.delete(id)
+}
+
+// 交接的第二步：把旧窗口序列化出来的滚屏排进这个 PTY 待回放缓冲的**最前面**，而不是
+// 直接写进终端。理由是时序：新窗口这边此刻还没有任何 <TerminalView> 挂载（标签是紧接着
+// 这一步才进 store 的），拿不到 term 实例可写。unshift 而不是 push：紧随其后到达的实时
+// 输出必须排在快照之后，随后 TerminalView 挂载时 attachPty 的既有回放逻辑（上面那一行
+// replayed.forEach(sink)）就会先写历史、再写新输出，顺序天然正确——不需要在
+// TerminalView（受保护文件）里加任何"交接专用"的写入口。
+//
+// （按 R1 的顺序，调用它之前刚刚 discardBuffered 过，队列本应是空的；unshift 仍然是对的
+// 语义，它不依赖"队列一定为空"这个前提。）
 //
 // sinks 里已经有该 id 的接收者时直接写给它：这在正常交接流程里不会发生（seed 恒在
 // 建标签之前），但如果真发生了，塞进 buffers 的内容会永远没人取走（attachPty 只在

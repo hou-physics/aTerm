@@ -129,6 +129,52 @@ describe('ptyBuffer.seedScrollback（跨窗口交接的滚屏落地）', () => {
     expect(s.calls).toHaveLength(0)
   })
 
+  it('discardBuffered 之后 attachPty 不会重放任何旧内容（R1：那份内容已经在快照里了）', async () => {
+    const { attachPty, discardBuffered } = await freshModule()
+
+    handlers['pty-output']({ payload: { id: 'D', data: toB64('buffered-before-handoff') } })
+    discardBuffered('D')
+
+    const s = trackedSink()
+    attachPty('D', s.sink, () => {})
+    expect(s.calls).toHaveLength(0)
+  })
+
+  it('discardBuffered 只丢自己那一路：别的 PTY 的缓冲不受影响', async () => {
+    const { attachPty, discardBuffered } = await freshModule()
+
+    handlers['pty-output']({ payload: { id: 'D1', data: toB64('one') } })
+    handlers['pty-output']({ payload: { id: 'D2', data: toB64('two') } })
+    discardBuffered('D1')
+
+    const s = trackedSink()
+    attachPty('D2', s.sink, () => {})
+    expect(s.calls.map((b) => new TextDecoder().decode(b))).toEqual(['two'])
+  })
+
+  it('discardBuffered 不碰已经挂上的接收者：正在显示的终端不会因为一次清缓冲而变哑', async () => {
+    const { attachPty, discardBuffered } = await freshModule()
+
+    const s = trackedSink()
+    attachPty('D4', s.sink, () => {})
+    discardBuffered('D4')
+    handlers['pty-output']({ payload: { id: 'D4', data: toB64('still-flowing') } })
+
+    expect(s.calls.map((b) => new TextDecoder().decode(b))).toEqual(['still-flowing'])
+  })
+
+  it('discardBuffered 之后仍能收实时输出：清的是缓冲，不是这个 PTY 的其它状态', async () => {
+    const { attachPty, discardBuffered } = await freshModule()
+
+    handlers['pty-output']({ payload: { id: 'D3', data: toB64('stale') } })
+    discardBuffered('D3')
+    handlers['pty-output']({ payload: { id: 'D3', data: toB64('live') } })
+
+    const s = trackedSink()
+    attachPty('D3', s.sink, () => {})
+    expect(s.calls.map((b) => new TextDecoder().decode(b))).toEqual(['live'])
+  })
+
   it('该 PTY 已经有接收者时直接写给它，不塞进一个再也没人取走的缓冲', async () => {
     const { attachPty, seedScrollback } = await freshModule()
 

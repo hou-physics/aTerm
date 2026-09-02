@@ -94,6 +94,11 @@ const TAB_B = {
 function fireReady(label: string) {
   for (const h of listeners.get(HANDOFF_READY_EVENT) ?? []) h({ payload: { label } })
 }
+/** 模拟"这个 PTY 广播了一段实时输出"（走 ptyBuffer 自己注册的 pty-output 监听）。
+ *  载荷是 base64（b64ToBytes），只能用 ASCII 字面量——btoa 不接受非 Latin-1。 */
+function firePtyOutput(id: string, text: string) {
+  for (const h of listeners.get('pty-output') ?? []) h({ payload: { id, data: btoa(text) } })
+}
 /** 模拟"新窗口回了接管确认"。*/
 function fireAck(label: string) {
   for (const h of listeners.get(HANDOFF_ACK_EVENT) ?? []) h({ payload: { label } })
@@ -102,7 +107,14 @@ function fireAck(label: string) {
 let warnSpy: ReturnType<typeof vi.spyOn> | undefined
 
 beforeEach(() => {
+  // ptyBuffer 的 pty-output / pty-exit 监听是模块导入时注册的、只注册这一次——整张表
+  // 清掉之后就再也回不来了，而下面「先丢弃既有缓冲」那条用例要靠它往缓冲里灌数据。
+  // 只清握手相关的事件。
+  const ptyOutput = listeners.get('pty-output')
+  const ptyExit = listeners.get('pty-exit')
   listeners.clear()
+  if (ptyOutput) listeners.set('pty-output', ptyOutput)
+  if (ptyExit) listeners.set('pty-exit', ptyExit)
   vi.clearAllMocks()
   vi.useFakeTimers()
   // 失败/超时分支会 console.warn 留痕（生产环境要的就是这条线索，见 windowHandoff.ts
@@ -164,17 +176,20 @@ describe('tearOutTab — 完整成功路径（设计文档 §4.2 的六步）', 
     expect(listeners.get(HANDOFF_ACK_EVENT)?.size ?? 0).toBe(0)
   })
 
-  it('载荷带上该标签每个窗格的滚屏与身份字段（序列化在建窗之前就取好，见 §4.2 第 1 步）', async () => {
+  it('载荷带上该标签每个窗格的滚屏与身份字段，且序列化发生在收到就绪事件之后（R1）', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
     useSessions.setState({ projects: [{ dirName: '-tmp-demo', cwd: '/tmp/demo', lastActivityMs: 0, threads: [] }] })
     serializeTermMock.mockReturnValue('[31mRED[0m')
 
     const done = tearOutTab('tab-a', { x: 10, y: 20 })
     await vi.advanceTimersByTimeAsync(0)
-    // 序列化必须发生在建窗之前——建窗成功之后才取，中间那段输出就再也拿不到了。
-    expect(serializeTermMock).toHaveBeenCalledWith('pty-a')
+    // R1：序列化必须发生在**收到就绪事件之后**。提前到建窗之前的话，整个建窗时间
+    // （数百毫秒起）的输出既不在快照里、也不在新窗口的缓冲里，交接后彻底看不见。
+    expect(serializeTermMock).not.toHaveBeenCalled()
+
     fireReady('term-1')
     await vi.advanceTimersByTimeAsync(0)
+    expect(serializeTermMock).toHaveBeenCalledWith('pty-a')
     fireAck('term-1')
     await done
 
@@ -187,8 +202,6 @@ describe('tearOutTab — 完整成功路径（设计文档 §4.2 的六步）', 
         title: 'A',
         cwd: '/tmp/demo',
         scrollback: '[31mRED[0m',
-        cols: 80,
-        rows: 24,
         threadKey: 'demo:root-a',
         dirName: '-tmp-demo',
         rootKey: 'root-a',
@@ -255,6 +268,46 @@ describe('tearOutTab — 完整成功路径（设计文档 §4.2 的六步）', 
     expect(payload.fromLabel).toBe('term-3')
     expect(payload.toLabel).toBe('term-9')
     expect(tabsMod.useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+  })
+
+  // R1 把序列化挪到就绪之后，中间多了一段"建窗 + 等就绪"的可 await 时间（数百毫秒），
+  // 用户完全可能在这期间 ⌘D 加个窗格。沿用函数开头那份标签快照会漏掉新窗格，它的 PTY
+  // 就成了孤儿（旧窗口的标签随后被整个移除）。
+  it('等待就绪期间标签又多了一个窗格：载荷按发送那一刻的最新窗格集合打包，不用陈旧快照', async () => {
+    const done = tearOutTab('tab-b', { x: 0, y: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // 焦点也跟着挪到新窗格上——只加窗格不挪焦点的话 activePaneIndex 两边都算成 0，
+    // "用没用陈旧快照"这件事在这个字段上就没有区分力了。
+    useTabs.setState((st) => ({
+      tabs: st.tabs.map((t) =>
+        t.id === 'tab-b'
+          ? { ...t, panes: [...t.panes, { id: 'pane-b2', ptyId: 'pty-b2', title: 'B2' }], activePaneId: 'pane-b2' }
+          : t,
+      ),
+    }))
+
+    fireReady('term-1')
+    await vi.advanceTimersByTimeAsync(0)
+    fireAck('term-1')
+    expect(await done).toBe(true)
+
+    const payload = emitToMock.mock.calls[0][2] as HandoffPayload
+    expect(payload.panes.map((p) => p.ptyId)).toEqual(['pty-b', 'pty-b2'])
+    expect(payload.activePaneIndex).toBe(1)
+  })
+
+  it('等待就绪期间标签被关掉了：不发载荷、关掉建出来的新窗口、给出提示', async () => {
+    const done = tearOutTab('tab-b', { x: 0, y: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    useTabs.setState((st) => ({ tabs: st.tabs.filter((t) => t.id !== 'tab-b'), activeId: 'home' }))
+
+    fireReady('term-1')
+    expect(await done).toBe(false)
+    expect(emitToMock).not.toHaveBeenCalled()
+    expect(closeMock).toHaveBeenCalledTimes(1)
+    expect(useHint.getState().message).toBe('新窗口没能接管这个标签，已留在原窗口')
   })
 })
 
@@ -359,7 +412,7 @@ describe('handleHandoff — 新窗口侧的接管（设计文档 §4.2 第 5 步
     toLabel: 'term-1',
     activePaneIndex: 0,
     panes: [
-      { ptyId: 'pty-b', sessionId: 'sess-b', title: 'B', cwd: '/tmp/demo', scrollback: 'hello', cols: 80, rows: 24, threadKey: 'demo:root-b', dirName: '-tmp-demo', rootKey: 'root-b' },
+      { ptyId: 'pty-b', sessionId: 'sess-b', title: 'B', cwd: '/tmp/demo', scrollback: 'hello', threadKey: 'demo:root-b', dirName: '-tmp-demo', rootKey: 'root-b' },
     ],
   }
 
@@ -403,9 +456,9 @@ describe('handleHandoff — 新窗口侧的接管（设计文档 §4.2 第 5 步
       toLabel: 'term-1',
       activePaneIndex: 2,
       panes: [
-        { ptyId: 'pty-1', title: '一', cwd: null, scrollback: '', cols: 80, rows: 24 },
-        { ptyId: 'pty-2', title: '二', cwd: null, scrollback: '', cols: 80, rows: 24 },
-        { ptyId: 'pty-3', title: '三', cwd: null, scrollback: '', cols: 80, rows: 24 },
+        { ptyId: 'pty-1', title: '一', cwd: null, scrollback: '' },
+        { ptyId: 'pty-2', title: '二', cwd: null, scrollback: '' },
+        { ptyId: 'pty-3', title: '三', cwd: null, scrollback: '' },
       ],
     })
 
@@ -414,6 +467,39 @@ describe('handleHandoff — 新窗口侧的接管（设计文档 §4.2 第 5 步
     expect(adopted.activePaneId).toBe(adopted.panes[2].id)
     expect(adopted.title).toBe('3 个对话')
     expect(adopted.paneWidths).toEqual([1 / 3, 1 / 3, 1 / 3])
+  })
+
+  // R1 的核心：旧窗口是在收到本窗口就绪事件之后才序列化的，所以 [本窗口监听就绪,
+  // 旧窗口序列化] 这一小段实时输出同时躺在本窗口的缓冲里和快照里。不先清缓冲就会
+  // 重复回放，Claude Code 跑在 alt-screen，重复的转义序列会把画面搞乱。
+  // ptyBuffer 是模块级单例、状态跨用例保留（上面那条用例 attach 过 'pty-b' 且没有
+  // detach），因此这两条各用自己的 ptyId，避免被别人留下的 sink 干扰。
+  const withPty = (ptyId: string): HandoffPayload => ({
+    ...payload,
+    panes: [{ ...payload.panes[0], ptyId }],
+  })
+
+  it('写快照之前先丢弃该 ptyId 的既有缓冲：attachPty 只回放快照，不重放交接期间攒下的那份', async () => {
+    // 交接期间到达、已经被本窗口 ptyBuffer 攒下的实时输出——它的内容也在快照里。
+    firePtyOutput('pty-d1', 'already-buffered-and-also-in-snapshot')
+
+    await handleHandoff(withPty('pty-d1'))
+
+    const written: string[] = []
+    const decoder = new TextDecoder()
+    attachPty('pty-d1', (bytes) => { written.push(decoder.decode(bytes)) }, () => {})
+    expect(written).toEqual(['hello'])
+  })
+
+  it('清掉的只是交接前那一份：接管之后新到的实时输出照常排在快照后面', async () => {
+    firePtyOutput('pty-d2', 'stale')
+    await handleHandoff(withPty('pty-d2'))
+    firePtyOutput('pty-d2', 'fresh-after-handoff')
+
+    const written: string[] = []
+    const decoder = new TextDecoder()
+    attachPty('pty-d2', (bytes) => { written.push(decoder.decode(bytes)) }, () => {})
+    expect(written).toEqual(['hello', 'fresh-after-handoff'])
   })
 
   it('载荷里没有任何窗格时不建空标签，也不回 ack', async () => {

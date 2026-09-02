@@ -14,22 +14,28 @@
 //
 // ## 六步（对应设计文档 §4.2）
 //
-//   1. 旧窗口序列化该标签每个窗格终端的滚屏（termSerialize.ts 的 serializeTerm）
-//   2. 旧窗口调 create_term_window(x, y)（Task 1 的 Rust 命令），拿到新窗口 label
-//   3. 新窗口启动、前端就绪后 emit 就绪事件，带自己的 label
-//   4. 旧窗口收到就绪事件，emitTo(label, …) 定向发送接管载荷
-//   5. 新窗口建标签与窗格、把滚屏排进待回放缓冲、绑定原 ptyId，然后 emitTo 回 ack
-//   6. 旧窗口收到 ack 后移除该标签，**但不 kill PTY**
+//   1. 旧窗口调 create_term_window(x, y)（Task 1 的 Rust 命令），拿到新窗口 label
+//   2. 新窗口启动（其 ptyBuffer 从此开始缓存这个 PTY 的实时输出）→ emit 就绪事件
+//   3. 旧窗口收到就绪事件，**此刻才序列化**该标签每个窗格的滚屏，随即 emitTo 定向
+//      发送接管载荷
+//   4. 新窗口收到载荷：**先丢弃该 ptyId 的既有缓冲**、再写入快照、再建标签（挂载后
+//      TerminalView 自己 attachPty），然后 emitTo 回 ack
+//   5. 旧窗口收到 ack 后移除该标签，**但不 kill PTY**
 //
-// ## 交接期间输出不会丢
+// ## 交接期间的输出：既不丢、也不重复（R1 修正）
 //
-// pty-output 是 app.emit 全应用广播（src-tauri/src/pty.rs:28），不是定向某个窗口。
-// 新窗口的 ptyBuffer 从它自己的监听注册那一刻（ptyEventsReady）起就在攒这个 PTY 的
-// 输出，attachPty 时连同交接过来的滚屏一起回放（见 ptyBuffer.ts 的 seedScrollback /
-// attachPty）。交接期间两个窗口都收得到，这里不需要、也不该再造一份缓冲。
+// pty-output 是 app.emit 全应用广播（src-tauri/src/pty.rs:28），不是定向某个窗口，新
+// 窗口的 ptyBuffer 从它自己的监听注册那一刻（ptyEventsReady）起就在攒这个 PTY 的输出。
+//
+// 初版按规格把序列化排在建窗**之前**，于是 [序列化, 新窗口监听就绪] 这一整段建窗时间
+// （数百毫秒起）的输出既不在快照里、也不在新窗口的缓冲里——交接后彻底看不见。R1 把
+// 序列化挪到收到就绪事件之后，空档缩到一次 IPC 往返（毫秒级）；代价是这一小段输出
+// 同时存在于快照和新窗口缓冲里，因此接管端必须先 discardBuffered 再写快照（见
+// ptyBuffer.ts 那两个函数的注释）。为什么宁可丢一点也不要重复：Claude Code 跑在
+// alt-screen，重复的转义序列会把画面搞乱，比丢一小段更糟。
 import { invoke } from '@tauri-apps/api/core'
 import { emit, emitTo, listen } from '@tauri-apps/api/event'
-import { ptyEventsReady, seedScrollback } from './ptyBuffer'
+import { discardBuffered, ptyEventsReady, seedScrollback } from './ptyBuffer'
 import { useHint } from './store/hint'
 import { useSessions } from './store/sessions'
 import { type AdoptedPane, type Tab, useTabs } from './store/tabs'
@@ -58,7 +64,13 @@ export type HandoffAck = { label: string }
 /** 交接载荷里的单个窗格。
  *
  *  规格 §4.2 第 4 步要求载荷至少含 ptyId / sessionId / 标题 / cwd / 序列化滚屏 /
- *  终端尺寸——这七项都在这里。**为什么是一个数组而不是七个平铺字段**：本仓库的一个
+ *  终端尺寸。**终端尺寸（cols/rows）R1 已删除**：接管端根本不读它——新窗口的
+ *  TerminalView 挂载时会自己 fit() 一次并 ptyResize(ptyId, term.cols, term.rows)，尺寸
+ *  在一帧内就校正成新窗口的真实几何（拿载荷里的旧尺寸去 ptyResize 反而会把 PTY 先按
+ *  错误尺寸拧一次）。而真值只存在于受保护文件 TerminalView.tsx 内部的局部变量里，为一
+ *  份没人读的数据去动受保护文件不划算。**尺寸由接管端自行 fit 校正，故不随载荷传递。**
+ *
+ *  **为什么是一个数组而不是平铺字段**：本仓库的一个
  *  标签最多可以持有 3 个窗格（MAX_PANES，⌘D 分屏），而拖出手势的对象是**标签**。若
  *  载荷只装得下一个终端，多窗格标签被拖出时旧窗口会整个移除标签、另外两个 PTY 就
  *  变成没有任何窗口能看到、也关不掉的孤儿进程——正是本任务最要避免的那类用户可见
@@ -72,8 +84,6 @@ export type HandoffPane = {
   title: string
   cwd: string | null
   scrollback: string
-  cols: number
-  rows: number
   threadKey?: string
   dirName?: string
   rootKey?: string
@@ -96,33 +106,15 @@ export type HandoffPayload = {
 // 的代价只是失败场景下提示晚几秒——标签全程留在旧窗口里、会话照常跑，拖拽手势本身
 // 早在 pointerup 就结束了，界面不会卡住。所以两个数字都往宽了取。
 
-/** 第 3 步（新窗口启动 → 前端就绪）的超时。10s：这一段包含原生窗口创建、WKWebView
+/** 第 2 步（新窗口启动 → 前端就绪）的超时。10s：这一段包含原生窗口创建、WKWebView
  *  冷启动、整个前端 bundle 解析执行、React 挂载、以及 ptyEventsReady 那两次 listen
  *  的 IPC 往返——冷启动那一段在开发构建和低配机器上是秒级的。 */
 export const READY_TIMEOUT_MS = 10_000
 
-/** 第 5 步（发出载荷 → 收到接管确认）的超时。5s：新窗口此时已经就绪，剩下的只有
+/** 第 4 步（发出载荷 → 收到接管确认）的超时。5s：新窗口此时已经就绪，剩下的只有
  *  一次 store 写入和一次 emitTo，正常是毫秒级；给到 5s 是留给"事件桥恰好排在一堆
  *  pty-output 后面"这类抖动，仍然比它实际需要的量级大得多。 */
 export const ACK_TIMEOUT_MS = 5_000
-
-/** 交接载荷里终端尺寸的取值。
- *
- *  **这两个是占位常量，不是实测的终端几何**。真实的 term.cols/term.rows 只存在于
- *  受保护文件 src/components/TerminalView.tsx 内部的局部变量里，本任务不得改动它，
- *  而现有的两个注册表（terminalPaste.ts 的 registerPaste、termSerialize.ts 的
- *  registerSerializer）都只暴露了各自那一个闭包，没有任何一处把尺寸透出来。
- *
- *  为什么这样仍然是安全的：新窗口的 TerminalView 挂载时会自己 fit() 一次并
- *  ptyResize(ptyId, term.cols, term.rows)（该文件既有逻辑），尺寸在一帧内就被校正成
- *  新窗口的真实几何。所以这两个字段目前只是载荷里的元数据，接管端**不会**拿它们去
- *  调 ptyResize——那反而会把 PTY 先按错误尺寸拧一次。取 80×24 是为了和
- *  store/tabs.ts 里 ptySpawn 的初始尺寸对齐，不引入第三个"凭空的"数字。
- *  （若以后要让它变成真值：在 TerminalView 里 registerSerializer 旁边多注册一个
- *  `() => ({ cols: term.cols, rows: term.rows })` 即可，是一行的事——但那是对受保护
- *  文件的改动，需要单独批准。） */
-const HANDOFF_COLS = 80
-const HANDOFF_ROWS = 24
 
 // ── 窗口身份 ────────────────────────────────────────────────────────────────
 
@@ -193,7 +185,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([promise, timeout]).finally(() => { if (timer) clearTimeout(timer) })
 }
 
-/** 第 1 步：把标签的每个窗格连同它此刻的滚屏一起打包。
+/** 第 3 步的前半段：把标签的每个窗格连同它**此刻**的滚屏一起打包。
+ *
+ *  调用时机是硬要求：必须在收到新窗口的就绪事件之后（R1，见文件顶部「交接期间的
+ *  输出」一节）。提前到建窗之前会丢掉整个建窗时间里的输出。
  *
  *  serializeTerm 返回 null 只发生在"该 ptyId 没有注册过序列化入口"（终端还没挂载
  *  完，或窗格本就没有 PTY），按空滚屏处理——历史看不到比整次交接失败要好。
@@ -209,8 +204,6 @@ function buildHandoffPanes(tab: Tab): HandoffPane[] {
     title: pane.title,
     cwd: projects.find((p) => p.dirName === pane.dirName)?.cwd ?? null,
     scrollback: pane.ptyId ? (serializeTerm(pane.ptyId) ?? '') : '',
-    cols: HANDOFF_COLS,
-    rows: HANDOFF_ROWS,
     threadKey: pane.threadKey,
     dirName: pane.dirName,
     rootKey: pane.rootKey,
@@ -248,11 +241,7 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
   const tab = useTabs.getState().tabs.find((t) => t.id === tabId)
   if (!tab || tab.kind !== 'term') return false
 
-  // 第 1 步：先序列化。必须赶在建窗之前——规格 §4.2 把它排在第 1 步，等新窗口就绪
-  // 之后再取会把"建窗这段时间里的输出"同时装进滚屏和新窗口的实时缓冲，变成重复。
-  const panes = buildHandoffPanes(tab)
   const fromLabel = await currentWindowLabel()
-  const activePaneIndex = Math.max(0, tab.panes.findIndex((p) => p.id === tab.activePaneId))
 
   // 认领用的可变量：两个监听器都闭包捕获它。监听在建窗**之前**注册（下面），此时
   // label 还是 null——只有建窗返回之后才知道等的是谁，因此就绪事件先记进 seenReady，
@@ -275,18 +264,31 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
   })
 
   try {
-    // 第 2 步：建窗。失败（Rust 侧返回 Err）时什么窗口都没建出来，没有残留可关。
+    // 第 1 步：建窗。失败（Rust 侧返回 Err）时什么窗口都没建出来，没有残留可关。
     label = await invoke<string>('create_term_window', { x: screenPoint.x, y: screenPoint.y })
     if (seenReady.has(label)) ready.resolve()
 
-    // 第 3 步：等新窗口就绪（带超时）。
+    // 第 2 步：等新窗口就绪（带超时）。
     await withTimeout(ready.promise, READY_TIMEOUT_MS)
 
-    // 第 4 步：定向把载荷发给它。
-    const payload: HandoffPayload = { fromLabel, toLabel: label, activePaneIndex, panes }
+    // 第 3 步：**此刻**才序列化（R1，见文件顶部「交接期间的输出」一节），随即定向
+    // 把载荷发给新窗口。
+    //
+    // 标签要重新从 store 取一次，不能沿用函数开头那份快照：上面刚 await 过若干次
+    // （建窗 + 等就绪，可能是数百毫秒），这期间用户完全可能 ⌘D 加了个窗格、关掉了
+    // 一个窗格、甚至把整个标签关了。用陈旧快照会把一个已经不存在的窗格搬过去，或者
+    // 漏掉新加的那个（它的 PTY 就成了孤儿）。取不到就当这次交接失败，走下面的回滚。
+    const fresh = useTabs.getState().tabs.find((t) => t.id === tabId)
+    if (!fresh || fresh.kind !== 'term') throw new Error(`标签 ${tabId} 在交接过程中已消失`)
+    const payload: HandoffPayload = {
+      fromLabel,
+      toLabel: label,
+      activePaneIndex: Math.max(0, fresh.panes.findIndex((p) => p.id === fresh.activePaneId)),
+      panes: buildHandoffPanes(fresh),
+    }
     await emitTo(label, HANDOFF_EVENT, payload)
 
-    // 第 5 步（在新窗口那边跑）→ 第 6 步：等接管确认（带超时）。**只有等到这里才
+    // 第 4 步（在新窗口那边跑）→ 第 5 步：等接管确认（带超时）。**只有等到这里才
     // 允许动本窗口的标签**。
     await withTimeout(ack.promise, ACK_TIMEOUT_MS)
     useTabs.getState().removeTabKeepingPty(tabId)
@@ -307,13 +309,17 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
 
 // ── 新窗口侧：接管 ──────────────────────────────────────────────────────────
 
-/** 第 5 步：收到接管载荷后建标签与窗格、写入滚屏、回 ack。
+/** 第 4 步：收到接管载荷后清缓冲、写入滚屏、建标签与窗格、回 ack。
  *
- *  两处顺序不能调换：
- *    1. **先 seedScrollback，再建标签**。标签一进 store，TerminalLayer 立刻挂
- *       <TerminalView>，后者在自己的 effect 里 attachPty 把待回放缓冲一次性取走
- *       （ptyBuffer.ts）。滚屏晚一步排队就再也没人回放它了，用户会看到一个空终端。
- *    2. **先建好标签，再回 ack**。ack 的语义是"我确实接管了"，旧窗口收到它就会移除
+ *  三处顺序都不能调换：
+ *    1. **先 discardBuffered，再 seedScrollback**（R1）。旧窗口是在收到本窗口的就绪
+ *       事件之后才序列化的，所以 [本窗口监听就绪, 旧窗口序列化] 这一小段的实时输出
+ *       同时存在于本窗口的缓冲和快照里；不先清掉就会重复回放，alt-screen 下画面会花。
+ *    2. **先写好缓冲，再建标签**。标签一进 store，TerminalLayer 立刻挂 <TerminalView>，
+ *       后者在自己的 effect 里 attachPty 把待回放缓冲一次性取走（ptyBuffer.ts）。滚屏
+ *       晚一步排队就再也没人回放它了，用户会看到一个空终端。前两步因此都放在
+ *       adoptTerminalTab **之前**的同一个同步块里，中间不留可插入的时机。
+ *    3. **先建好标签，再回 ack**。ack 的语义是"我确实接管了"，旧窗口收到它就会移除
  *       自己那份标签——在真正建好之前回 ack，等于在一个还什么都没有的窗口上给出
  *       保证。
  *
@@ -322,7 +328,9 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
  *  要好——后者正是绝不允许出现的"两个窗口都没有这个标签"。 */
 export async function handleHandoff(payload: HandoffPayload): Promise<void> {
   for (const pane of payload.panes) {
-    if (pane.ptyId) seedScrollback(pane.ptyId, pane.scrollback)
+    if (!pane.ptyId) continue
+    discardBuffered(pane.ptyId)
+    seedScrollback(pane.ptyId, pane.scrollback)
   }
   const adopted: AdoptedPane[] = payload.panes.map((p) => ({
     ptyId: p.ptyId,
