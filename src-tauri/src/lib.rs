@@ -7,9 +7,7 @@ mod status;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tauri::menu::{CheckMenuItem, IsMenuItem, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{
-    AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
-};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 
 /// 供 `RunEvent::ExitRequested` 处理器与 `confirm_exit` 共用的一个开关：前端确认弹窗里
 /// 点了"确定关闭"之后、真正调用 `AppHandle::exit` 之前，`confirm_exit` 先把它置位。
@@ -85,6 +83,68 @@ fn new_term_window_label() -> String {
     format!("term-{}", NEXT_TERM_WINDOW_ID.fetch_add(1, Ordering::SeqCst))
 }
 
+/// 从 `app.config().app.windows`（对应 `tauri.conf.json`）里选出"新终端窗口应该
+/// 以谁为模板"的那一份**完整** `WindowConfig`——不是只挑宽高/URL/标题几个字段，
+/// 是整份配置对象本身。
+///
+/// R1 修复背景：上一轮实现手动挑了 `width`/`height`/`url`/`title` 四个字段，遗漏了
+/// `minWidth`/`minHeight`（评审指出：新窗口能被拖成一条缝，主窗口不能）。手动挑选
+/// 字段这个模式本身就是问题根源——`WindowConfig` 有约 50 个字段（`resizable`/
+/// `decorations`/`titleBarStyle`/`maximizable`/`minimizable`/`closable`/`focus`/
+/// `alwaysOnTop`/`theme`/… 已逐一读过 tauri-utils 2.9.3 `src/config.rs` 的
+/// `WindowConfig` 定义，第 1917-2294 行），今天补上 `minWidth`/`minHeight` 不代表
+/// 以后不会再漏别的。已确认当前 `tauri.conf.json` 的主窗口条目只显式设置了
+/// `title`/`width`/`height`/`minWidth`/`minHeight` 这五项，`resizable`/
+/// `decorations`/`titleBarStyle` 等未出现——但即便如此，也不再逐字段挑，而是让
+/// `term_window_config` 整份克隆再只改 label/位置，这样"以后 tauri.conf.json 里
+/// 主窗口新增了 `alwaysOnTop: true` 之类的字段"也会被新窗口自动继承，不需要回来改
+/// 这个函数。
+///
+/// 优先选 label 为 `"main"` 的那项；找不到就退回数组第一项（本仓库目前只有一个
+/// 窗口配置，二者等价）；数组整体为空这种理论上不该发生的情况（tauri.conf.json
+/// 至少声明了一个窗口）才退回硬编码兜底值——与当前 `tauri.conf.json` 主窗口配置
+/// 逐字段一致（title/width/height/minWidth/minHeight），其余字段用
+/// `WindowConfig::default()`（已对照 `tauri-utils` 源码里 `impl Default for
+/// WindowConfig` 核实，与 `tauri.conf.json` 未显式声明字段时 serde
+/// `#[serde(default = ...)]` 解析出的值逐一相同，例如 `resizable`/`decorations`
+/// 的 serde 默认与 `Default` 默认都是 `true`）。
+///
+/// 纯函数：只读一个切片、返回一份克隆，不接触 `AppHandle`，因此可以直接单测。
+fn main_window_config(windows: &[tauri::utils::config::WindowConfig]) -> tauri::utils::config::WindowConfig {
+    windows
+        .iter()
+        .find(|w| w.label == "main")
+        .or_else(|| windows.first())
+        .cloned()
+        .unwrap_or_else(|| tauri::utils::config::WindowConfig {
+            title: "aTerm".to_string(),
+            width: 1200.0,
+            height: 780.0,
+            min_width: Some(800.0),
+            min_height: Some(500.0),
+            ..Default::default()
+        })
+}
+
+/// 纯函数：由主窗口的完整 `WindowConfig` 派生新终端窗口应使用的 `WindowConfig`——
+/// 只改 `label`（新窗口自己的 label，不能和主窗口撞）与位置（`x`/`y`，调用方传入的
+/// 逻辑像素坐标，见 `create_term_window` 顶部注释的坐标契约）；其余字段——包括
+/// R1 补上的 `min_width`/`min_height`，以及 `resizable`/`decorations`/
+/// `title_bar_style` 等——原样整份克隆自主窗口配置，一次性继承，不逐个字段挑
+/// （逐字段挑正是上一轮遗漏 minWidth/minHeight 的根因）。
+fn term_window_config(
+    main: &tauri::utils::config::WindowConfig,
+    label: &str,
+    x: f64,
+    y: f64,
+) -> tauri::utils::config::WindowConfig {
+    let mut config = main.clone();
+    config.label = label.to_string();
+    config.x = Some(x);
+    config.y = Some(y);
+    config
+}
+
 /// 把一个标签页拖出主窗口时，创建接管它的新窗口。
 ///
 /// ## 坐标契约：`x`/`y` 是逻辑（CSS）像素，不是物理像素，调用方不需要按
@@ -108,50 +168,44 @@ fn new_term_window_label() -> String {
 /// 那条注释描述的坑同构，方向相反）。调用方应直接传入拖放事件里的 CSS 像素坐标
 /// （例如 `DragEvent.screenX`/`screenY`），不要再乘 dpr。
 ///
-/// ## 尺寸与 URL
+/// ## 尺寸/外观/行为——R1：改用 `WebviewWindowBuilder::from_config` 整份继承
 ///
-/// 尺寸不接受调用方指定，动态读取 `app.config()`（对应 `tauri.conf.json`）里 label
-/// 为 `"main"` 的窗口配置的宽高——`WindowConfig.width`/`height` 同样是逻辑像素
-/// （已对照 `tauri-utils` 源码 `src/config.rs` 核实其文档字符串："The window width/
-/// height in logical pixels."），与 `inner_size()` 的单位天然一致，不需要在这里做
-/// 任何换算。找不到 label 为 `"main"` 的配置项时退回配置数组第一项；数组整体为空时
-/// 退回硬编码的 1200×780（与当前 `tauri.conf.json` 主窗口配置一致的兜底值，纯粹
-/// 防御性代码，正常情况下不会走到）。URL 同样直接克隆自主窗口配置的 `url` 字段，
-/// 不在这里重新拼一份字面量——避免这里和 `tauri.conf.json` 各写一份、将来彼此漂移。
+/// 不再手动 `.inner_size(width, height)`/`.title(title)` 逐个字段搭 builder（上一轮
+/// 做法，遗漏了 minWidth/minHeight）。改为整份克隆主窗口 `WindowConfig`（见
+/// `main_window_config`/`term_window_config`），交给
+/// `WebviewWindowBuilder::from_config`。已对照本机 `tauri-runtime-wry 2.11.4`
+/// 源码 `src/lib.rs` 的 `WindowBuilderWry::with_config`（第 862-996 行）核实：
+/// 这条路径会把 `WindowConfig` 的 `width`/`height`/`min_width`/`min_height`/
+/// `max_width`/`max_height`/`resizable`/`decorations`/`fullscreen`/`maximized`/
+/// `always_on_top`/`always_on_bottom`/`visible_on_all_workspaces`/
+/// `content_protected`/`skip_taskbar`/`theme`/`closable`/`maximizable`/
+/// `minimizable`/`shadow`/`title`/`focus`/`focusable`/`visible`/`title_bar_style`
+/// （macOS 分支）等**全部**字段应用到新窗口，以及当 `x`/`y` 同时为 `Some` 时调用
+/// `.position(x, y)`——`term_window_config` 正是把这两个字段设成调用方传入的坐标。
+/// 这样"主窗口有哪些外观/行为配置，新窗口就继承哪些"是结构性保证，不依赖这里
+/// 手动枚举字段列表（枚举列表今天补全了，明天 tauri.conf.json 加新字段又会漏）。
 ///
 /// ## 失败即降级
 ///
-/// `WebviewWindowBuilder::build()` 出错只把错误信息通过 `Err` 传回前端，绝不
-/// panic——与仓库里其它命令的一贯做法一致（`reveal_in_finder`、
+/// `WebviewWindowBuilder::from_config`/`.build()` 出错只把错误信息通过 `Err` 传回
+/// 前端，绝不 panic——与仓库里其它命令的一贯做法一致（`reveal_in_finder`、
 /// `set_theme_mode_checked` 等），也是本仓库明确要求的纪律：`core:window:allow-
 /// set-size` 未授权那次事故就是"该报错的地方被静默吞掉"，这里不重蹈覆辙。
 ///
-/// 用 `async fn`：已对照 `WebviewWindowBuilder::new` 文档字符串核实——"On Windows,
-/// this function deadlocks when used in a synchronous command and event handlers
-/// ... You should use `async` commands and separate threads when creating
-/// windows."，仓库里 `count_subagents`（sessions/subagents.rs）已有 `async` 命令
-/// 先例，这里照官方建议同样写成 `async`。
+/// 用 `async fn`：已对照 `WebviewWindowBuilder::new`/`from_config` 文档字符串
+/// 核实——"On Windows, this function deadlocks when used in a synchronous
+/// command and event handlers ... You should use `async` commands and separate
+/// threads when creating windows."，仓库里 `count_subagents`
+/// （sessions/subagents.rs）已有 `async` 命令先例，这里照官方建议同样写成
+/// `async`。
 #[tauri::command]
 async fn create_term_window(app: AppHandle, x: f64, y: f64) -> Result<String, String> {
     let label = new_term_window_label();
+    let main = main_window_config(&app.config().app.windows);
+    let config = term_window_config(&main, &label, x, y);
 
-    let main_window_config = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|w| w.label == "main")
-        .or_else(|| app.config().app.windows.first());
-
-    let (width, height, url, title) = match main_window_config {
-        Some(w) => (w.width, w.height, w.url.clone(), w.title.clone()),
-        None => (1200.0, 780.0, WebviewUrl::App("index.html".into()), "aTerm".to_string()),
-    };
-
-    WebviewWindowBuilder::new(&app, &label, url)
-        .title(title)
-        .position(x, y)
-        .inner_size(width, height)
+    WebviewWindowBuilder::from_config(&app, &config)
+        .map_err(|e| format!("创建新窗口失败：{e}"))?
         .build()
         .map_err(|e| format!("创建新窗口失败：{e}"))?;
 
@@ -858,5 +912,98 @@ mod tests {
         // 同一时间粒度内），第二个窗口的 label 会撞上第一个——多窗口场景下这意味着
         // WebviewWindowBuilder::new 会因 label 重复而创建失败/覆盖已有窗口。
         assert_ne!(a, b, "两次生成的 label 不能相同，否则第二个窗口会撞上第一个");
+    }
+
+    // R1 修复：main_window_config / term_window_config 两个纯函数——create_term_window
+    // 遗漏了 minWidth/minHeight（评审发现：新窗口能被拖成一条缝，主窗口不能）之后新增，
+    // 覆盖"新窗口必须整份继承主窗口配置，不是逐字段挑"这条不变式。
+
+    fn sample_window_config(label: &str, width: f64) -> tauri::utils::config::WindowConfig {
+        tauri::utils::config::WindowConfig {
+            label: label.to_string(),
+            width,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn main_window_config_prefers_label_main_even_if_listed_second() {
+        // 会因为什么失败：如果实现改成直接取 windows.first()（不再按 label 找
+        // "main"），这里会选中 "other"（width=1.0）而不是 "main"（width=2.0）。
+        let windows = vec![
+            sample_window_config("other", 1.0),
+            sample_window_config("main", 2.0),
+        ];
+        let picked = main_window_config(&windows);
+        assert_eq!(picked.label, "main");
+        assert_eq!(picked.width, 2.0);
+    }
+
+    #[test]
+    fn main_window_config_falls_back_to_first_when_no_main_label() {
+        // 会因为什么失败：如果 or_else 分支被删掉（只认 label == "main"，找不到就
+        // 直接走空配置兜底），这里会错误地落到硬编码兜底值（width 1200.0）而不是
+        // 列表里唯一那一项（width 3.0）。
+        let windows = vec![sample_window_config("not-main", 3.0)];
+        let picked = main_window_config(&windows);
+        assert_eq!(picked.label, "not-main");
+        assert_eq!(picked.width, 3.0);
+    }
+
+    #[test]
+    fn main_window_config_fallback_when_list_empty_includes_min_size() {
+        // R1 核心断言：这条测试就是为上一轮遗漏的 minWidth/minHeight 补的。会因为
+        // 什么失败：如果硬编码兜底值里 min_width/min_height 漏写（回到 R0 的老样子，
+        // 只兜底 width/height/title），这里的 min_width/min_height 断言会失败
+        // （变成 None 而不是 Some(800.0)/Some(500.0)）。
+        let picked = main_window_config(&[]);
+        assert_eq!(picked.width, 1200.0);
+        assert_eq!(picked.height, 780.0);
+        assert_eq!(
+            picked.min_width,
+            Some(800.0),
+            "兜底值必须包含 minWidth，否则连极端情况（配置列表为空）下新窗口都能被拖成一条缝"
+        );
+        assert_eq!(picked.min_height, Some(500.0), "兜底值必须包含 minHeight");
+        assert_eq!(picked.title, "aTerm");
+    }
+
+    #[test]
+    fn term_window_config_overrides_label_and_position_but_preserves_everything_else() {
+        // main 里 resizable/decorations 故意设成与 WindowConfig::default() 不同的
+        // 值（默认都是 true），min_width/min_height 故意设成 Some 而非默认 None——
+        // 这样如果实现"顺手"把某个未提及的字段悄悄重置成默认值，下面的整份 struct
+        // 相等断言就会抓到，不只是抓 min_width/min_height 这两个 R1 修的字段。
+        let main = tauri::utils::config::WindowConfig {
+            label: "main".to_string(),
+            width: 1200.0,
+            height: 780.0,
+            min_width: Some(800.0),
+            min_height: Some(500.0),
+            resizable: false,
+            decorations: false,
+            title: "aTerm".to_string(),
+            ..Default::default()
+        };
+        let out = term_window_config(&main, "term-9", 111.0, 222.0);
+
+        assert_eq!(out.label, "term-9", "label 必须替换成传入的新窗口 label");
+        assert_eq!(out.x, Some(111.0), "x 必须写成调用方传入的坐标");
+        assert_eq!(out.y, Some(222.0), "y 必须写成调用方传入的坐标");
+
+        // 除 label/x/y 外，其余字段必须与 main 逐位相同——用"整份克隆 main 再只改
+        // 这三个字段"构造期望值，而不是逐个字段断言，这样任何字段（不只是
+        // min_width/min_height）被意外改动都会被这条测试抓到。
+        let expected = tauri::utils::config::WindowConfig {
+            label: "term-9".to_string(),
+            x: Some(111.0),
+            y: Some(222.0),
+            ..main.clone()
+        };
+        assert_eq!(
+            out, expected,
+            "除了 label/x/y，其余字段（含 min_width/min_height/resizable/decorations）\
+             必须原样继承自主窗口配置"
+        );
     }
 }
