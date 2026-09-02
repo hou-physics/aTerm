@@ -1,5 +1,6 @@
 import './ptyBuffer'
 import './closeRequest'
+import './menuEvents'
 import './contextMenu'
 import './App.css'
 import { useCallback, useEffect, useRef, useState } from 'react'

@@ -37,6 +37,10 @@ vi.mock('../store/hooksInstall', () => ({
 // 会抛错），与本文件要验证的 Ctrl+Tab 循环切换无关。closeRequest.ts 自身的行为见
 // closeRequest.test.ts。
 vi.mock('../closeRequest', () => ({}))
+// 同一理由：App.tsx 顶层也 side-effect 导入了 menuEvents.ts（macOS 菜单"设置…"⌘,
+// 的事件桥），替身掉避免同样去调用真实的 @tauri-apps/api/event。menuEvents.ts 自身的
+// 行为见 menuEvents.test.ts。
+vi.mock('../menuEvents', () => ({}))
 // TerminalView 内部会实例化真实的 xterm.js Terminal（渲染器、ResizeObserver 等），
 // 与本文件要验证的"标签间循环切换"无关，替身掉避免测试和真实终端机制耦合。
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))

@@ -6,7 +6,7 @@ mod status;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::menu::MenuItem;
+use tauri::menu::{MenuItem, PredefinedMenuItem};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
 /// 供 `RunEvent::ExitRequested` 处理器与 `confirm_exit` 共用的一个开关：前端确认弹窗里
@@ -41,6 +41,16 @@ fn confirm_exit(app_handle: AppHandle) {
 /// `listen('app-close-requested', ...)` 本来就是全局监听，不区分来源窗口。
 fn emit_close_requested(app_handle: &AppHandle) {
     let _ = app_handle.emit("app-close-requested", ());
+}
+
+/// macOS 专属：App 菜单里"设置…"项被点击（或按下 ⌘,）时，广播给前端打开设置浮层
+/// （`useSettings.getState().openSettings()`，见 src/App.tsx 附近对 `menu-open-settings`
+/// 的监听）。与 emit_close_requested 同一风格：用 `AppHandle::emit` 广播给所有
+/// webview，不针对某个具体窗口——前端 `listen('menu-open-settings', ...)` 本来就是
+/// 全局监听，不区分来源窗口。
+#[cfg(target_os = "macos")]
+fn emit_open_settings(app_handle: &AppHandle) {
+    let _ = app_handle.emit("menu-open-settings", ());
 }
 
 /// macOS 专属：把 Tauri 自动生成的默认菜单里那个"Quit"项换成一个自定义菜单项。
@@ -94,6 +104,63 @@ fn replace_quit_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Resu
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+const SETTINGS_MENU_ITEM_ID: &str = "aterm-settings";
+
+/// 纯函数：给定插入前 App 子菜单的项数，算出 `[分隔线, 设置…]` 这两项该插入的下标。
+///
+/// 只做算术，不接触任何 muda/AppKit 对象——因此能在不构造真实 `App` 句柄的前提下
+/// 单测（本仓库既有先例：`reveal.rs` 的 `validate_reveal_dir`，同样是为了可测而把
+/// 校验/计算逻辑从会触碰外部资源的副作用里摘出来）。`insert_settings_menu_item`
+/// 直接调用这一份，测试和生产代码用的是同一个函数，不会出现两边各写一份、彼此
+/// 漂移的问题。
+///
+/// 固定插到下标 1：紧跟 About（下标 0）之后，也就是默认菜单里 About 与 Services
+/// 之间那条分隔线之前。插入 `[新分隔线, 设置…]` 两项后，原来那条分隔线自然变成
+/// "设置…" 与 Services 之间的分隔线——macOS 惯例"前后各一条分隔线"因此只需新插
+/// 一条，不必再画蛇添足插第二条。
+///
+/// 返回 `None`：`item_count` 小于 2 时——插入基准点 About（下标 0）与"插入后仍要
+/// 留在最后"的那一项（默认菜单里是 Quit）至少各占一个下标，凑不满 2 项就没有意义
+/// 插入（下标 1 会等于或超出当前项数，插到末尾甚至 About 前面，反而破坏"About 之后、
+/// 原最后一项之前"这条不变式）。`insert_settings_menu_item` 在 `replace_quit_menu_item`
+/// 之后调用，且两者对拿不到菜单/子菜单的情况都已提前 `return Ok(())`，默认菜单固定
+/// 8 项，理论上不会真的遇到小于 2 的项数，这里仍显式处理，不靠裸减法/裸索引隐式
+/// 避免 panic。
+#[cfg(target_os = "macos")]
+fn settings_insertion_index(item_count: usize) -> Option<usize> {
+    if item_count < 2 {
+        return None;
+    }
+    Some(1)
+}
+
+/// macOS 专属：在 App 子菜单里插入"设置…"项（⌘,），位置在 About 之后、Quit 之前。
+///
+/// 必须在 `replace_quit_menu_item` 之后调用——这是调用方（`setup` 里）的硬性顺序
+/// 要求，理由见该函数上方那段长注释：让它看到的子菜单仍是默认菜单固定的那个顺序
+/// （About / 分隔线 / Services / 分隔线 / Hide / HideOthers / 分隔线 / Quit(custom)），
+/// 不会因为本函数先插入了"设置…"而打乱下标、让已经过真机验证过的替换逻辑意外失灵。
+#[cfg(target_os = "macos")]
+fn insert_settings_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else {
+        return Ok(());
+    };
+    let top_items = menu.items()?;
+    let Some(app_submenu) = top_items.first().and_then(|item| item.as_submenu()) else {
+        return Ok(());
+    };
+    let items = app_submenu.items()?;
+    let Some(insert_at) = settings_insertion_index(items.len()) else {
+        return Ok(());
+    };
+    let separator = PredefinedMenuItem::separator(app)?;
+    let settings_item =
+        MenuItem::with_id(app, SETTINGS_MENU_ITEM_ID, "设置…", true, Some("Command+,"))?;
+    app_submenu.insert_items(&[&separator, &settings_item], insert_at)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -118,10 +185,14 @@ pub fn run() {
         })
         .on_menu_event(|app_handle, event| {
             #[cfg(target_os = "macos")]
-            if event.id().as_ref() == QUIT_MENU_ITEM_ID {
-                // 与窗口 CloseRequested 同一套处理：不在这里直接退出，只是把决定权转交
-                // 前端确认弹窗（confirm_exit 才是真正退出的入口）。
-                emit_close_requested(app_handle);
+            {
+                if event.id().as_ref() == QUIT_MENU_ITEM_ID {
+                    // 与窗口 CloseRequested 同一套处理：不在这里直接退出，只是把决定权
+                    // 转交前端确认弹窗（confirm_exit 才是真正退出的入口）。
+                    emit_close_requested(app_handle);
+                } else if event.id().as_ref() == SETTINGS_MENU_ITEM_ID {
+                    emit_open_settings(app_handle);
+                }
             }
             #[cfg(not(target_os = "macos"))]
             let _ = (app_handle, event);
@@ -163,6 +234,14 @@ pub fn run() {
                         "警告：替换 Quit 菜单项失败，⌘Q 将退回系统默认行为（不会弹出关闭确认）：{e}"
                     );
                 }
+
+                // 必须排在 replace_quit_menu_item 之后：见 insert_settings_menu_item
+                // 上方的注释——它假设看到的子菜单仍是默认菜单固定的那个顺序。同样的
+                // 失败即降级理由（应用能打开比菜单项齐全重要）：这里返回 Err 只打印
+                // 警告，不让 `?`/`.expect(...)` 把它变成启动期 panic。
+                if let Err(e) = insert_settings_menu_item(app) {
+                    eprintln!("警告：插入\"设置…\"菜单项失败，⌘, 将不可用：{e}");
+                }
             }
             Ok(())
         })
@@ -184,4 +263,116 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod tests {
+    use super::*;
+
+    // settings_insertion_index 本身就是 insert_settings_menu_item 实际调用的那个函数
+    // （见它上方的注释），不是重新抄一遍逻辑的影子实现——下面几条测试断的是生产代码
+    // 真正会跑的分支，不会出现测试和实现各写一份、彼此漂移的问题。
+
+    #[test]
+    fn empty_submenu_has_no_insertion_point() {
+        // 会因为什么失败：如果实现把 0 项也当成"至少有 About"处理（例如把判断写成
+        // `item_count < 1` 之外的什么条件、或者干脆删掉这条判断），这里就会失败。
+        assert_eq!(settings_insertion_index(0), None);
+    }
+
+    #[test]
+    fn single_item_submenu_has_no_insertion_point() {
+        // 会因为什么失败：如果判断条件写成 `item_count == 0`（只挡最空的情况），这里
+        // 就会失败——只有 1 项时插入下标 1 会等于当前项数，插到唯一那一项之后，
+        // 而不是"原最后一项之前"，破坏不变式，所以也必须返回 None。
+        assert_eq!(settings_insertion_index(1), None);
+    }
+
+    #[test]
+    fn inserts_right_after_about() {
+        // 会因为什么失败：如果插入下标从 1 改成了别的数（例如误改成 0，插到 About
+        // 前面；或者误改成子菜单末尾），这里就会失败。默认菜单固定 8 项（About /
+        // 分隔线 / Services / 分隔线 / Hide / HideOthers / 分隔线 / Quit，见
+        // replace_quit_menu_item 上方注释核实过的 tauri 2.11.5 `Menu::default`）。
+        assert_eq!(settings_insertion_index(8), Some(1));
+    }
+
+    #[test]
+    fn insertion_index_always_precedes_the_original_last_item() {
+        // 会因为什么失败：如果插入下标算成了 >= item_count（插到了原最后一项——也就是
+        // Quit——后面甚至末尾），这几个不同项数下至少有一个会失败。从 2 项开始
+        // （见 single_item_submenu_has_no_insertion_point：少于 2 项没有插入点）。
+        for item_count in [2usize, 3, 8, 50] {
+            let insert_at = settings_insertion_index(item_count)
+                .unwrap_or_else(|| panic!("item_count={item_count} 时不应返回 None"));
+            assert!(
+                insert_at < item_count,
+                "插入点（{insert_at}）必须严格早于原来的最后一项下标（{}），\
+                 否则会把 Quit 挤到子菜单中间",
+                item_count - 1
+            );
+        }
+    }
+
+    /// 用一个 `Vec<&str>` 模拟真实的 App 子菜单，验证 `replace_quit_menu_item` 与
+    /// `insert_settings_menu_item` 两步下标逻辑组合之后，Quit 仍稳居子菜单最后一位、
+    /// 且整体顺序符合 macOS 惯例——不构造真实 `App` 句柄（那需要一整套窗口环境，见
+    /// `settings_insertion_index` 上方注释里提到的、本仓库 `reveal.rs` 的既有先例）。
+    ///
+    /// 第二步用的下标（`settings_insertion_index(items.len())`）是生产代码
+    /// `insert_settings_menu_item` 真正调用的那个函数；第一步（remove_at(len-1) 再
+    /// append）抄的是 `replace_quit_menu_item` 里同样两行的下标算法，因为那一步的
+    /// 副作用（真的构造 `MenuItem`）离不开真实 `App` 句柄，没法像 `settings_insertion_
+    /// index` 那样直接复用生产函数本身。`Submenu::insert`/`insert_items` 的插入语义
+    /// 已对照 muda 0.19.3 源码核实为标准的"下标不变的元素依次后移"（等价于
+    /// `Vec::insert`），下面用 `Vec::insert` 模拟是忠实的。
+    #[test]
+    fn settings_item_lands_before_quit_which_stays_last() {
+        let mut items = vec![
+            "About",
+            "sep",
+            "Services",
+            "sep",
+            "Hide",
+            "HideOthers",
+            "sep",
+            "Quit",
+        ];
+
+        // 第一步：replace_quit_menu_item 的下标逻辑。
+        let last = items.len().checked_sub(1).expect("非空菜单应有最后一项");
+        assert_eq!(items[last], "Quit", "替换前最后一项应是 Quit");
+        items.remove(last);
+        items.push("Quit(custom)");
+
+        // 第二步：settings_insertion_index 是生产代码 insert_settings_menu_item
+        // 实际调用的函数。
+        let insert_at = settings_insertion_index(items.len()).expect("非空子菜单应有插入位置");
+        items.insert(insert_at, "sep(new)");
+        items.insert(insert_at + 1, "设置…");
+
+        assert_eq!(
+            items.last(),
+            Some(&"Quit(custom)"),
+            "插入\"设置…\"之后，App 子菜单的最后一项仍应是 Quit"
+        );
+        assert_eq!(
+            items,
+            vec![
+                "About",
+                "sep(new)",
+                "设置…",
+                "sep",
+                "Services",
+                "sep",
+                "Hide",
+                "HideOthers",
+                "sep",
+                "Quit(custom)",
+            ],
+            "顺序应符合 macOS 惯例：About / 分隔线 / 设置… / 分隔线 / Services / 分隔线 / \
+             Hide / HideOthers / 分隔线 / Quit"
+        );
+    }
 }
