@@ -146,7 +146,7 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 
 /* 通用右键菜单（自包含小组件 ContextMenu.tsx）：窗格标题栏「移出为独立标签/关闭窗格」
    （设计文档 §5-C）与标签栏「拆分为独立标签/关闭标签」共用同一份样式/组件。
-   position:fixed 直接定位到光标处（组件自己钳在视口内），风格与 .theme-picker/
+   position:fixed 直接定位到光标处（组件自己钳在视口内），风格与
    .pane-picker-item 同一基调——边框、既有强调色变量，不引入阴影或新配色。 */
 .context-menu { position: fixed; z-index: 10; display: flex; flex-direction: column; padding: 4px; min-width: 140px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-panel); }
 .context-menu-item { padding: 6px 10px; border-radius: 6px; font-size: 12.5px; color: var(--color-text); cursor: default; white-space: nowrap; }
@@ -242,23 +242,15 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 
 .sidebar-list::-webkit-scrollbar,
 .home-wrap::-webkit-scrollbar,
-.theme-picker::-webkit-scrollbar,
-.theme-picker-list::-webkit-scrollbar,
 .pane-picker::-webkit-scrollbar { width: 8px; }
 .sidebar-list::-webkit-scrollbar-track,
 .home-wrap::-webkit-scrollbar-track,
-.theme-picker::-webkit-scrollbar-track,
-.theme-picker-list::-webkit-scrollbar-track,
 .pane-picker::-webkit-scrollbar-track { background: transparent; }
 .sidebar-list::-webkit-scrollbar-thumb,
 .home-wrap::-webkit-scrollbar-thumb,
-.theme-picker::-webkit-scrollbar-thumb,
-.theme-picker-list::-webkit-scrollbar-thumb,
 .pane-picker::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 .sidebar-list::-webkit-scrollbar-thumb:hover,
 .home-wrap::-webkit-scrollbar-thumb:hover,
-.theme-picker::-webkit-scrollbar-thumb:hover,
-.theme-picker-list::-webkit-scrollbar-thumb:hover,
 .pane-picker::-webkit-scrollbar-thumb:hover { background: var(--color-text-faint); }
 
 /* xterm 6 用 VS Code ScrollableElement 渲染滚动条（非原生）。滑块颜色由 xterm 主题以内联样式写入（见
@@ -418,74 +410,37 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 }
 .sidebar-settings-button:hover { color: var(--color-text); }
 
-.theme-picker-modes { flex: none; display: flex; gap: 4px; }
-.theme-picker-modes button {
-  flex: 1;
-  padding: 5px 4px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border);
-  background: var(--color-elevated);
-  color: var(--color-text-dim);
-  font-size: 11.5px;
-  font-family: inherit;
-  cursor: default;
-}
-.theme-picker-modes button:hover { border-color: var(--color-accent); color: var(--color-text); }
-.theme-picker-modes button.active { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
-.theme-picker-group-label { font-size: 10.5px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; margin: 2px 0 4px; }
-.theme-picker-list { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
-.theme-row {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 4px 6px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--color-text-dim);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: default;
-  text-align: left;
-}
-.theme-row:hover { background: var(--color-elevated); color: var(--color-text); }
-.theme-row.active { background: var(--color-elevated); color: var(--color-text); box-shadow: inset 0 0 0 1px var(--color-accent); }
-.theme-row-swatches { flex: none; display: flex; gap: 2px; }
-.theme-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--color-border); }
-.theme-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* Task 3：外观分区（AppearanceSection.tsx），内嵌在 SettingsPanel 里，不是弹层。
-   复用 .theme-picker-modes / .theme-picker-group-label / .theme-picker-list /
-   .theme-row / .theme-swatch 等既有主题选择器样式，但不复用 .theme-picker 本身——
-   那个类是给侧栏浮出的弹层用的（position:absolute），这里只是静态内容，不需要。 */
+/* v3-2c 第二轮：外观分区（AppearanceSection.tsx）改成 Codex 风格的行式卡片
+   （SettingCard + SettingRow + SettingSelect），不再是"模式大按钮 + 长长的色块
+   列表"。原来这里的 .theme-picker-modes/.theme-picker-list/.theme-row/
+   .theme-swatch 等一整套主题选择器样式随之全部作废——ThemeSwitcher.tsx 本身已在
+   Task 5 删除，AppearanceSection.tsx 是这套样式最后的使用者，现在也不再用，故
+   直接整体删除，不留死代码。色块预览样式见下方 .setting-select-swatch。 */
 .appearance-section { display: flex; flex-direction: column; gap: 10px; }
 
-/* Task 4：终端分区（TerminalSection.tsx）——滚动速度滑块，本仓库首次引入
+/* v3-2c：终端分区（TerminalSection.tsx）——滚动速度滑块，本仓库首次引入
    type="range"。原生轨道/滑块交给 accent-color 接管主题色（引用 --color-accent，
-   不是字面量色值），不必逐一画皮肤。 */
-.terminal-section { display: flex; flex-direction: column; gap: 10px; }
-.terminal-section-row { display: flex; align-items: center; gap: 10px; }
-.terminal-section-label { flex: none; font-size: 12px; color: var(--color-text-dim); }
-.terminal-section-slider { flex: 1; accent-color: var(--color-accent); }
+   不是字面量色值），不必逐一画皮肤。外层容器换成 SettingCard/SettingRow 之后，
+   只有滑块本身 + 数值展示还需要专属样式。 */
+.terminal-section { display: flex; flex-direction: column; }
+/* Codex 风格的行右侧 control 是紧凑靠右的控件，不是撑满整行——.setting-row-control
+   是 flex:none，滑块没有可以伸展进去的剩余空间，因此这里给一个明确宽度，而不是
+   写一个在这个布局下永远生效不了的 flex:1。 */
+.terminal-section-slider { width: 160px; accent-color: var(--color-accent); }
 .terminal-section-value { flex: none; min-width: 32px; text-align: right; font-size: 12px; color: var(--color-text-dim); font-variant-numeric: tabular-nums; }
 
-/* Task 4：项目与会话分区（ProjectsSection.tsx）——隐藏项目 / 已移除会话的"一次看全"
+/* v3-2c：项目与会话分区（ProjectsSection.tsx）——隐藏项目 / 已移除会话的"一次看全"
    入口，行为委托给既有 store action（unhideProject/restoreSession），这里只是
-   列表展示 + 按钮，不重复实现任何判断。 */
+   列表展示 + 按钮，不重复实现任何判断。两张卡片（SettingCard）之间留一点间距，
+   卡片内部每个条目是一行 SettingRow，分隔线由 SettingCard 自己画。 */
 .projects-section { display: flex; flex-direction: column; gap: 14px; }
-.projects-section-group { display: flex; flex-direction: column; gap: 6px; }
-.projects-section-group-label { font-size: 10.5px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; }
-.projects-section-empty { font-size: 12px; color: var(--color-text-faint); }
-.projects-section-list { display: flex; flex-direction: column; gap: 1px; max-height: 160px; overflow-y: auto; list-style: none; margin: 0; padding: 0; }
-.projects-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; }
-.projects-section-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--color-text); }
+.projects-section-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .projects-section-action {
   flex: none;
   padding: 3px 10px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
-  background: var(--color-elevated);
+  background: var(--color-panel);
   color: var(--color-text-dim);
   font-family: inherit;
   font-size: 11.5px;
@@ -493,17 +448,21 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 }
 .projects-section-action:hover { border-color: var(--color-accent); color: var(--color-text); }
 
-/* Task 4：Hooks 分区（HooksSection.tsx）——视觉上照抄 .hooks-control 系列样式，但
-   换了一套类名前缀（hooks-section-*），不复用原类名：HooksControl 连同它的样式在
-   Task 5 会一起变成死代码，这组类名要能独立于它的生死。 */
-.hooks-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--color-text-dim); }
-.hooks-section-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* v3-2c：Hooks 分区（HooksSection.tsx）——一张卡片一行，状态文字 + 安装/更新/卸载
+   按钮同放右侧 control 里。换了一套类名前缀（hooks-section-*），不复用
+   .hooks-control 系列原类名：HooksControl 连同它的样式在 Task 5 会一起变成死
+   代码，这组类名要能独立于它的生死。 */
+/* 与其余三个分区容器保持一致：单卡片时看不出差别，但将来若加第二张卡片，
+   没有这条规则就不会有间距。 */
+.hooks-section { display: flex; flex-direction: column; gap: 14px; }
+
+.hooks-section-status { flex: none; font-size: 12px; color: var(--color-text-dim); white-space: nowrap; }
 .hooks-section-action {
   flex: none;
   padding: 4px 10px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
-  background: var(--color-elevated);
+  background: var(--color-panel);
   color: var(--color-text-dim);
   font-family: inherit;
   font-size: 11.5px;
@@ -511,7 +470,7 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 }
 .hooks-section-action:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
 .hooks-section-action:disabled { opacity: .6; }
-.hooks-section-error { margin-top: 6px; font-size: 11px; color: var(--color-text); word-break: break-word; }
+.hooks-section-error { padding: 8px 12px; font-size: 11px; color: var(--color-text); word-break: break-word; }
 
 .conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .conv-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -658,12 +617,17 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   justify-content: center;
   background: var(--color-scrim);
 }
+/* v3-2c：面板固定尺寸——用户明确要求"选不同门类的时候不要切换这个设置的大小"。
+   此前 max-height: 80vh 会随每个分类实际内容量伸缩（比如"主题"选中「默认」模式
+   时下方几乎不显示内容，面板显得"空空荡荡"），改成固定 height，切换分类时宽高
+   都不再变化；右侧详情区（.settings-panel-body）内部自己滚动，左侧分类栏
+   （.settings-panel-nav）不滚动、始终整个可见（4 个分类项撑不满也撑不爆）。 */
 .settings-panel {
   display: flex;
   flex-direction: column;
   width: 680px;
   max-width: 90vw;
-  max-height: 80vh;
+  height: min(560px, 80vh);
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-panel);
@@ -714,7 +678,9 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   gap: 2px;
   padding: 8px;
   border-right: 1px solid var(--color-border);
-  overflow-y: auto;
+  /* v3-2c：面板固定高度后左侧分类栏不滚动——4 个分类项在 560px 高的面板里怎么都
+     撑不满，也没有更多分类会撑爆它；真的溢出滚动应留给右侧详情区。 */
+  overflow: hidden;
 }
 .settings-panel-nav-item {
   display: flex;
@@ -729,8 +695,7 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   cursor: default;
 }
 .settings-panel-nav-item:hover { color: var(--color-text); background: var(--color-elevated); }
-/* 选中态：与 .theme-picker-modes button.active 同一套配色语言（accent 底 + on-accent
-   字），全仓库对"当前选中"的统一表达。 */
+/* 选中态：accent 底 + on-accent 字，全仓库对"当前选中"的统一表达。 */
 .settings-panel-nav-item.active { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
 /* 右侧详情：SettingsPanel.tsx 一次只挂载当前选中分类的那一个分区组件（条件渲染，
    不是 CSS 隐藏），其余三个分区完全不在 DOM 里。内容多了自己滚，不影响左侧分类
@@ -741,4 +706,126 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   overflow-y: auto;
   padding: 4px 0;
 }
-.settings-section { padding: 14px; }
+/* v3-2c：右侧详情区页标题，参照 Codex 设置页——比正文明显大、加粗、上下留白。
+   与下方 .settings-section 同一水平内边距对齐，不单独设一套 padding。四个分类
+   各自的标题文案就是 SettingsPanel.tsx CATEGORIES 里已经在用的 label（主题/终端/
+   项目与会话/Hooks），不新开一份映射表。 */
+.settings-detail-title {
+  margin: 4px 0 2px;
+  padding: 6px 14px 4px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+.settings-section { display: flex; flex-direction: column; gap: 14px; padding: 10px 14px 14px; }
+
+/* v3-2c：SettingCard/SettingRow（src/components/settings/）——Codex 风格的分组
+   卡片 + 统一行结构，本任务与后续主题页任务共用。卡片底色用 --color-elevated、
+   边框用 --color-border，与右侧详情区背景（--color-panel）拉开一层层次。 */
+.setting-card {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-elevated);
+  overflow: hidden;
+}
+.setting-card-title {
+  padding: 10px 12px 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.setting-card-body { display: flex; flex-direction: column; }
+/* 行与行之间的细分隔线：只加在第二行及以后，不关心子节点具体是不是 SettingRow
+   （SettingCard 的文档承诺是"内部若有多行自动加分隔线"，不是"内部若有 SettingRow
+   才加"）。 */
+.setting-card-body > * + * { border-top: 1px solid var(--color-border); }
+/* 空列表占位：卡片内没有可展示的条目时，用一行说明文字代替一整块空框
+   （ProjectsSection 的"隐藏的项目"/"已移除的会话"两张卡片都会用到）。 */
+.setting-card-empty { padding: 10px 12px; font-size: 12px; color: var(--color-text-faint); }
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+}
+/* 禁用态：整行置灰。R1 修复：control 的"不可交互"不是靠 SettingRow 这一层做到
+   的——SettingRow.tsx 已不再挂 capture 阶段事件拦截，真正的禁用来自调用方把
+   disabled 原生属性直接传给 control 自身（<button disabled>/<select disabled>
+   等），这里只负责视觉降权，见 SettingRow.tsx 顶部注释里的契约说明。 */
+.setting-row-disabled { opacity: .5; }
+.setting-row-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.setting-row-label { font-size: 12.5px; color: var(--color-text); }
+.setting-row-description { font-size: 11px; color: var(--color-text-faint); }
+.setting-row-control { flex: none; display: flex; align-items: center; gap: 8px; }
+/* pointer-events:none 是真实浏览器里的锦上添花：即便调用方漏传了 control 自身的
+   disabled，鼠标点击也会在命中测试阶段被这条规则挡在 control 之外。但这只覆盖
+   鼠标——键盘 Tab 仍然摸得到、读屏仍然会播报成"可用"，所以不能把它当成禁用的
+   唯一防线，control 自身的原生 disabled 才是权威来源（同上，见 SettingRow.tsx）。 */
+.setting-row-disabled .setting-row-control { pointer-events: none; }
+
+/* v3-2c 第二轮：SettingSelect（src/components/settings/SettingSelect.tsx）——
+   设置页专用的自定义下拉，原生 <select> 画不出色块预览。触发器沿用
+   .hooks-section-action/.projects-section-action 同一套"卡片内小按钮"配色
+   （bg: panel、border: border、hover 变 accent 边框），列表沿用 .context-menu
+   同一套"浮层"配色（bg: panel、条目 hover: elevated）——都不是新配色语言，是
+   已有两类浮层各自的既有约定，这里各取一半拼起来。 */
+.setting-select { position: relative; flex: none; }
+.setting-select-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  color: var(--color-text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+.setting-select-trigger:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
+.setting-select-trigger:disabled { opacity: .6; }
+.setting-select-trigger-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setting-select-caret { flex: none; color: var(--color-text-faint); font-size: 9px; }
+.setting-select-swatches { flex: none; display: flex; gap: 2px; }
+.setting-select-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--color-border); }
+/* 列表内联渲染在触发器正下方，绝对定位在 .setting-select 内部——不 portal 到
+   document.body，设置浮层的 Tab 焦点陷阱只在面板 DOM 子树里现查可聚焦元素，见
+   组件顶部注释。右对齐（right:0）：触发器本身靠右贴 SettingRow 边缘，列表宽度
+   往往比触发器宽（要容纳最长的主题名），左对齐会把列表推出面板右边界。 */
+.setting-select-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 1;
+  min-width: 220px;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+.setting-select-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: var(--color-text-dim);
+  font-size: 12px;
+  cursor: default;
+}
+.setting-select-option:hover,
+.setting-select-option.active { background: var(--color-elevated); color: var(--color-text); }
+.setting-select-option[aria-selected="true"] { color: var(--color-text); }
+.setting-select-option-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setting-select-option-check { flex: none; color: var(--color-accent); font-size: 11px; }

@@ -180,10 +180,14 @@ export function SettingsPanel() {
             ))}
           </nav>
           <div className="settings-panel-body">
-            <section
-              className="settings-section"
-              aria-label={CATEGORIES.find((c) => c.id === activeCategory)!.label}
-            >
+            {/* v3-2c：右侧详情区页标题——比正文明显大、加粗，参照 Codex 设置页。
+                文案直接复用 CATEGORIES 里已经在用的 label，不新开一份映射表。
+                用 aria-labelledby 把可见标题接给下面的 <section>，不再另外重复
+                一份 aria-label——一份文案，两处引用，不会读屏时被念两遍。 */}
+            <h2 id="settings-detail-title" className="settings-detail-title">
+              {CATEGORIES.find((c) => c.id === activeCategory)!.label}
+            </h2>
+            <section className="settings-section" aria-labelledby="settings-detail-title">
               {activeCategory === 'theme' && <AppearanceSection />}
               {activeCategory === 'terminal' && <TerminalSection />}
               {activeCategory === 'projects' && <ProjectsSection />}

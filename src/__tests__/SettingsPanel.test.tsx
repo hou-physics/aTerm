@@ -190,6 +190,40 @@ describe('SettingsPanel', () => {
       expect(terminalBtn.getAttribute('aria-current')).toBe('true')
       expect(themeBtn.getAttribute('aria-current')).toBeNull()
     })
+
+    // v3-2c：右侧详情区页标题（参照 Codex 设置页，比正文明显大、加粗）。四个分类
+    // 各自的标题就是 CATEGORIES 里已经在用的 label，这里钉住"标题文字跟着
+    // activeCategory 切换"这件事本身。
+    it('右侧页标题随分类切换', () => {
+      useSettings.setState({ open: true, activeCategory: 'theme' })
+      const { container } = render(<SettingsPanel />)
+      // 起点是「主题」，下面点击后的目标是「终端」——两者不同，不是恒真检查。
+      expect(container.querySelector('.settings-detail-title')?.textContent).toBe('主题')
+
+      fireEvent.click(screen.getByRole('button', { name: '终端' }))
+
+      expect(container.querySelector('.settings-detail-title')?.textContent).toBe('终端')
+    })
+
+    // v3-2c 硬约束：「选不同的门类的时候，不要切换这个设置的大小」——面板改成固定
+    // 高度（App.css .settings-panel: height: min(560px, 80vh)），切换分类不应该让
+    // 面板尺寸发生任何变化。jsdom 不跑真实布局/computed style，量不出像素级尺寸，
+    // 这里断言两件能在 DOM 层面证明"尺寸没变"的事：① 面板节点本身没有被换成新的
+    // DOM 节点（没有因为某个分类而整体重新挂载出一个尺寸不同的容器）；② 面板的
+    // className 在切换前后完全一致——没有引入"这个分类用紧凑 class、那个分类用
+    // 宽松 class"这种会改变盒模型尺寸的每分类修饰符。
+    it('切换分类不改变面板尺寸：面板 DOM 节点不被替换，className 也不随分类变化', () => {
+      useSettings.setState({ open: true, activeCategory: 'theme' })
+      render(<SettingsPanel />)
+      const panelBeforeSwitch = screen.getByRole('dialog')
+      const classNameBeforeSwitch = panelBeforeSwitch.className
+
+      fireEvent.click(screen.getByRole('button', { name: 'Hooks' }))
+
+      const panelAfterSwitch = screen.getByRole('dialog')
+      expect(panelAfterSwitch).toBe(panelBeforeSwitch)
+      expect(panelAfterSwitch.className).toBe(classNameBeforeSwitch)
+    })
   })
 
   // R1 修复 A：Tab 焦点陷阱。
