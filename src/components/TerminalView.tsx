@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { SerializeAddon } from '@xterm/addon-serialize'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { ptyResize, ptyWrite } from '../ipc'
@@ -8,6 +9,7 @@ import { attachPty } from '../ptyBuffer'
 import { useLayout } from '../store/layout'
 import { useTheme } from '../store/theme'
 import { registerPaste } from '../terminalPaste'
+import { registerSerializer } from '../termSerialize'
 import { buildXtermTheme } from '../themes/derive'
 import { createWheelAmplifier, wheelDeltaToLines } from '../wheel'
 
@@ -40,6 +42,8 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
+    const serializeAddon = new SerializeAddon()
+    term.loadAddon(serializeAddon)
     term.open(el)
 
     // ============================================================================
@@ -123,6 +127,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
     // 会按当前是否开启括号粘贴模式自动包裹标记，是 Claude TUI 把它识别成图片附件的关键
     // （见 terminalPaste.ts 顶部注释）。它会触发上面这个 onData，数据照常流到 PTY。
     const unregisterPaste = registerPaste(ptyId, (text) => term.paste(text))
+    const unregisterSerializer = registerSerializer(ptyId, () => serializeAddon.serialize())
 
     // alt-screen（Claude Code 等 TUI）：无回滚，xterm 会渲染一条无意义的满高滚动条——切到该 buffer 时隐藏它；
     // 同时清空滚轮累积余量，避免残留分数跨模式泄漏。
@@ -219,7 +224,7 @@ export function TerminalView({ ptyId, active }: { ptyId: string; active: boolean
       // [ime] 中文输入法首字符绕行注销 —— 与上方 el.addEventListener 成对，见那段注释。
       el.removeEventListener('beforeinput', onImeBeforeInput, true)
       bufferChangeDisposable.dispose()
-      ro.disconnect(); detach(); unsubTheme(); unsubFontSize(); unregisterPaste(); term.dispose()
+      ro.disconnect(); detach(); unsubTheme(); unsubFontSize(); unregisterPaste(); unregisterSerializer(); term.dispose()
     }
   }, [ptyId])
 
