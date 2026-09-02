@@ -91,6 +91,37 @@ describe('menuEvents：菜单栏「主题」三项与 store 双向同步', () =>
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  it('setLightThemeId（mode 未变）不触发 invoke', async () => {
+    // R1 修复（评审要求）：src/menuEvents.ts 的 useTheme.subscribe 守卫
+    // `if (state.mode !== prevState.mode)` 只应在 mode 字段真的变化时才同步——
+    // zustand 的 setState 对每次 set() 都无条件通知订阅者、不做深比较，setLightThemeId/
+    // setDarkThemeId/setSingleThemeId（以及系统深色模式监听器）都会触发订阅回调本身，
+    // 但它们都不改 mode，守卫必须把这些场景过滤掉，不能让 mode 之外的字段变化也
+    // 触发一次多余的 IPC。
+    await menuEventsReady
+    useTheme.setState({ mode: 'dual' })
+    invokeMock.mockClear() // 清掉上一行 setState 触发的订阅回调可能产生的调用
+
+    useTheme.getState().setLightThemeId('catppuccin-latte')
+
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('直接 setState 只改 activeTheme（mode 未变）不触发 invoke', async () => {
+    // 模拟系统深色模式监听器那条路径（store/theme.ts 里 matchMedia 的 onChange
+    // 只在 dual 模式下重新解析 activeTheme，最终 setState({ systemPrefersDark,
+    // activeTheme })，同样不碰 mode）——这里直接用 setState 复现"mode 字段之外的
+    // 任意字段变化"这个更一般的场景，不依赖某个具体 setter 的实现细节。
+    await menuEventsReady
+    useTheme.setState({ mode: 'dual' })
+    invokeMock.mockClear()
+    const current = useTheme.getState().activeTheme
+
+    useTheme.setState({ activeTheme: { ...current, id: `${current.id}-mutated` } })
+
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
   it('同步调用失败只 console.warn，不静默吞掉', async () => {
     await menuEventsReady
     useTheme.setState({ mode: 'default' }) // 初始值，与下面目标值 'single' 不同

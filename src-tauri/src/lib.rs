@@ -681,11 +681,26 @@ mod tests {
     }
 
     #[test]
-    fn set_theme_mode_checked_never_leaves_two_items_checked() {
-        // 硬要求②：模拟"用户在菜单上直接点了某一项，AppKit 已经自行帮那一项翻转了
-        // 勾选"这个场景——旧状态里 default 和 dual 都还留着 true（模拟系统翻转
-        // 未经复位的坏状态）。theme_mode_checked_states 算出的新三元组必须是恰好
-        // 一项 true、且完全覆盖旧状态，不依赖旧状态里另外两项原来是什么。
+    fn theme_mode_checked_states_overwrites_stale_state() {
+        // R1 修复：原名 set_theme_mode_checked_never_leaves_two_items_checked 承诺的比
+        // 这条测试实际测的多——评审独立复现确认：把 apply_theme_mode_checked 里的
+        // set_checked 包一层 `if checked`（只写选中项、不复位另外两项），cargo test
+        // 127 全过、零信号。这条测试自始至终只调用纯函数 theme_mode_checked_states，
+        // 从未调用过 set_theme_mode_checked 或 apply_theme_mode_checked，测不到、也测
+        // 不出上面那个真实缺口——旧名字会让下一个评审者误以为"不会出现两个勾选"这条
+        // 硬要求②的高危不变式已经有自动化覆盖，反而加剧缺口的隐蔽性，故改名如实反映
+        // 它只测了什么。
+        //
+        // 真正执行写入的 apply_theme_mode_checked（遍历真实菜单项、逐一 set_checked）
+        // 需要真实 App/muda 对象构造，本仓库现有取舍（对照 try_replace_quit_menu_item/
+        // insert_settings_menu_item）是不为可测性重构这类副作用函数，因此这部分**没有
+        // 自动化测试覆盖**——已裁决接受，覆盖缺口留给真机验收兜底（已升级为验收第一
+        // 优先级：来回切换数次，每次确认有且仅有一个勾选）。
+        //
+        // 这条测试本身仍然有价值：确认 theme_mode_checked_states 给出的三元组是"完全
+        // 覆盖式"的（不是相对旧状态的增量更新），是 apply_theme_mode_checked 能够正确
+        // （在它被正确调用的前提下）实现硬要求②的必要条件——但不是充分条件，充分性
+        // 那部分就是上面说的缺口。
         let stale = [true, true, false];
         let (default_checked, dual_checked, single_checked) =
             theme_mode_checked_states("single").expect("single 是合法模式");
