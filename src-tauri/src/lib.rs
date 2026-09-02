@@ -6,7 +6,7 @@ mod status;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::menu::{MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
 /// 供 `RunEvent::ExitRequested` 处理器与 `confirm_exit` 共用的一个开关：前端确认弹窗里
@@ -51,6 +51,16 @@ fn emit_close_requested(app_handle: &AppHandle) {
 #[cfg(target_os = "macos")]
 fn emit_open_settings(app_handle: &AppHandle) {
     let _ = app_handle.emit("menu-open-settings", ());
+}
+
+/// macOS 专属：菜单栏「主题」子菜单里三项之一被点击时，把选中的模式字符串
+/// （"default" / "dual" / "single"）广播给前端（见 src/menuEvents.ts 对
+/// `menu-theme-mode` 的监听：校验 payload 合法后调用 `useTheme.getState().setMode`）。
+/// 与 emit_open_settings/emit_close_requested 同一风格：`AppHandle::emit` 广播给
+/// 所有 webview。
+#[cfg(target_os = "macos")]
+fn emit_theme_mode(app_handle: &AppHandle, mode: &str) {
+    let _ = app_handle.emit("menu-theme-mode", mode);
 }
 
 /// macOS 专属：把 Tauri 自动生成的默认菜单里那个"Quit"项换成一个自定义菜单项。
@@ -209,6 +219,151 @@ fn insert_settings_menu_item<R: tauri::Runtime>(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+const THEME_SUBMENU_ID: &str = "aterm-theme-menu";
+#[cfg(target_os = "macos")]
+const THEME_MODE_DEFAULT_ID: &str = "aterm-theme-mode-default";
+#[cfg(target_os = "macos")]
+const THEME_MODE_DUAL_ID: &str = "aterm-theme-mode-dual";
+#[cfg(target_os = "macos")]
+const THEME_MODE_SINGLE_ID: &str = "aterm-theme-mode-single";
+
+/// （id, 标签）：菜单栏「主题」子菜单三项的唯一数据来源，`build_theme_menu` 与
+/// `theme_mode_labels_match_frontend_appearance_section` 单测共用同一份，不会出现
+/// 生产代码和测试各写一份标签、彼此漂移的问题。标签必须与
+/// `src/components/settings/AppearanceSection.tsx` 的 `MODE_LABEL` 逐字一致
+/// （硬要求①，见该单测）——这里改了标签，务必同步改那边，反之亦然。
+#[cfg(target_os = "macos")]
+const THEME_MODE_ITEMS: [(&str, &str); 3] = [
+    (THEME_MODE_DEFAULT_ID, "默认"),
+    (THEME_MODE_DUAL_ID, "双主题跟随系统"),
+    (THEME_MODE_SINGLE_ID, "手动选定"),
+];
+
+/// macOS 专属：在顶层菜单末尾追加「主题」子菜单，包含三个互斥的 `CheckMenuItem`
+/// （默认 / 双主题跟随系统 / 手动选定）。
+///
+/// **追加到顶层末尾**（`menu.append`），不插入某个下标：
+/// `try_replace_quit_menu_item`/`insert_settings_menu_item` 都依赖
+/// `top_items.first()` 是 App 子菜单这一假设，追加到末尾不会改变任何已有顶层项的
+/// 下标，因此不影响那条顺序不变式——不需要并入 `QuitReplaced` 见证令牌链，顶层菜单
+/// 之间的先后只是观感问题。
+///
+/// 三项初始 checked 只有 default 为 true，只是一个占位：真正的状态由前端在应用
+/// 启动、store 就绪后调用 `set_theme_mode_checked` 覆盖（见接线契约），这里的选择
+/// 不影响正确性，只影响菜单在那一小段时间窗口内的显示（且菜单本就要点开才可见，这
+/// 段窗口用户几乎不可能观察到）。
+#[cfg(target_os = "macos")]
+fn build_theme_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else {
+        return Ok(());
+    };
+    let mut owned_items: Vec<CheckMenuItem<R>> = Vec::with_capacity(THEME_MODE_ITEMS.len());
+    for (id, label) in THEME_MODE_ITEMS {
+        let checked = id == THEME_MODE_DEFAULT_ID;
+        owned_items.push(CheckMenuItem::with_id(
+            app,
+            id,
+            label,
+            true,
+            checked,
+            None::<&str>,
+        )?);
+    }
+    let item_refs: Vec<&dyn IsMenuItem<R>> = owned_items
+        .iter()
+        .map(|i| i as &dyn IsMenuItem<R>)
+        .collect();
+    let theme_submenu =
+        Submenu::with_id_and_items(app, THEME_SUBMENU_ID, "主题", true, &item_refs)?;
+    menu.append(&theme_submenu)?;
+    Ok(())
+}
+
+/// 纯函数：模式字符串 -> 三项（default, dual, single）各自应有的 checked 布尔，
+/// 恰好一项为 true。非法字符串返回 `Err`——`set_theme_mode_checked` 先调用这个函数
+/// 校验并用 `?` 提前返回，校验失败时不会走到任何写入 checked 状态的代码，天然保证
+/// 硬要求②后半句"非法 mode 不改动任何一项"。不接触任何 muda/AppKit 对象，因此不
+/// 需要构造真实 `App`/`AppHandle` 就能单测（与 `settings_insertion_index` 同一
+/// 做法，见其上方注释）。
+fn theme_mode_checked_states(mode: &str) -> Result<(bool, bool, bool), String> {
+    match mode {
+        "default" => Ok((true, false, false)),
+        "dual" => Ok((false, true, false)),
+        "single" => Ok((false, false, true)),
+        other => Err(format!("未知的主题模式：{other}")),
+    }
+}
+
+/// macOS 专属：把菜单栏「主题」三项的 checked 状态整体写成与给定三元组一致——三项
+/// 总是被显式 `set_checked` 一次（哪怕某一项的值和它当前状态相同）。
+///
+/// 这是硬要求②的核心：macOS 点击 `CheckMenuItem` 时系统会自行切换被点击那一项的
+/// 勾选态，如果这里只设"新选中的那一项"、不去复位另外两项，用户在菜单/设置浮层
+/// 之间来回切换几次后就会看到两项甚至三项同时打勾。找不到「主题」子菜单或找不到
+/// 某一项时按失败即降级处理，只留一句警告，不 panic。
+#[cfg(target_os = "macos")]
+fn apply_theme_mode_checked(
+    app: &AppHandle,
+    default_checked: bool,
+    dual_checked: bool,
+    single_checked: bool,
+) {
+    let Some(menu) = app.menu() else {
+        eprintln!("警告：设置主题菜单勾选态失败，未找到应用菜单");
+        return;
+    };
+    let Ok(top_items) = menu.items() else {
+        eprintln!("警告：设置主题菜单勾选态失败，无法读取顶层菜单项");
+        return;
+    };
+    let Some(theme_submenu) = top_items.iter().find_map(|item| {
+        item.as_submenu()
+            .filter(|s| s.id().as_ref() == THEME_SUBMENU_ID)
+    }) else {
+        eprintln!("警告：设置主题菜单勾选态失败，未找到\"主题\"子菜单");
+        return;
+    };
+    let Ok(items) = theme_submenu.items() else {
+        eprintln!("警告：设置主题菜单勾选态失败，无法读取\"主题\"子菜单项");
+        return;
+    };
+    for item in &items {
+        let Some(check) = item.as_check_menuitem() else {
+            continue;
+        };
+        let checked = match check.id().as_ref() {
+            THEME_MODE_DEFAULT_ID => default_checked,
+            THEME_MODE_DUAL_ID => dual_checked,
+            THEME_MODE_SINGLE_ID => single_checked,
+            _ => continue,
+        };
+        if let Err(e) = check.set_checked(checked) {
+            eprintln!(
+                "警告：设置主题菜单勾选态失败（{}）：{e}",
+                check.id().as_ref()
+            );
+        }
+    }
+}
+
+/// 前端在 `setMode` 之后调用（以及应用启动、store 就绪后调用一次做初始同步，见
+/// src/menuEvents.ts），把菜单栏「主题」三项的勾选态同步为与新模式匹配的状态。
+/// 非法 `mode` 直接返回 `Err`，不触碰任何一项（见 `theme_mode_checked_states`）。
+///
+/// 非 macOS 平台没有这份「主题」菜单（`build_theme_menu` 只在 macOS 构建），因此
+/// 这里在校验通过后，其它平台上写入这一步自然是无操作——仍然保持跨平台一致的
+/// `Result<(), String>` 契约，前端不需要按平台区分调用方式。
+#[tauri::command]
+fn set_theme_mode_checked(app: AppHandle, mode: String) -> Result<(), String> {
+    let (default_checked, dual_checked, single_checked) = theme_mode_checked_states(&mode)?;
+    #[cfg(target_os = "macos")]
+    apply_theme_mode_checked(&app, default_checked, dual_checked, single_checked);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, default_checked, dual_checked, single_checked);
+    Ok(())
+}
+
 /// macOS 专属：`setup()` 里菜单初始化的唯一入口。
 ///
 /// R1 曾把两次调用收进这一个函数、顺序写死在函数体内部，指望"顺序和解释它的注释
@@ -230,6 +385,14 @@ fn setup_macos_menu<R: tauri::Runtime>(app: &tauri::App<R>) {
     let quit_replaced = replace_quit_menu_item(app);
     if let Err(e) = insert_settings_menu_item(app, quit_replaced) {
         eprintln!("警告：插入\"设置…\"菜单项失败，⌘, 将不可用：{e}");
+    }
+    // 「主题」菜单是追加到顶层末尾的独立顶层菜单（build_theme_menu 顶部注释），与
+    // 上面两步没有顺序依赖——不影响、也不需要并入 QuitReplaced 见证令牌链，因此
+    // 放在这两步之后只是顺序上更自然，对调也不会破坏任何不变式。
+    if let Err(e) = build_theme_menu(app) {
+        eprintln!(
+            "警告：构建\"主题\"菜单失败，菜单栏切换主题将不可用（仍可通过设置浮层切换）：{e}"
+        );
     }
 }
 
@@ -264,6 +427,12 @@ pub fn run() {
                     emit_close_requested(app_handle);
                 } else if event.id().as_ref() == SETTINGS_MENU_ITEM_ID {
                     emit_open_settings(app_handle);
+                } else if event.id().as_ref() == THEME_MODE_DEFAULT_ID {
+                    emit_theme_mode(app_handle, "default");
+                } else if event.id().as_ref() == THEME_MODE_DUAL_ID {
+                    emit_theme_mode(app_handle, "dual");
+                } else if event.id().as_ref() == THEME_MODE_SINGLE_ID {
+                    emit_theme_mode(app_handle, "single");
                 }
             }
             #[cfg(not(target_os = "macos"))]
@@ -283,7 +452,8 @@ pub fn run() {
             status::installer::install_hooks,
             status::installer::uninstall_hooks,
             reveal::reveal_in_finder,
-            confirm_exit
+            confirm_exit,
+            set_theme_mode_checked
         ])
         .setup(|app| {
             // 状态引擎（P2b）：起文件监听 + 后台刷新线程，注册管理状态。返回的句柄
@@ -307,10 +477,8 @@ pub fn run() {
                 // 只有非"前端已确认"的退出请求才拦下转交确认弹窗——见 ExitConfirmed
                 // 顶部注释：confirm_exit 触发的这次退出必须放行，否则 app 会变得
                 // 永远退不出去。
-                let already_confirmed = app_handle
-                    .state::<ExitConfirmed>()
-                    .0
-                    .load(Ordering::SeqCst);
+                let already_confirmed =
+                    app_handle.state::<ExitConfirmed>().0.load(Ordering::SeqCst);
                 if !already_confirmed {
                     api.prevent_exit();
                     emit_close_requested(app_handle);
@@ -427,6 +595,110 @@ mod tests {
             ],
             "顺序应符合 macOS 惯例：About / 分隔线 / 设置… / 分隔线 / Services / 分隔线 / \
              Hide / HideOthers / 分隔线 / Quit"
+        );
+    }
+
+    // 「主题」菜单：三项 id、标签与 checked 映射。theme_mode_checked_states 是
+    // set_theme_mode_checked 实际调用的那个纯函数（不接触任何 muda/AppKit 对象），
+    // 下面几条测试断的是生产代码真正会跑的分支。
+
+    #[test]
+    fn theme_menu_item_ids_match_spec() {
+        // 会因为什么失败：id 常量拼错、或与 task-7-brief.md 里约定的
+        // aterm-theme-mode-default/-dual/-single 不一致。
+        assert_eq!(THEME_MODE_DEFAULT_ID, "aterm-theme-mode-default");
+        assert_eq!(THEME_MODE_DUAL_ID, "aterm-theme-mode-dual");
+        assert_eq!(THEME_MODE_SINGLE_ID, "aterm-theme-mode-single");
+    }
+
+    #[test]
+    fn theme_mode_labels_match_frontend_appearance_section() {
+        // 硬要求①：Rust 菜单标签必须与 src/components/settings/AppearanceSection.tsx
+        // 的 MODE_LABEL 逐字一致。这里不是各自维护一份、靠人工对照——直接读取真实的
+        // 前端源码文件，找 `<mode>: '<label>',` 这个精确写法（MODE_LABEL 三行都是
+        // 这个格式），会因为什么失败：Rust 侧 THEME_MODE_ITEMS 的标签改了但前端没改
+        // （或反过来），两边任一侧漂移都会让 contains 找不到对应行。与
+        // src/__tests__/tauriAcl.test.ts 读取真实 manifest/capabilities 文件的做法
+        // 同一惯例。
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 应由 cargo 设置");
+        let path = std::path::Path::new(&manifest_dir)
+            .join("..")
+            .join("src")
+            .join("components")
+            .join("settings")
+            .join("AppearanceSection.tsx");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败：{e}", path.display()));
+        for (id, label) in THEME_MODE_ITEMS {
+            let mode = if id == THEME_MODE_DEFAULT_ID {
+                "default"
+            } else if id == THEME_MODE_DUAL_ID {
+                "dual"
+            } else if id == THEME_MODE_SINGLE_ID {
+                "single"
+            } else {
+                panic!("未知 id：{id}")
+            };
+            let needle = format!("{mode}: '{label}',");
+            assert!(
+                source.contains(&needle),
+                "AppearanceSection.tsx 的 MODE_LABEL 里未找到 `{needle}`\
+                 （Rust 侧菜单标签={label}，源码路径={}）",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn theme_mode_checked_states_default_checks_only_default() {
+        // 会因为什么失败：如果实现把 default 映射到了别的三元组（例如三项都
+        // false，或者误把 dual/single 也置 true），这里就会失败。
+        assert_eq!(
+            theme_mode_checked_states("default"),
+            Ok((true, false, false))
+        );
+    }
+
+    #[test]
+    fn theme_mode_checked_states_dual_checks_only_dual() {
+        assert_eq!(theme_mode_checked_states("dual"), Ok((false, true, false)));
+    }
+
+    #[test]
+    fn theme_mode_checked_states_single_checks_only_single() {
+        assert_eq!(
+            theme_mode_checked_states("single"),
+            Ok((false, false, true))
+        );
+    }
+
+    #[test]
+    fn theme_mode_checked_states_rejects_unknown_mode() {
+        // 会因为什么失败：如果实现对未知字符串也兜底返回某个 Ok 三元组（例如落到
+        // default），非法输入就会被悄悄接受、错误地改动菜单勾选态。
+        assert!(theme_mode_checked_states("not-a-real-mode").is_err());
+    }
+
+    #[test]
+    fn set_theme_mode_checked_never_leaves_two_items_checked() {
+        // 硬要求②：模拟"用户在菜单上直接点了某一项，AppKit 已经自行帮那一项翻转了
+        // 勾选"这个场景——旧状态里 default 和 dual 都还留着 true（模拟系统翻转
+        // 未经复位的坏状态）。theme_mode_checked_states 算出的新三元组必须是恰好
+        // 一项 true、且完全覆盖旧状态，不依赖旧状态里另外两项原来是什么。
+        let stale = [true, true, false];
+        let (default_checked, dual_checked, single_checked) =
+            theme_mode_checked_states("single").expect("single 是合法模式");
+        let new_states = [default_checked, dual_checked, single_checked];
+        assert_eq!(new_states, [false, false, true]);
+        assert_ne!(
+            new_states, stale,
+            "新状态必须完全覆盖旧状态，不能延续 stale 里的多项勾选"
+        );
+        assert_eq!(
+            new_states.iter().filter(|&&c| c).count(),
+            1,
+            "任意时刻必须恰好一项勾选"
         );
     }
 }
