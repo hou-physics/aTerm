@@ -71,6 +71,23 @@ describe('menuEvents：菜单栏「主题」三项与 store 双向同步', () =>
     expect(useTheme.getState().mode).toBe('default')
   })
 
+  it('点击当前已勾选的那一项（mode 未变）也无条件补一次同步', async () => {
+    // R2 修复（终审 Critical C1）：muda 在 macOS 上点击任何 CheckMenuItem 都会无条件
+    // 翻转该项的原生勾选态、然后才发事件——即使点的是当前已勾选的那一项，原生勾选态
+    // 也已经被扰动成"未勾选"。如果 handleThemeModeMenuEvent 只依赖 useTheme.subscribe
+    // 的"mode 真变化才同步"守卫，mode 没变（点的就是当前已选中的那项）就会跳过同步，
+    // 菜单停在零勾选、永不自愈，直到用户选了一个不同的模式才恢复——直接违反规格
+    // §4.3「任意时刻恰好一个处于勾选态」。handleThemeModeMenuEvent 必须在 setMode
+    // 之后无条件补一次同步，不能依赖/绕不开 subscribe 那条守卫。
+    await menuEventsReady
+    useTheme.setState({ mode: 'dual' }) // 模拟"当前已经是 dual"
+    invokeMock.mockClear() // 清掉上一行 setState 触发的订阅回调可能产生的调用
+
+    handleThemeModeMenuEvent({ payload: 'dual' } as never) // 点击当前已勾选的同一项
+
+    expect(invokeMock).toHaveBeenCalledWith('set_theme_mode_checked', { mode: 'dual' })
+  })
+
   it('调用 setMode 之后，同步函数被调用且传的是新模式', async () => {
     await menuEventsReady
     useTheme.setState({ mode: 'default' }) // 初始值，与下面目标值 'single' 不同

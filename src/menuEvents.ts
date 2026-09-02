@@ -27,6 +27,21 @@ export function handleOpenSettingsMenuItem() {
 export function handleThemeModeMenuEvent(event: Event<string>): void {
   if (!isThemeMode(event.payload)) return
   useTheme.getState().setMode(event.payload)
+  // R2 修复（终审 Critical C1）：无条件补一次同步，不依赖下面 useTheme.subscribe 那条
+  // "只在 mode 真的变化时才同步"的守卫。原因是 macOS 的 muda 库点击任何
+  // CheckMenuItem 都会无条件先翻转该项的原生勾选态、再发事件（已读 muda 0.19.3
+  // 源码 `platform_impl/macos/mod.rs` 核实）——也就是说，即使用户点的是当前**已经**
+  // 勾选的那一项（例如当前 mode 已经是 'dual'，又点了一次「双主题跟随系统」），
+  // 原生勾选态也已经被 muda 翻成了"未勾选"，三项此刻全部无勾选；而 `setMode('dual')`
+  // 传入的是与 store 里当前 mode 相同的值，state.mode 不会变化，下面 subscribe 的守卫
+  // 会把这次同步过滤掉——菜单就会永久停在零勾选，直到用户选了一个不同的模式才会
+  // 恢复，直接违反规格§4.3「任意时刻恰好一个处于勾选态」。菜单点击这条路径必然扰动
+  // 原生勾选态，与 store 里的 mode 是否真的发生变化无关，因此这里必须绕开那条守卫、
+  // 无条件补一次同步；代价是 mode 真的改变时会发两次幂等 IPC（一次经这里，一次经
+  // 下面的 subscribe），可接受，正确性优先。下面 subscribe 的守卫本身保留不动——
+  // 它过滤的是 setLightThemeId/setDarkThemeId/setSingleThemeId/系统深色模式监听等
+  // 压根不改 mode 的场景，那类场景仍然需要被过滤掉，不属于这里要处理的问题。
+  syncThemeModeToMenu(event.payload)
 }
 
 // 前端 → Rust：把菜单栏"主题"三项的勾选态同步为与 store 当前 mode 一致的状态。

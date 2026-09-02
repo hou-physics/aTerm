@@ -300,34 +300,50 @@ fn theme_mode_checked_states(mode: &str) -> Result<(bool, bool, bool), String> {
 ///
 /// 这是硬要求②的核心：macOS 点击 `CheckMenuItem` 时系统会自行切换被点击那一项的
 /// 勾选态，如果这里只设"新选中的那一项"、不去复位另外两项，用户在菜单/设置浮层
-/// 之间来回切换几次后就会看到两项甚至三项同时打勾。找不到「主题」子菜单或找不到
-/// 某一项时按失败即降级处理，只留一句警告，不 panic。
+/// 之间来回切换几次后就会看到两项甚至三项同时打勾。
+///
+/// R2 修复（终审 I4）：返回 `Result<(), String>` 而不是 `()`——原来四个失败分支（拿
+/// 不到菜单 / 读不到顶层项 / 找不到「主题」子菜单 / 读不到子菜单项）全部只
+/// `eprintln!` 后静默 `return`，`set_theme_mode_checked` 又无条件 `Ok(())`，导致
+/// `src/menuEvents.ts` 里专门为了留痕而写的 `.catch((err) => console.warn(...))`
+/// 永远不会触发——打包成 .app 之后 stderr 不可见，整条写入路径运行期零信号，与
+/// `core:window:allow-set-size` 那次"静默吞异常、748 测试全绿、打包版功能全部失效"
+/// 的事故同一形状。现在每个失败分支**同时** `eprintln!`（本地/开发时的即时信号）
+/// **和**返回 `Err`（经 `set_theme_mode_checked` 传回前端，`console.warn` 才真的
+/// 能响，两条线索都要）。遍历三项时某一项 `set_checked` 失败不提前中断循环——仍然
+/// 尽力把其余两项写完（"尽力而为、不因一项失败放弃全部"），但会记住第一个错误，
+/// 循环结束后如果有任何一项失败就整体返回 `Err`。
 #[cfg(target_os = "macos")]
 fn apply_theme_mode_checked(
     app: &AppHandle,
     default_checked: bool,
     dual_checked: bool,
     single_checked: bool,
-) {
+) -> Result<(), String> {
     let Some(menu) = app.menu() else {
-        eprintln!("警告：设置主题菜单勾选态失败，未找到应用菜单");
-        return;
+        let msg = "设置主题菜单勾选态失败，未找到应用菜单".to_string();
+        eprintln!("警告：{msg}");
+        return Err(msg);
     };
     let Ok(top_items) = menu.items() else {
-        eprintln!("警告：设置主题菜单勾选态失败，无法读取顶层菜单项");
-        return;
+        let msg = "设置主题菜单勾选态失败，无法读取顶层菜单项".to_string();
+        eprintln!("警告：{msg}");
+        return Err(msg);
     };
     let Some(theme_submenu) = top_items.iter().find_map(|item| {
         item.as_submenu()
             .filter(|s| s.id().as_ref() == THEME_SUBMENU_ID)
     }) else {
-        eprintln!("警告：设置主题菜单勾选态失败，未找到\"主题\"子菜单");
-        return;
+        let msg = "设置主题菜单勾选态失败，未找到\"主题\"子菜单".to_string();
+        eprintln!("警告：{msg}");
+        return Err(msg);
     };
     let Ok(items) = theme_submenu.items() else {
-        eprintln!("警告：设置主题菜单勾选态失败，无法读取\"主题\"子菜单项");
-        return;
+        let msg = "设置主题菜单勾选态失败，无法读取\"主题\"子菜单项".to_string();
+        eprintln!("警告：{msg}");
+        return Err(msg);
     };
+    let mut first_error: Option<String> = None;
     for item in &items {
         let Some(check) = item.as_check_menuitem() else {
             continue;
@@ -339,11 +355,16 @@ fn apply_theme_mode_checked(
             _ => continue,
         };
         if let Err(e) = check.set_checked(checked) {
-            eprintln!(
-                "警告：设置主题菜单勾选态失败（{}）：{e}",
-                check.id().as_ref()
-            );
+            let msg = format!("设置主题菜单勾选态失败（{}）：{e}", check.id().as_ref());
+            eprintln!("警告：{msg}");
+            if first_error.is_none() {
+                first_error = Some(msg);
+            }
         }
+    }
+    match first_error {
+        Some(msg) => Err(msg),
+        None => Ok(()),
     }
 }
 
@@ -351,14 +372,21 @@ fn apply_theme_mode_checked(
 /// src/menuEvents.ts），把菜单栏「主题」三项的勾选态同步为与新模式匹配的状态。
 /// 非法 `mode` 直接返回 `Err`，不触碰任何一项（见 `theme_mode_checked_states`）。
 ///
+/// R2 修复（终审 I4）：`apply_theme_mode_checked` 的失败现在用 `?` 原样传回前端
+/// （而不是像改之前那样被吞掉、始终 `Ok(())`）——`src/menuEvents.ts` 的
+/// `syncThemeModeToMenu` 专门写了 `.catch((err) => console.warn(...))` 就是为了接住
+/// 这个 `Err`，改之前那个 `catch` 因为命令永远成功而永远打不响，运行期零信号。
+///
 /// 非 macOS 平台没有这份「主题」菜单（`build_theme_menu` 只在 macOS 构建），因此
-/// 这里在校验通过后，其它平台上写入这一步自然是无操作——仍然保持跨平台一致的
-/// `Result<(), String>` 契约，前端不需要按平台区分调用方式。
+/// 这里在校验通过后，其它平台上写入这一步自然是无操作（`Ok(())`）——仍然保持跨
+/// 平台一致的 `Result<(), String>` 契约，前端不需要按平台区分调用方式。
 #[tauri::command]
 fn set_theme_mode_checked(app: AppHandle, mode: String) -> Result<(), String> {
     let (default_checked, dual_checked, single_checked) = theme_mode_checked_states(&mode)?;
     #[cfg(target_os = "macos")]
-    apply_theme_mode_checked(&app, default_checked, dual_checked, single_checked);
+    {
+        apply_theme_mode_checked(&app, default_checked, dual_checked, single_checked)?;
+    }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, default_checked, dual_checked, single_checked);
     Ok(())
