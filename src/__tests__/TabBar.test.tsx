@@ -283,6 +283,158 @@ describe('TabBar — 拖已打开的标签进窗格区（设计文档 §5-B 场�
   })
 })
 
+// 标签拖出窗口边界（V3.3 设计文档 §4.1，Task 2）：纯几何判定本身在 tabTearOut.test.ts
+// 单独覆盖过（src/tabTearOut.ts 的 shouldTearOut），这里补的是 TabBar.tsx 接进这条纯
+// 函数之后的集成行为——真实拖拽事件序列下 useDnd 的 tearOut 字段/视觉提示/pointerup
+// 占位日志是否真的按预期触发，以及"落点回到窗口内完全退回既有逻辑"这条硬要求是否
+// 站得住（不是只看字段清零，还要看落地动作本身真的执行了）。jsdom 默认视口是
+// 1024×768（未被本文件任何 mock 覆盖），因此下面用远超这两个数字的坐标模拟"拖出
+// 窗口"，用既有测试里已经在用的范围内坐标模拟"仍在窗口内"。
+describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () => {
+  // 与上面"拖已打开的标签进窗格区"描述块同一理由：默认给足够宽的内容区，避免
+  // "落点回到窗口内"那条用例的合并被窄窗口降级分支意外接管（decidePaneFit 的第一步
+  // 就看 clientWidth，jsdom 不 mock 的话恒为 0）。
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  it('pointermove 落在窗口边界之外：进入 tearOut 状态，清空窗口内落点状态，视觉提示出现', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 先落在 pane-a 右半侧，产生一次正常的窗口内落点指示
+    })
+    expect(useDnd.getState().target).not.toBeNull()
+    expect(useDnd.getState().tearOut).toBe(false)
+    expect(document.querySelector('.tabbar-tear-out')).toBeNull()
+
+    await act(async () => {
+      // x=2000 超出 jsdom 默认 innerWidth=1024，已经拖出窗口右边界。
+      fireEvent.pointerMove(b, { clientX: 2000, clientY: 10, pointerId: 1 })
+    })
+
+    expect(useDnd.getState().tearOut).toBe(true)
+    expect(useDnd.getState().target).toBeNull() // 窗口内的落点指示随之清空
+    expect(document.querySelector('.tabbar-tear-out')).toBeTruthy() // 视觉提示出现
+
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 2000, clientY: 10, pointerId: 1 })
+    })
+  })
+
+  it('先在标签栏上产生一次排序指示，再拖出窗口边界：排序指示（tabBarIndex）随 tearOut 一并清空，不是被巧合地一直是 null', async () => {
+    const TAB_C = { id: 'tab-c', kind: 'term' as const, title: 'C', panes: [{ id: 'pane-c', ptyId: 'pty-c', title: 'C' }], activePaneId: 'pane-c' }
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B, TAB_C], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },
+      'tab:tab-a': { left: 50, width: 100 },
+      'tab:tab-b': { left: 150, width: 100 },
+      'tab:tab-c': { left: 250, width: 100 },
+    })
+    const c = tabEl('C')
+
+    await act(async () => {
+      fireEvent.pointerDown(c, { clientX: 300, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(c, { clientX: 150, clientY: 10, pointerId: 1 }) // 先落在标签栏上，产生一次真实的排序指示
+    })
+    expect(useDnd.getState().tabBarIndex).not.toBeNull()
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.pointerMove(c, { clientX: 2000, clientY: 10, pointerId: 1 }) // 超出 innerWidth=1024，拖出窗口
+    })
+
+    expect(useDnd.getState().tearOut).toBe(true)
+    expect(useDnd.getState().tabBarIndex).toBeNull() // 排序指示随 tearOut 一并清空
+    expect(document.querySelector('.tabbar-drop-indicator')).toBeNull()
+
+    await act(async () => {
+      fireEvent.pointerUp(c, { clientX: 2000, clientY: 10, pointerId: 1 })
+    })
+    // 松手时确实没有按排序落点执行任何数组挪动——证明清空的不只是字段，reorderTab
+    // 真的没有被调用。
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b', 'tab-c'])
+  })
+
+  it('pointerup 命中拖出：只打印占位日志，不产生任何状态变化（真正的建窗+交接由 Task 3/4 实现，见 task-2-brief.md 的裁决）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+    const before = useTabs.getState().tabs
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+
+    // x=-50 落在窗口左边界之外。
+    await drag(b, { x: 500, y: 10 }, { x: -50, y: 10 })
+
+    expect(infoSpy).toHaveBeenCalledTimes(1)
+    expect(infoSpy.mock.calls[0][0]).toBe('[tabTearOut] pointerup outside window bounds — handoff not yet implemented (Task 3/4)')
+    expect(useTabs.getState().tabs).toBe(before) // 连引用都没变——没有任何标签/窗格状态被动过，也没有调用任何建窗命令
+    expect(useDnd.getState().tearOut).toBe(false) // pointerup 已经走 endDrag()，字段随其它落点状态一起清空
+  })
+
+  it('落点先移出窗口边界、又移回窗口内：完全退回既有的窗口内拖拽逻辑（合并进窗格区正常完成，不是卡在 tearOut 状态里的假象）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 2000, clientY: 10, pointerId: 1 }) // 先拖出窗口
+    })
+    expect(useDnd.getState().tearOut).toBe(true)
+
+    await act(async () => {
+      fireEvent.pointerMove(b, { clientX: 300, clientY: 50, pointerId: 1 }) // 再回到 pane-a 右半侧（窗口内）
+    })
+    expect(useDnd.getState().tearOut).toBe(false)
+    expect(useDnd.getState().target).not.toBeNull()
+
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 300, clientY: 50, pointerId: 1 })
+    })
+
+    // 与上面"拖已打开的标签进窗格区"那组用例里"落在右半侧"的断言完全一致：证明恢复的
+    // 不只是 useDnd 的字段，落地动作本身也真的执行了，不是表面上字段对了、实际行为
+    // 仍然被 tearOut 分支悄悄短路。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')).toBeUndefined()
+    const t = useTabs.getState().tabs.find((t) => t.id === 'tab-a')!
+    expect(t.panes.map((p) => p.id)).toEqual(['pane-a', 'pane-b'])
+  })
+
+  it('只剩一个（非主页）标签时，移出窗口边界也不进入 tearOut 状态（等于把窗口整体搬走，没有意义，退回既有行为）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' }) // 唯一的非主页标签就是被拖的这一个
+    await renderApp()
+    const a = tabEl('A')
+
+    await act(async () => {
+      fireEvent.pointerDown(a, { clientX: 10, clientY: 10, pointerId: 1 })
+      fireEvent.pointerMove(a, { clientX: 2000, clientY: 10, pointerId: 1 }) // 移出窗口边界
+    })
+
+    expect(useDnd.getState().tearOut).toBe(false)
+    expect(document.querySelector('.tabbar-tear-out')).toBeNull()
+
+    await act(async () => {
+      fireEvent.pointerUp(a, { clientX: 2000, clientY: 10, pointerId: 1 })
+    })
+    // 拖的正是当前激活标签本身——这条路径本就是既有的"空操作"分支（见上面"拖到自己
+    // 标签的窗格区"用例），没有任何标签/窗格状态发生变化。
+    expect(useTabs.getState().tabs).toEqual([HOME, TAB_A])
+  })
+})
+
 // 标签右键菜单（设计文档新增）：复用 TabPanes.tsx 窗格标题栏那一份 ContextMenu 组件
 // （见该组件顶部注释），这里只测标签栏这一处接线——菜单本身"点外部/Escape/失焦关闭"
 // 三种方式已经在 PaneDetach.test.tsx 里覆盖过组件行为，不重复测。

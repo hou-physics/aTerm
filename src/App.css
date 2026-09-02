@@ -58,6 +58,18 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    变量，不新增调色板条目；pointer-events:none 与 .pane-drop-indicator 同理，不拦截
    拖拽过程中持续发生的指针事件。 */
 .tabbar-drop-indicator { position: absolute; top: 4px; bottom: 2px; width: 2px; background: var(--color-accent); border-radius: 1px; z-index: 5; pointer-events: none; }
+/* 标签拖出窗口边界（V3.3 设计文档 §4.1）的「将拖出」视觉提示：与 .pane-drop-indicator
+   同一套"半透明色块（::before 承载）+ 独立不透明文字盒子（兄弟节点，不受父级 opacity
+   拖累）"手法，只是这里覆盖的是整条标签栏而不是某个窗格——拖出判定没有一个具体的
+   "落点矩形"可指，整条标签栏本身就是这次拖拽的来源，高亮它来表达"再松手就会离开这个
+   窗口"。用既有强调色变量，不新增调色板条目；pointer-events:none，不拦截拖拽过程中
+   持续发生的指针事件（TabBar.tsx 用 setPointerCapture 接管）。锚定在 `.tabbar`
+   （position:relative，见上方规则）内部而不是跟随光标：光标此刻可能已经在窗口视口之
+   外，position:fixed 的元素会被浏览器裁剪出视口、不可见，这条提示必须锚定在窗口内部
+   的既有节点上才能全程可见（见 TabBar.tsx 的 TabBarTearOutIndicator 注释）。 */
+.tabbar-tear-out { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6; pointer-events: none; border-radius: 6px; }
+.tabbar-tear-out::before { content: ''; position: absolute; inset: 0; background: var(--color-accent); opacity: .18; border: 2px solid var(--color-accent); border-radius: 6px; }
+.tabbar-tear-out-label { position: relative; padding: 3px 10px; border-radius: 6px; background: var(--color-elevated); color: var(--color-text); border: 1px solid var(--color-border); font-size: 12px; white-space: nowrap; }
 /* 侧边栏折叠按钮 + 主页标签 + 新建标签「＋」三者钉在标签栏最左侧，作为一个整体
    position: sticky; left: 0——标签一多、`.tabbar` 横向滚动时，这一整块不随内容滚动，
    而是让其余标签从它下面/后面滚过去（背景色与 `.tabbar` 一致，挡住滚过的标签，

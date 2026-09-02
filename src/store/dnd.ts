@@ -19,6 +19,13 @@ import type { DropMode, DropTarget } from '../paneDrop'
 // （设计文档 §5-C，TabBar.tsx 自己消费并渲染一条插入指示线——与 target 是同一套
 // "拖拽源实时写、指示条只读"模式，只是落点所在的容器不同，值的形状也不同，没有
 // 理由合并成一个字段）。
+// tearOut：V3.3 设计文档 §4.1 新增——标签拖拽过程中，光标一旦落在当前窗口边界之外
+// （src/tabTearOut.ts 的 shouldTearOut 纯函数判定），TabBar.tsx 写入 true；落点回到
+// 窗口内、或这次拖拽根本不是标签拖拽，写回 false。TabBar.tsx 自己的
+// TabBarTearOutIndicator 消费它渲染「将拖出」的视觉提示，同一套"拖拽源实时写、指示条
+// 只读"模式。只在 TabBar.tsx 这一个拖拽源里被写入——Sidebar.tsx/TabPanes.tsx 那两个
+// 拖拽源不涉及"标签拖出窗口"这个场景（设计文档明确只做标签拖出，见 §3"明确不做"），
+// 因此恒为 false，不受影响。
 export type DropRefusal = { reason: string } | null
 
 type DndState = {
@@ -26,10 +33,12 @@ type DndState = {
   dropMode: DropMode | null
   refusal: DropRefusal
   tabBarIndex: number | null
+  tearOut: boolean
   setTarget(target: DropTarget | null): void
   setDropMode(mode: DropMode | null): void
   setRefusal(refusal: DropRefusal): void
   setTabBarIndex(index: number | null): void
+  setTearOut(tearOut: boolean): void
 }
 
 export const useDnd = create<DndState>((set) => ({
@@ -37,8 +46,10 @@ export const useDnd = create<DndState>((set) => ({
   dropMode: null,
   refusal: null,
   tabBarIndex: null,
+  tearOut: false,
   setTarget: (target) => set({ target }),
   setDropMode: (dropMode) => set({ dropMode }),
   setRefusal: (refusal) => set({ refusal }),
   setTabBarIndex: (index) => set({ tabBarIndex: index }),
+  setTearOut: (tearOut) => set({ tearOut }),
 }))
