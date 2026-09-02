@@ -76,8 +76,24 @@ fn is_term_window_label(label: &str) -> bool {
 /// `listen(…, { target: 本窗口 label })`。这个组合有一个刻意保留的降级性质：即便前端那
 /// 半边失效（回到 Any 监听），主窗口**照样收得到**这个事件，⌘Q 确认框最坏退回到 V3.2
 /// 的广播行为，而不是彻底失灵。
+///
+/// **载荷是目标窗口的 label**（终审 I3），与 `emit_window_close_requested` 一模一样的
+/// 理由，这里不再复述考据：`emit_to` 不是私有信道，定向的唯一防线是接收侧那**一个**
+/// `target` option，而"一个 option 是唯一防线"正是本分支已经吃过一次 Critical
+/// （Ruling 8）、又发现过一个半成品（Ruling 15）的形状。规矩是两头都做：发送端定向 +
+/// 载荷带目标 label，接收端限定 target + handler 里再比对载荷。这条事件此前只做了发送
+/// 侧的定向，收方（`handleCloseRequested`）完全不看载荷——一旦那个 option 掉了，每个
+/// 拖出来的 `term-*` 窗口都会各弹一个"确定关闭 aTerm？"，随便在哪一个上点确定都会退出
+/// 整个应用、连带杀光所有窗口里的会话。
+///
+/// 写 `MAIN_WINDOW_LABEL` 而不是别的：主窗口两侧恒相等（上面 `emit_to` 的目标就是它，
+/// 收方比对的是自己的 `currentWindowLabel()`，而这个常量已由
+/// `tauri_still_derives_the_label_this_module_hard_codes` 与
+/// `main_window_in_tauri_conf_resolves_to_the_hard_coded_label` 两条测试钉在 tauri 的
+/// 隐式默认值上），因此零降级损失——上面那条"前端半边失效也照样收得到"的性质讲的是
+/// **投递**，与要不要校验载荷无关。
 fn emit_close_requested(app_handle: &AppHandle) {
-    let _ = app_handle.emit_to(MAIN_WINDOW_LABEL, "app-close-requested", ());
+    let _ = app_handle.emit_to(MAIN_WINDOW_LABEL, "app-close-requested", MAIN_WINDOW_LABEL);
 }
 
 /// **单个非主窗口**（拖出来的 `term-*` 终端窗口）收到关闭请求时，定向通知**它自己的**

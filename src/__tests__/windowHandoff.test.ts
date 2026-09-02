@@ -781,6 +781,37 @@ describe('C1 —— 定向投递不是私有信道，两层防护缺一不可', 
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
   })
 
+  // 终审 M1：ack 这条事件此前只做了半边——发送端是 `emitTo(payload.fromLabel, …)` 且载荷
+  // 带接管方自己的 label，接收端却只有载荷比对、缺注册侧的 target。本分支的规矩是两头都
+  // 做（Ruling 8 为此吃过一次 Critical，Ruling 15 又发现一个半成品）。
+  //
+  // 发起方的 label 刻意取一个**不是 'main'** 的值（链式拖出：从一个已经被拖出来的窗口里
+  // 再拖一个标签出去，正是真机验收清单第 16 条那个场景）。用默认的 'main' 的话，把实现
+  // 写死成 `{ target: 'main' }` 这条断言照样绿——初始值等于目标值，本分支已经栽过三次。
+  it('ack 监听限定 target 为发起方自己的 label（与发送端 emitTo(fromLabel) 对齐）', async () => {
+    currentWindowMock.mockReturnValue({ label: 'term-3' })
+    invokeMock.mockResolvedValue('term-4')
+
+    const done = tearOutTab('tab-b', { x: 0, y: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    const ackCall = listenMock.mock.calls.find((c) => c[0] === HANDOFF_ACK_EVENT)
+    expect(ackCall).toBeTruthy()
+    expect(ackCall![2]).toEqual({ target: 'term-3' })
+
+    // 另一半：这道限定不能把真正该收的 ack 挡在门外。走替身的真实投递语义
+    // （emitTo → 命中 target 未声明的监听器 + target 恰为该 label 的监听器），不用
+    // fireAck 那个绕过 target 过滤的辅助函数——那样就测不到这里想测的东西了。
+    fireReady('term-4')
+    await vi.advanceTimersByTimeAsync(0)
+    await emitToMock('term-3', HANDOFF_ACK_EVENT, { label: 'term-4' })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // 断真实 store 状态：ack 真的被认下了，标签已经交出去。
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+    expect(await done).toBe(true)
+  })
+
   it('ack 报的是接管方自己的 label（不是把载荷里的 toLabel 原样回带）', async () => {
     currentWindowMock.mockReturnValue({ label: 'term-5' })
     useTabs.setState({ tabs: [HOME], activeId: 'home' })

@@ -48,11 +48,28 @@ async function countLiveSessions(): Promise<number> {
 // 在 finally 里复位，下一次关闭请求才会重新触发一轮全新的确认。
 let confirmationInFlight = false
 
-// 导出便于测试直接 await 完整流程（统计存活会话 → 弹确认 → 视结果决定是否调用
-// confirm_exit）；下面注册监听时直接把这个函数本身传给 listen，不用一个丢弃返回值的
-// 包装闭包——那样会让 listen 的回调同步返回 undefined、内部这条 async 链变成"发射后不管"，
-// 调用方（包括测试）就没法可靠地等到它真正跑完。
-export async function handleCloseRequested() {
+// 导出便于测试直接 await 完整流程（校验载荷 → 统计存活会话 → 弹确认 → 视结果决定是否
+// 调用 confirm_exit）。
+//
+// @param toLabel Rust 侧 emit_close_requested 放进载荷里的目标窗口 label（恒为 "main"）。
+//
+// **载荷校验是第二层防线**（终审 I3）。注册侧的 `{ target }` 是第一层，但它是**唯一**
+// 一层——`emit_to` 不是私有信道：不传 options 的 listen 落成 `{ kind: 'Any' }`，对
+// emit_to 的 label 过滤无条件命中（Ruling 8 的完整考据见 windowHandoff.ts 顶部）。少了
+// 这一层，一旦那个 option 掉了（重构、复制粘贴、或者有人觉得它多余），每个拖出来的
+// term-* 窗口都会各弹一个"确定关闭 aTerm？"，随便在哪一个上点"确定"都会退出整个应用、
+// 连带杀光所有窗口里正在跑的会话。windowClose.ts 的 window-close-requested 与
+// windowHandoff.ts 的三条交接事件都已经是"两头都做"，这条是最后一个只做了一头的。
+//
+// 主窗口两侧恒相等（Rust 那边 emit_to 的目标与载荷都是 MAIN_WINDOW_LABEL，这边比对的是
+// 自己的 currentWindowLabel()），所以这层校验对正常路径零影响。
+//
+// 校验放在重入锁**之前**：不是发给自己的事件根本不该占用这一轮确认流程的名额，否则一条
+// 串扰过来的事件会在主窗口这边把锁短暂占住。而 `confirmationInFlight` 的读与写之间没有
+// 任何 await（await 都在它之前或之后），check-and-set 因此仍是原子的。
+export async function handleCloseRequested(toLabel: string) {
+  const label = await currentWindowLabel()
+  if (toLabel !== label) return
   if (confirmationInFlight) return
   confirmationInFlight = true
   try {
@@ -78,8 +95,14 @@ export async function handleCloseRequested() {
 //
 // 主窗口自己传的 target 恰是 'main'，与 Rust 那侧的目标一致，因此照收不误；
 // currentWindowLabel() 在 jsdom/浏览器预览里兜底也返回 'main'（见 windowLabel.ts）。
+//
+// 载荷（目标窗口 label）交给 handleCloseRequested 自己比对——那是第二层防线，理由见它
+// 上方注释。回调包一层 `void ...` 与 windowClose.ts 同一写法：listen 的回调签名是同步的，
+// 这条 async 链本就只能"发射后不管"，需要 await 完整流程的测试直接调 handleCloseRequested。
 export const closeRequestReady: Promise<void> = (async () => {
-  await listen('app-close-requested', handleCloseRequested, { target: await currentWindowLabel() })
+  await listen<string>('app-close-requested', (e) => {
+    void handleCloseRequested(e.payload)
+  }, { target: await currentWindowLabel() })
 })()
   .then(() => undefined)
   .catch((err) => { console.error('关闭确认监听注册失败', err) })

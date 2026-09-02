@@ -336,6 +336,40 @@ describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () 
     })
   })
 
+  // 终审 I4 的真实误触场景，端到端走一遍：用户在标签栏上横向拖动标签**排序**，手抖向上
+  // 多晃了 20 像素。`.tabbar` 的 padding 是 `6px 8px 0`、标签本体中心在 clientY ≈ 19px，
+  // 而 tauri.conf.json 没有 titleBarStyle（原生标题栏），所以标题栏区域对 webview 就是
+  // clientY < 0——改之前这一晃就命中拖出判定，松手直接弹出一个新窗口，而设计文档 §3 不做
+  // "拖回"，这次误触没有任何撤销手段。现在 tabTearOut.ts 的出界余量把整条标题栏都盖进了
+  // 死区里。反方向（真的拖远了仍然照常拖出）由本组最后那条 x=2000 的用例把着。
+  it('横向排序时向上晃进标题栏（clientY=-20）：不进入 tearOut、松手也不弹新窗口', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },
+      'tab:tab-a': { left: 50, width: 100 },
+      'tab:tab-b': { left: 150, width: 100 },
+    })
+    const b = tabEl('B')
+    const before = useTabs.getState().tabs
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 200, clientY: 19, pointerId: 1 }) // 标签本体中心的高度
+      fireEvent.pointerMove(b, { clientX: 100, clientY: -20, pointerId: 1 }) // 横向挪动 + 向上晃进标题栏
+    })
+
+    expect(useDnd.getState().tearOut).toBe(false)
+    expect(document.querySelector('.tabbar-tear-out')).toBeNull()
+
+    await act(async () => {
+      fireEvent.pointerUp(b, { clientX: 100, clientY: -20, pointerId: 1 })
+    })
+
+    expect(tearOutTab).not.toHaveBeenCalled() // 没有新窗口被弹出来
+    expect(useTabs.getState().tabs).toBe(before) // 标签一个字节都没被动过
+  })
+
   it('先在标签栏上产生一次排序指示，再拖出窗口边界：排序指示（tabBarIndex）随 tearOut 一并清空，不是被巧合地一直是 null', async () => {
     const TAB_C = { id: 'tab-c', kind: 'term' as const, title: 'C', panes: [{ id: 'pane-c', ptyId: 'pty-c', title: 'C' }], activePaneId: 'pane-c' }
     useTabs.setState({ tabs: [HOME, TAB_A, TAB_B, TAB_C], activeId: 'tab-a' })

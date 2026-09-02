@@ -277,7 +277,9 @@ export function TabBar() {
       return
     }
     // 拖出窗口边界判定（V3.3 设计文档 §4.1）：用 src/tabTearOut.ts 的纯函数
-    // shouldTearOut 判定光标此刻是否已经落在当前窗口视口之外。windowRect 直接用
+    // shouldTearOut 判定光标此刻是否已经落在当前窗口视口之外**足够远**——"足够远"是
+    // 那个函数自己的事（它带一个向外的余量，把整条原生标题栏盖进死区，理由见
+    // TEAR_OUT_MARGIN_PX 上方注释），这里只管把落点与视口尺寸交给它。windowRect 直接用
     // window.innerWidth/innerHeight——与本文件 PlusMenu 的视口钳制、
     // ConversationPanel.tsx 的宽度换算同一个既有取数方式，clientX/clientY 本就是相对
     // 当前窗口视口的坐标，不需要另外查询某个 DOM 节点的矩形。tabCount 传的是

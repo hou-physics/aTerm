@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { handlers, listenTargets, listenMock } = vi.hoisted(() => {
-  const handlers: Record<string, () => void> = {}
+  const handlers: Record<string, (e: { payload: unknown }) => void> = {}
   // 每个事件注册时传的 options.target。V3.3 起这不是无关紧要的细节：Rust 侧
   // emit_close_requested 改成了 emit_to("main", …)，而不传 target 的 listen 会落成
   // `{ kind: 'Any' }`、对 emit_to 的 label 过滤无条件命中——少了 target，每个拖出来的
   // term-* 窗口都会各弹一个"确定关闭 aTerm？"。
   const listenTargets: Record<string, unknown> = {}
-  const listenMock = vi.fn(async (event: string, handler: () => void, options?: unknown) => {
+  const listenMock = vi.fn(async (event: string, handler: (e: { payload: unknown }) => void, options?: unknown) => {
     handlers[event] = handler
     listenTargets[event] = options
     return () => {}
@@ -61,11 +61,57 @@ describe('buildExitConfirmMessage（纯函数，不依赖 Tauri）', () => {
 describe('closeRequest：收到 app-close-requested 后统计存活会话并弹确认', () => {
   it('模块加载时已向 app-close-requested 注册监听（在任何用户交互之前）', async () => {
     // listenMock 的调用记录会被上面 beforeEach 里的 vi.clearAllMocks() 清空，但注册这件事
-    // 本身发生在模块顶层导入时（早于任何一个 beforeEach）——这里改为直接断言 handlers 里
-    // 挂的正是 handleCloseRequested 本身，而不是断言 listenMock 的调用历史（后者在模块
-    // 只导入一次、多个用例共享同一次注册的前提下并不可靠）。
+    // 本身发生在模块顶层导入时（早于任何一个 beforeEach）——所以这里看的是 handlers 里
+    // 挂没挂上东西，而不是 listenMock 的调用历史（后者在模块只导入一次、多个用例共享同
+    // 一次注册的前提下并不可靠）。回调此后是一层包装闭包（要把载荷传给
+    // handleCloseRequested），不能再断言引用相等；"包装闭包确实把载荷透传了"由下面两条
+    // 用例正反各验一次。
     await closeRequestReady
-    expect(handlers['app-close-requested']).toBe(handleCloseRequested)
+    expect(typeof handlers['app-close-requested']).toBe('function')
+  })
+
+  // 终审 I3 的第一半：注册的那个包装闭包必须把**事件载荷**交给 handleCloseRequested，
+  // 而不是自己编一个（例如直接 currentWindowLabel()——那样比对恒真，整条校验白做）。
+  // 正反两条一起才有区分力：只有正向那条时，一个"什么都不做"的回调也能让反向那条绿。
+  it('注册的回调把载荷透传下去：载荷是本窗口 label 时走完整流程', async () => {
+    await closeRequestReady
+    vi.mocked(ipc.ptyAliveCount).mockResolvedValue(0)
+    confirmMock.mockResolvedValue(true)
+
+    handlers['app-close-requested']({ payload: TEST_WINDOW_LABEL })
+    await vi.waitFor(() => expect(ipc.confirmExit).toHaveBeenCalled())
+  })
+
+  it('注册的回调把载荷透传下去：载荷是别的窗口 label 时连统计都不做', async () => {
+    await closeRequestReady
+    vi.mocked(ipc.ptyAliveCount).mockResolvedValue(0)
+    confirmMock.mockResolvedValue(true)
+
+    handlers['app-close-requested']({ payload: 'main' }) // 本窗口是 term-9
+    // 一个宏任务边界足以冲干净这条 async 链上的全部微任务（currentWindowLabel 的替身
+    // 是立即 resolve 的），此后仍然没有统计发生才说明它真的早退了。
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ipc.ptyAliveCount).not.toHaveBeenCalled()
+    expect(confirmMock).not.toHaveBeenCalled()
+    expect(ipc.confirmExit).not.toHaveBeenCalled()
+  })
+
+  // 终审 I3 的第二半：handler 自己的载荷校验。注册侧的 target option 是第一层防线，但
+  // 在此之前它是**唯一**一层——emit_to 不是私有信道（Ruling 8），Any 监听对 emit_to 的
+  // label 过滤无条件命中。少了这一层，一旦那个 option 掉了，每个 term-* 窗口都会各弹一
+  // 个"确定关闭 aTerm？"，随便点哪个都退出整个应用、杀光所有窗口的会话。
+  //
+  // 替身的窗口 label 刻意不是 'main'（见文件上方 TEST_WINDOW_LABEL 处的说明）：否则
+  // 载荷 'main' 与本窗口 label 恒相等，这条用例就永远走不到早退分支、变成恒真。
+  it('载荷里的 label 不是本窗口时整条流程早退（target option 不是唯一防线）', async () => {
+    await closeRequestReady
+
+    await handleCloseRequested('main') // 这条是发给主窗口的，而本窗口是 term-9
+
+    expect(ipc.ptyAliveCount).not.toHaveBeenCalled()
+    expect(confirmMock).not.toHaveBeenCalled()
+    expect(ipc.confirmExit).not.toHaveBeenCalled()
   })
 
   // V3.3：定向投递只在**两侧都配合**时才成立。Rust 那半边是 emit_to("main", …)，这半边
@@ -91,7 +137,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     vi.mocked(ipc.ptyAliveCount).mockResolvedValue(3)
     confirmMock.mockResolvedValue(true)
 
-    await handleCloseRequested()
+    await handleCloseRequested(TEST_WINDOW_LABEL)
 
     expect(confirmMock).toHaveBeenCalledWith(
       '还有 3 个会话在运行，关闭 aTerm 会终止它们。确定关闭？',
@@ -107,7 +153,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     vi.mocked(ipc.ptyAliveCount).mockResolvedValue(2)
     confirmMock.mockResolvedValue(true)
 
-    await handleCloseRequested()
+    await handleCloseRequested(TEST_WINDOW_LABEL)
 
     expect(confirmMock).toHaveBeenCalledWith(
       '还有 2 个会话在运行，关闭 aTerm 会终止它们。确定关闭？',
@@ -120,7 +166,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     vi.mocked(ipc.ptyAliveCount).mockResolvedValue(0)
     confirmMock.mockResolvedValue(true)
 
-    await handleCloseRequested()
+    await handleCloseRequested(TEST_WINDOW_LABEL)
 
     expect(confirmMock).toHaveBeenCalledWith('确定关闭 aTerm？', { title: 'aTerm' })
   })
@@ -130,7 +176,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     vi.mocked(ipc.ptyAliveCount).mockResolvedValue(1)
     confirmMock.mockResolvedValue(false)
 
-    await handleCloseRequested()
+    await handleCloseRequested(TEST_WINDOW_LABEL)
 
     expect(confirmMock).toHaveBeenCalled()
     expect(ipc.confirmExit).not.toHaveBeenCalled()
@@ -155,10 +201,10 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     })
     confirmMock.mockResolvedValue(true)
 
-    const first = handleCloseRequested()
+    const first = handleCloseRequested(TEST_WINDOW_LABEL)
     await vi.waitFor(() => expect(ipc.ptyAliveCount).toHaveBeenCalled())
 
-    await handleCloseRequested() // 第二次请求：应当被整个丢弃
+    await handleCloseRequested(TEST_WINDOW_LABEL) // 第二次请求：应当被整个丢弃
     expect(countCalls).toBe(1)
     expect(confirmMock).not.toHaveBeenCalled()
 
@@ -169,7 +215,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
 
     // 这一轮确认已经跑完，guard 必须复位——下一次关闭请求要能重新触发一轮全新确认，
     // 而不是被永久锁死。
-    await handleCloseRequested()
+    await handleCloseRequested(TEST_WINDOW_LABEL)
     expect(confirmMock).toHaveBeenCalledTimes(2)
   })
 
@@ -179,7 +225,7 @@ describe('closeRequest：收到 app-close-requested 后统计存活会话并弹�
     vi.mocked(ipc.ptyAliveCount).mockRejectedValue(new Error('PtyManager 锁中毒'))
     confirmMock.mockResolvedValue(true)
 
-    await handleCloseRequested()
+    await handleCloseRequested(TEST_WINDOW_LABEL)
 
     expect(confirmMock).toHaveBeenCalledWith('确定关闭 aTerm？', { title: 'aTerm' })
     expect(ipc.confirmExit).toHaveBeenCalled()

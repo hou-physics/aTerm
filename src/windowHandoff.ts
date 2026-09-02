@@ -276,9 +276,17 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
     })
     // ack 认领（R2/C1 之三）：载荷里的 label 是**接管方自己报出来的** label，与我们刚
     // create_term_window 拿到的那个对上才算数——串扰过来的、或别的窗口发的 ack 一律不认。
+    //
+    // target 限定成本窗口（终审 M1）：发送端已经是 `emitTo(payload.fromLabel, …)`，接收端
+    // 就该把两头都做齐——本分支的规矩是"发送端定向 + 载荷带目标 label，接收端限定 target
+    // + handler 里再比对载荷"，八个跨窗口事件里只有这一条缺了注册侧那一半。今天它不出错
+    // （label 由 Rust 侧进程内单调递增的计数器生成、全局唯一，上面那行载荷比对具备完全
+    // 区分力），补上纯粹是不留半成品：READY 那条监听**刻意**不限定 target（它是真广播，
+    // 新窗口不知道是谁把它建出来的），两条挨在一起时"这条没写 target"很容易被读成"这个
+    // 事件也是广播"。
     unlistenAck = await listen<HandoffAck>(HANDOFF_ACK_EVENT, (e) => {
       if (label !== null && e.payload?.label === label) ack.resolve()
-    })
+    }, { target: fromLabel })
 
     // 第 1 步：建窗。失败（Rust 侧返回 Err）时什么窗口都没建出来，没有残留可关。
     label = await invoke<string>('create_term_window', { x: screenPoint.x, y: screenPoint.y })
