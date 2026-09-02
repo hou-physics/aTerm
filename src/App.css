@@ -461,31 +461,29 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
    那个类是给侧栏浮出的弹层用的（position:absolute），这里只是静态内容，不需要。 */
 .appearance-section { display: flex; flex-direction: column; gap: 10px; }
 
-/* Task 4：终端分区（TerminalSection.tsx）——滚动速度滑块，本仓库首次引入
+/* v3-2c：终端分区（TerminalSection.tsx）——滚动速度滑块，本仓库首次引入
    type="range"。原生轨道/滑块交给 accent-color 接管主题色（引用 --color-accent，
-   不是字面量色值），不必逐一画皮肤。 */
-.terminal-section { display: flex; flex-direction: column; gap: 10px; }
-.terminal-section-row { display: flex; align-items: center; gap: 10px; }
-.terminal-section-label { flex: none; font-size: 12px; color: var(--color-text-dim); }
-.terminal-section-slider { flex: 1; accent-color: var(--color-accent); }
+   不是字面量色值），不必逐一画皮肤。外层容器换成 SettingCard/SettingRow 之后，
+   只有滑块本身 + 数值展示还需要专属样式。 */
+.terminal-section { display: flex; flex-direction: column; }
+/* Codex 风格的行右侧 control 是紧凑靠右的控件，不是撑满整行——.setting-row-control
+   是 flex:none，滑块没有可以伸展进去的剩余空间，因此这里给一个明确宽度，而不是
+   写一个在这个布局下永远生效不了的 flex:1。 */
+.terminal-section-slider { width: 160px; accent-color: var(--color-accent); }
 .terminal-section-value { flex: none; min-width: 32px; text-align: right; font-size: 12px; color: var(--color-text-dim); font-variant-numeric: tabular-nums; }
 
-/* Task 4：项目与会话分区（ProjectsSection.tsx）——隐藏项目 / 已移除会话的"一次看全"
+/* v3-2c：项目与会话分区（ProjectsSection.tsx）——隐藏项目 / 已移除会话的"一次看全"
    入口，行为委托给既有 store action（unhideProject/restoreSession），这里只是
-   列表展示 + 按钮，不重复实现任何判断。 */
+   列表展示 + 按钮，不重复实现任何判断。两张卡片（SettingCard）之间留一点间距，
+   卡片内部每个条目是一行 SettingRow，分隔线由 SettingCard 自己画。 */
 .projects-section { display: flex; flex-direction: column; gap: 14px; }
-.projects-section-group { display: flex; flex-direction: column; gap: 6px; }
-.projects-section-group-label { font-size: 10.5px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; }
-.projects-section-empty { font-size: 12px; color: var(--color-text-faint); }
-.projects-section-list { display: flex; flex-direction: column; gap: 1px; max-height: 160px; overflow-y: auto; list-style: none; margin: 0; padding: 0; }
-.projects-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; }
-.projects-section-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--color-text); }
+.projects-section-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .projects-section-action {
   flex: none;
   padding: 3px 10px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
-  background: var(--color-elevated);
+  background: var(--color-panel);
   color: var(--color-text-dim);
   font-family: inherit;
   font-size: 11.5px;
@@ -493,17 +491,17 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 }
 .projects-section-action:hover { border-color: var(--color-accent); color: var(--color-text); }
 
-/* Task 4：Hooks 分区（HooksSection.tsx）——视觉上照抄 .hooks-control 系列样式，但
-   换了一套类名前缀（hooks-section-*），不复用原类名：HooksControl 连同它的样式在
-   Task 5 会一起变成死代码，这组类名要能独立于它的生死。 */
-.hooks-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--color-text-dim); }
-.hooks-section-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* v3-2c：Hooks 分区（HooksSection.tsx）——一张卡片一行，状态文字 + 安装/更新/卸载
+   按钮同放右侧 control 里。换了一套类名前缀（hooks-section-*），不复用
+   .hooks-control 系列原类名：HooksControl 连同它的样式在 Task 5 会一起变成死
+   代码，这组类名要能独立于它的生死。 */
+.hooks-section-status { flex: none; font-size: 12px; color: var(--color-text-dim); white-space: nowrap; }
 .hooks-section-action {
   flex: none;
   padding: 4px 10px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
-  background: var(--color-elevated);
+  background: var(--color-panel);
   color: var(--color-text-dim);
   font-family: inherit;
   font-size: 11.5px;
@@ -511,7 +509,7 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 }
 .hooks-section-action:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
 .hooks-section-action:disabled { opacity: .6; }
-.hooks-section-error { margin-top: 6px; font-size: 11px; color: var(--color-text); word-break: break-word; }
+.hooks-section-error { padding: 8px 12px; font-size: 11px; color: var(--color-text); word-break: break-word; }
 
 .conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .conv-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -658,12 +656,17 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   justify-content: center;
   background: var(--color-scrim);
 }
+/* v3-2c：面板固定尺寸——用户明确要求"选不同门类的时候不要切换这个设置的大小"。
+   此前 max-height: 80vh 会随每个分类实际内容量伸缩（比如"主题"选中「默认」模式
+   时下方几乎不显示内容，面板显得"空空荡荡"），改成固定 height，切换分类时宽高
+   都不再变化；右侧详情区（.settings-panel-body）内部自己滚动，左侧分类栏
+   （.settings-panel-nav）不滚动、始终整个可见（4 个分类项撑不满也撑不爆）。 */
 .settings-panel {
   display: flex;
   flex-direction: column;
   width: 680px;
   max-width: 90vw;
-  max-height: 80vh;
+  height: min(560px, 80vh);
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-panel);
@@ -714,7 +717,9 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   gap: 2px;
   padding: 8px;
   border-right: 1px solid var(--color-border);
-  overflow-y: auto;
+  /* v3-2c：面板固定高度后左侧分类栏不滚动——4 个分类项在 560px 高的面板里怎么都
+     撑不满，也没有更多分类会撑爆它；真的溢出滚动应留给右侧详情区。 */
+  overflow: hidden;
 }
 .settings-panel-nav-item {
   display: flex;
@@ -741,4 +746,62 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   overflow-y: auto;
   padding: 4px 0;
 }
-.settings-section { padding: 14px; }
+/* v3-2c：右侧详情区页标题，参照 Codex 设置页——比正文明显大、加粗、上下留白。
+   与下方 .settings-section 同一水平内边距对齐，不单独设一套 padding。四个分类
+   各自的标题文案就是 SettingsPanel.tsx CATEGORIES 里已经在用的 label（主题/终端/
+   项目与会话/Hooks），不新开一份映射表。 */
+.settings-detail-title {
+  margin: 4px 0 2px;
+  padding: 6px 14px 4px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+.settings-section { display: flex; flex-direction: column; gap: 14px; padding: 10px 14px 14px; }
+
+/* v3-2c：SettingCard/SettingRow（src/components/settings/）——Codex 风格的分组
+   卡片 + 统一行结构，本任务与后续主题页任务共用。卡片底色用 --color-elevated、
+   边框用 --color-border，与右侧详情区背景（--color-panel）拉开一层层次。 */
+.setting-card {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-elevated);
+  overflow: hidden;
+}
+.setting-card-title {
+  padding: 10px 12px 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.setting-card-body { display: flex; flex-direction: column; }
+/* 行与行之间的细分隔线：只加在第二行及以后，不关心子节点具体是不是 SettingRow
+   （SettingCard 的文档承诺是"内部若有多行自动加分隔线"，不是"内部若有 SettingRow
+   才加"）。 */
+.setting-card-body > * + * { border-top: 1px solid var(--color-border); }
+/* 空列表占位：卡片内没有可展示的条目时，用一行说明文字代替一整块空框
+   （ProjectsSection 的"隐藏的项目"/"已移除的会话"两张卡片都会用到）。 */
+.setting-card-empty { padding: 10px 12px; font-size: 12px; color: var(--color-text-faint); }
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+}
+/* 禁用态：整行置灰。control 的"不可交互"不是靠这条 CSS 做到的（jsdom 既不落地
+   <fieldset disabled> 的级联禁用，也不做 pointer-events 的真实命中测试），真正
+   拦截逻辑在 SettingRow.tsx 里用 capture 阶段事件监听实现，这里只负责视觉降权。 */
+.setting-row-disabled { opacity: .5; }
+.setting-row-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.setting-row-label { font-size: 12.5px; color: var(--color-text); }
+.setting-row-description { font-size: 11px; color: var(--color-text-faint); }
+.setting-row-control { flex: none; display: flex; align-items: center; gap: 8px; }
+/* pointer-events:none 是真实浏览器里的第二重防线（配合 SettingRow.tsx 的 capture
+   拦截）：真实鼠标点击会在命中测试阶段就被挡在 control 之外，不会等到冒泡到我们
+   自己装的监听器才拦下来，体感上更"真禁用"。jsdom 测试不做命中测试，这条规则
+   不影响 fireEvent 断言的通过与否——测试依赖的是 SettingRow.tsx 里的 JS 拦截。 */
+.setting-row-disabled .setting-row-control { pointer-events: none; }

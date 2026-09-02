@@ -2,6 +2,8 @@ import { useLibrary } from '../../store/library'
 import { blockKey } from '../../store/overview'
 import { isSessionRemoved } from '../../sessionList'
 import { useSessions } from '../../store/sessions'
+import { SettingCard } from './SettingCard'
+import { SettingRow } from './SettingRow'
 
 // 项目与会话分区：两份既有数据的"一次看全"入口，不是它们的第一个 UI 入口——
 // 隐藏项目已经能在 HomePage.tsx 的右键菜单撤销（hideProject 的可撤销轻提示，
@@ -15,6 +17,10 @@ import { useSessions } from '../../store/sessions'
 //
 // 已移除会话的展示名：优先用 aliases[key]（用户改过的名字），没有别名才展示 key
 // 本身——不在这里调 displayTitle，那需要 thread 对象，这里没有。
+//
+// v3-2c 只改呈现（换成 SettingCard/SettingRow，两张卡片、条目变成一行一行）——
+// 下面这段过期过滤逻辑（activityByKey / removedKeys 的计算）一行都没有改动，
+// 逐字照抄自改造前的版本，评审时可以直接 diff 确认。
 export function ProjectsSection() {
   const hiddenProjects = useLibrary((s) => s.hiddenProjects)
   const removedSessions = useLibrary((s) => s.removedSessions)
@@ -64,15 +70,15 @@ export function ProjectsSection() {
 
   return (
     <div className="projects-section">
-      <div className="projects-section-group">
-        <div className="projects-section-group-label">隐藏的项目</div>
+      <SettingCard title="隐藏的项目">
         {hiddenDirNames.length === 0 ? (
-          <div className="projects-section-empty">没有隐藏的项目</div>
+          <div className="setting-card-empty">没有隐藏的项目</div>
         ) : (
-          <ul className="projects-section-list">
-            {hiddenDirNames.map((dirName) => (
-              <li key={dirName} className="projects-section-row">
-                <span className="projects-section-name">{dirName}</span>
+          hiddenDirNames.map((dirName) => (
+            <SettingRow
+              key={dirName}
+              label={<span className="projects-section-name">{dirName}</span>}
+              control={
                 <button
                   type="button"
                   className="projects-section-action"
@@ -81,20 +87,20 @@ export function ProjectsSection() {
                 >
                   取消隐藏
                 </button>
-              </li>
-            ))}
-          </ul>
+              }
+            />
+          ))
         )}
-      </div>
-      <div className="projects-section-group">
-        <div className="projects-section-group-label">已移除的会话</div>
+      </SettingCard>
+      <SettingCard title="已移除的会话">
         {removedKeys.length === 0 ? (
-          <div className="projects-section-empty">没有移除的会话</div>
+          <div className="setting-card-empty">没有移除的会话</div>
         ) : (
-          <ul className="projects-section-list">
-            {removedKeys.map((key) => (
-              <li key={key} className="projects-section-row">
-                <span className="projects-section-name">{aliases[key] ?? key}</span>
+          removedKeys.map((key) => (
+            <SettingRow
+              key={key}
+              label={<span className="projects-section-name">{aliases[key] ?? key}</span>}
+              control={
                 <button
                   type="button"
                   className="projects-section-action"
@@ -103,11 +109,11 @@ export function ProjectsSection() {
                 >
                   恢复
                 </button>
-              </li>
-            ))}
-          </ul>
+              }
+            />
+          ))
         )}
-      </div>
+      </SettingCard>
     </div>
   )
 }
