@@ -46,7 +46,9 @@ const SINGLE_KEY = 'aterm-theme-single'
 // 旧版单键存储，值曾是 'system' | 'dark' | 'light'。仅在新键从未写入过时读取一次用于迁移。
 const LEGACY_KEY = 'aterm-theme'
 
-function isThemeMode(v: string | null): v is ThemeMode {
+// 导出给 src/menuEvents.ts 复用：菜单栏"主题"三项收到的 menu-theme-mode payload
+// 校验用的是这同一份判断，不在那边另写一份、彼此漂移。
+export function isThemeMode(v: string | null): v is ThemeMode {
   return v === 'default' || v === 'dual' || v === 'single'
 }
 

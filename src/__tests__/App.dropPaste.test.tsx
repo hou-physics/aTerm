@@ -33,6 +33,7 @@ vi.mock('../store/hooksInstall', () => ({
   useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
 }))
 vi.mock('../closeRequest', () => ({}))
+vi.mock('../menuEvents', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 // 与 App.test.tsx 不同：这里要真的拿到 App.tsx 传给 onDragDropEvent 的回调，手动喂一个
 // 合成的 'drop' payload 进去，才能触发到 pasteTo/ptyWrite 那条分支选择。

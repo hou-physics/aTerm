@@ -62,8 +62,10 @@ export function ContextMenu({
     }
     // 捕获阶段：菜单出现的这次 pointerdown 本身（触发右键的那次）不该立刻被当成
     // "外部点击"关掉菜单——用 setTimeout 0 把监听器的注册推迟到当前事件循环之后，
-    // 与 ThemeSwitcher.tsx/PanePicker.tsx 若有同类"点外面关闭"逻辑的既有做法一致
-    // （这里没有可直接复用的既有实现，采用同一常见 idiom：下一个 tick 才开始监听）。
+    // 与 SettingsPanel.tsx 遮罩关闭同一 idiom（下一个 tick 才开始监听；PanePicker.tsx
+    // 没有这类"点外面关闭"逻辑，不适用）。Task 5 之前这里还提过 ThemeSwitcher.tsx，
+    // 但那是三处"点外面关闭"里唯一没有这层 setTimeout(0) 守卫的一个（挂在 window 而非
+    // document、未传 capture），该文件已随 Task 5 删除，不再作为参考样板。
     const t = setTimeout(() => {
       document.addEventListener('pointerdown', onPointerDown, true)
       window.addEventListener('keydown', onKeyDown, true)

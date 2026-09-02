@@ -349,30 +349,6 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   to { transform: rotate(360deg); }
 }
 
-/* hooks 安装器设置区手动入口（spec §6）：与 .theme-switcher 同一处"底部设置角"，
-   同一套 margin-top/padding-top/border-top 分隔条写法，视觉上两者依次堆叠、观感统一。 */
-.hooks-control {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--color-border);
-}
-.hooks-control-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--color-text-dim); }
-.hooks-control-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hooks-control-action {
-  flex: none;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border);
-  background: var(--color-elevated);
-  color: var(--color-text-dim);
-  font-family: inherit;
-  font-size: 11.5px;
-  cursor: default;
-}
-.hooks-control-action:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
-.hooks-control-action:disabled { opacity: .6; }
-.hooks-control-error { margin-top: 6px; font-size: 11px; color: var(--color-text); word-break: break-word; }
-
 /* hooks 安装提示条（spec §6）：主页顶部，边框而非阴影的既有扁平风格，与 .card 同一基调。
    flex-wrap 让失败时的错误信息独占一行，不挤压说明文字/按钮。 */
 .hooks-prompt {
@@ -418,53 +394,30 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .hooks-prompt-dismiss:hover { border-color: var(--color-accent); color: var(--color-text); }
 .hooks-prompt-error { flex: 0 0 100%; font-size: 11.5px; color: var(--color-text); }
 
-.theme-switcher {
-  position: relative;
+/* Task 5：侧栏底部清空后的唯一常驻控件——齿轮按钮，点击打开设置浮层
+   （SettingsPanel.tsx）。取代此前依次堆叠在这里的 .hooks-control/.theme-switcher，
+   沿用同一套 margin-top/padding-top/border-top 分隔条写法；图标是字符（⚙），不是
+   内联 SVG，与 TabBar.tsx 的 ›/‹/＋/☰、SettingsPanel.tsx 的 × 同一惯例。 */
+.sidebar-settings-button {
+  flex: none;
+  align-self: flex-start;
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--color-border);
-}
-.theme-switcher-trigger {
-  width: 100%;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border);
-  background: var(--color-elevated);
+  justify-content: center;
+  border: none;
+  background: transparent;
   color: var(--color-text-dim);
-  font-family: inherit;
+  font-size: 15px;
+  line-height: 1;
   cursor: default;
-  text-align: left;
 }
-.theme-switcher-trigger:hover {
-  border-color: var(--color-accent);
-  color: var(--color-text);
-}
-.theme-switcher-dot { flex: none; width: 16px; height: 16px; border-radius: 5px; border: 1px solid var(--color-border); }
-.theme-switcher-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
-.theme-switcher-name { font-size: 12.5px; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.theme-switcher-mode { font-size: 10.5px; color: var(--color-text-faint); }
+.sidebar-settings-button:hover { color: var(--color-text); }
 
-/* 主题选择面板：从左下角触发按钮向上展开，浮在侧栏内容之上（sidebar 无 overflow 裁剪，
-   不会被裁掉）。整体走应用一贯的"边框而非阴影"扁平风格。 */
-.theme-picker {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 6px);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: min(420px, 70vh);
-  padding: 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-panel);
-  overflow-y: auto;
-  z-index: 3;
-}
 .theme-picker-modes { flex: none; display: flex; gap: 4px; }
 .theme-picker-modes button {
   flex: 1;
@@ -501,6 +454,64 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
 .theme-row-swatches { flex: none; display: flex; gap: 2px; }
 .theme-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--color-border); }
 .theme-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Task 3：外观分区（AppearanceSection.tsx），内嵌在 SettingsPanel 里，不是弹层。
+   复用 .theme-picker-modes / .theme-picker-group-label / .theme-picker-list /
+   .theme-row / .theme-swatch 等既有主题选择器样式，但不复用 .theme-picker 本身——
+   那个类是给侧栏浮出的弹层用的（position:absolute），这里只是静态内容，不需要。 */
+.appearance-section { display: flex; flex-direction: column; gap: 10px; }
+
+/* Task 4：终端分区（TerminalSection.tsx）——滚动速度滑块，本仓库首次引入
+   type="range"。原生轨道/滑块交给 accent-color 接管主题色（引用 --color-accent，
+   不是字面量色值），不必逐一画皮肤。 */
+.terminal-section { display: flex; flex-direction: column; gap: 10px; }
+.terminal-section-row { display: flex; align-items: center; gap: 10px; }
+.terminal-section-label { flex: none; font-size: 12px; color: var(--color-text-dim); }
+.terminal-section-slider { flex: 1; accent-color: var(--color-accent); }
+.terminal-section-value { flex: none; min-width: 32px; text-align: right; font-size: 12px; color: var(--color-text-dim); font-variant-numeric: tabular-nums; }
+
+/* Task 4：项目与会话分区（ProjectsSection.tsx）——隐藏项目 / 已移除会话的"一次看全"
+   入口，行为委托给既有 store action（unhideProject/restoreSession），这里只是
+   列表展示 + 按钮，不重复实现任何判断。 */
+.projects-section { display: flex; flex-direction: column; gap: 14px; }
+.projects-section-group { display: flex; flex-direction: column; gap: 6px; }
+.projects-section-group-label { font-size: 10.5px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: .06em; }
+.projects-section-empty { font-size: 12px; color: var(--color-text-faint); }
+.projects-section-list { display: flex; flex-direction: column; gap: 1px; max-height: 160px; overflow-y: auto; list-style: none; margin: 0; padding: 0; }
+.projects-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; }
+.projects-section-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--color-text); }
+.projects-section-action {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-elevated);
+  color: var(--color-text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: default;
+}
+.projects-section-action:hover { border-color: var(--color-accent); color: var(--color-text); }
+
+/* Task 4：Hooks 分区（HooksSection.tsx）——视觉上照抄 .hooks-control 系列样式，但
+   换了一套类名前缀（hooks-section-*），不复用原类名：HooksControl 连同它的样式在
+   Task 5 会一起变成死代码，这组类名要能独立于它的生死。 */
+.hooks-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--color-text-dim); }
+.hooks-section-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hooks-section-action {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-elevated);
+  color: var(--color-text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: default;
+}
+.hooks-section-action:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text); }
+.hooks-section-action:disabled { opacity: .6; }
+.hooks-section-error { margin-top: 6px; font-size: 11px; color: var(--color-text); word-break: break-word; }
 
 .conv-panel-dock { flex: none; height: 100%; background: var(--color-panel); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .conv-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -634,3 +645,65 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   gap: 5px;
   align-items: center;
 }
+
+/* 应用内设置浮层（SettingsPanel.tsx）。z-index 40 是此前全仓库最高值（.plus-menu），
+   设置浮层要盖住一切（含侧栏、标签页、拖拽指示），取 50。遮罩本身不滚动——内容一多
+   由 .settings-panel-body 自己滚，遮罩固定铺满视口即可。 */
+.settings-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-scrim);
+}
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  width: 560px;
+  max-width: 90vw;
+  max-height: 80vh;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-panel);
+  color: var(--color-text);
+  overflow: hidden;
+}
+.settings-panel-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+.settings-panel-title { font-size: 13.5px; font-weight: 600; }
+.settings-panel-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-elevated);
+  color: var(--color-text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: default;
+}
+.settings-panel-close:hover { border-color: var(--color-accent); color: var(--color-text); }
+/* 内容区自己滚动，遮罩/面板外壳都不滚——四个分区（Task 3/4）依次叠放在这里。 */
+.settings-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+.settings-section { padding: 14px; border-bottom: 1px solid var(--color-border); }
+.settings-section:last-child { border-bottom: none; }

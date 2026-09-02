@@ -40,6 +40,7 @@ vi.mock('../store/hooksInstall', () => ({
   useHooksInstall: Object.assign(() => null, { getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }) }),
 }))
 vi.mock('../closeRequest', () => ({}))
+vi.mock('../menuEvents', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 // App.tsx 挂载时会动态 import('@tauri-apps/api/webview') 接线文件拖放；理由与
 // App.test.tsx 完全一致（见该文件注释）——不替身会让每条用例都触发一次真实的、时机

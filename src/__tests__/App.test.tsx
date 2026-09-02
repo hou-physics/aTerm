@@ -37,6 +37,10 @@ vi.mock('../store/hooksInstall', () => ({
 // 会抛错），与本文件要验证的 Ctrl+Tab 循环切换无关。closeRequest.ts 自身的行为见
 // closeRequest.test.ts。
 vi.mock('../closeRequest', () => ({}))
+// 同一理由：App.tsx 顶层也 side-effect 导入了 menuEvents.ts（macOS 菜单"设置…"⌘,
+// 的事件桥），替身掉避免同样去调用真实的 @tauri-apps/api/event。menuEvents.ts 自身的
+// 行为见 menuEvents.test.ts。
+vi.mock('../menuEvents', () => ({}))
 // TerminalView 内部会实例化真实的 xterm.js Terminal（渲染器、ResizeObserver 等），
 // 与本文件要验证的"标签间循环切换"无关，替身掉避免测试和真实终端机制耦合。
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
@@ -54,6 +58,7 @@ import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { useLibrary } from '../store/library'
 import { useSessions } from '../store/sessions'
+import { useSettings } from '../store/settings'
 import { useTabs } from '../store/tabs'
 import { makeThread } from './factories'
 
@@ -69,6 +74,10 @@ beforeEach(() => {
   // 不会让*这个*文件的测试立刻出错（这里的调用点都是单参数 show()），但这是给共享
   // store 加字段后留下的隐患，且与"beforeEach 必须重置全部字段"这条约束字面不符。
   useHint.setState({ message: null, action: null })
+  // 终审 I2 的测试需要在明确的开关状态下断言；其余既有测试从不触碰这个 store，
+  // 但 useSettings 是模块级单例，不重置会让"浮层打开"这个状态从一个测试泄漏到
+  // 下一个测试。
+  useSettings.setState({ open: false })
 })
 
 // App 挂载时会触发一次异步的 useSessions().refresh()（mock 的 listProjects 也是个
@@ -380,6 +389,42 @@ describe('App — ⌘W 关闭聚焦窗格；标签只剩一个窗格时等同关
 
     await act(async () => { await Promise.resolve() })
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+  })
+})
+
+// 终审 I2：设置浮层打开时，App 的全局快捷键（捕获阶段、window 级、[] 依赖、从不摘除）
+// 此前对 useSettings 一无所知，浮层聚焦在滑块上时 ⌘W 依然会杀掉遮罩背后正在跑的会话——
+// 用户完全看不见发生了什么。这里只钉最严重的那个（⌘W 数据丢失级），不逐个覆盖 Ctrl+Tab/
+// ⌘B/⌘=/⌘T/⌘J/⌘D/⌘⌥←/→（同一处早退，机制相同，不必每条快捷键各写一遍）。
+describe('App — 设置浮层打开时，全局快捷键（⌘W）不生效（终审 I2）', () => {
+  it('浮层打开时按 ⌘W：不会关闭聚焦窗格，标签与窗格数原样保留', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    useSettings.setState({ open: true })
+    await renderApp()
+
+    await cmdW()
+    // closePane 内部的 set() 是异步的（同一份 mock ptyIsAlive 恒为 false 的路径），
+    // 给它一个 flush 的机会，确保下面的"没变化"断言不是因为异步还没跑完而侥幸通过。
+    await act(async () => { await Promise.resolve() })
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a']) // 标签还在
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')!.panes).toHaveLength(1) // 窗格没被关掉
+  })
+
+  // 第二条防止把 ⌘W 整个功能关掉：初始状态（浮层关闭）与断言状态（标签被关闭、
+  // 从存在变为不存在）必须不同，不能又是一次"断言值等于初始值"的恒真检查。
+  it('浮层关闭时按 ⌘W：照常关闭单窗格标签', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' })
+    useSettings.setState({ open: false })
+    await renderApp()
+
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')).toBeTruthy() // 起点：标签存在
+
+    await cmdW()
+
+    await waitFor(() => {
+      expect(useTabs.getState().tabs.find((t) => t.id === 'tab-a')).toBeUndefined() // 终点：标签已不存在，与起点不同
+    })
   })
 })
 

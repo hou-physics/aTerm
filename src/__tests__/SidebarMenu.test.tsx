@@ -16,17 +16,6 @@ vi.mock('../store/status', () => ({
   useStatusStore: (selector: (s: { statuses: Map<string, unknown> }) => unknown) => selector({ statuses: new Map() }),
   threadStatusKey: (dirName: string, rootKey: string) => `${dirName}::${rootKey}`,
 }))
-// 这个 mock 的形状必须与 App.test.tsx 里那份逐字一致——Sidebar 会渲染 <HooksControl/>，
-// 它同时 import 了 hooksPhase 与 useHooksInstall，而 store 模块在加载时还会发起一次
-// hooksStatus() 的 IPC（`hooksInstallReady`）。三个导出缺任何一个都会在 import 期就抛错，
-// 表现为"整个测试文件跑不起来"，而不是某条断言失败。
-vi.mock('../store/hooksInstall', () => ({
-  hooksInstallReady: Promise.resolve(),
-  hooksPhase: () => null,
-  useHooksInstall: Object.assign(() => null, {
-    getState: () => ({ dismiss: () => {}, install: async () => {}, uninstall: async () => {} }),
-  }),
-}))
 
 import * as ipc from '../ipc'
 import { Sidebar } from '../components/Sidebar'

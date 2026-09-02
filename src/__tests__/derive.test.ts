@@ -176,6 +176,38 @@ describe('deriveUiVars', () => {
     expect(vars['--color-text-dim']).toMatch(/^rgba\(/)
     expect(vars['--color-text-faint']).toMatch(/^rgba\(/)
   })
+
+  // V3.2a 设置浮层：--color-scrim 是背后的全屏遮罩，见 derive.ts 里的推导注释——
+  // 无论主题明暗都固定压暗（不像 panel 那样跟 isDark 选推移方向），只有透明度按
+  // isDark 区分（浅色 0.5 / 深色 0.65）。
+  it('--color-scrim is a translucent (rgba) colour on every curated theme', () => {
+    for (const t of THEMES) {
+      const vars = deriveUiVars(t)
+      expect(vars['--color-scrim']).toMatch(/^rgba\(/)
+    }
+  })
+
+  it('--color-scrim uses a higher alpha on dark themes than on light themes', () => {
+    const alphaOf = (rgba: string) => Number(rgba.match(/[\d.]+\)$/)?.[0].replace(')', ''))
+    const light = theme('github-light')
+    const dark = theme('github-dark')
+    const lightAlpha = alphaOf(deriveUiVars(light)['--color-scrim'])
+    const darkAlpha = alphaOf(deriveUiVars(dark)['--color-scrim'])
+    expect(darkAlpha).toBeGreaterThan(lightAlpha)
+  })
+
+  it('--color-scrim is a dark colour (low luminance) on every curated theme, regardless of theme appearance', () => {
+    const MAX_LUMINANCE = 0.05
+    for (const t of THEMES) {
+      const vars = deriveUiVars(t)
+      const rgbaMatch = vars['--color-scrim'].match(/^rgba\((\d+), (\d+), (\d+),/)
+      expect(rgbaMatch).not.toBeNull()
+      const [, r, g, b] = rgbaMatch!.map(Number)
+      const toHex = (n: number) => n.toString(16).padStart(2, '0')
+      const hex = `#${toHex(r)}${toHex(g)}${toHex(b)}`
+      expect(relativeLuminance(hex)).toBeLessThan(MAX_LUMINANCE)
+    }
+  })
 })
 
 describe('buildXtermTheme', () => {

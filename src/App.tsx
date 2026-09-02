@@ -1,5 +1,6 @@
 import './ptyBuffer'
 import './closeRequest'
+import './menuEvents'
 import './contextMenu'
 import './App.css'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -9,6 +10,7 @@ import { DragGhost } from './components/DragGhost'
 import { DropIndicator } from './components/DropIndicator'
 import { HomePage } from './components/HomePage'
 import { OverviewPage } from './components/OverviewPage'
+import { SettingsPanel } from './components/SettingsPanel'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
 import { TabBar } from './components/TabBar'
@@ -23,6 +25,7 @@ import { useHint } from './store/hint'
 import { useLayout } from './store/layout'
 import { useLibrary } from './store/library'
 import { useSessions } from './store/sessions'
+import { useSettings } from './store/settings'
 import { useStatusStore } from './store/status'
 import { useTabs } from './store/tabs'
 import { pasteTo } from './terminalPaste'
@@ -89,6 +92,16 @@ export default function App() {
   }, [statusVersion])
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // 终审 I2：设置浮层打开时，App 的全局快捷键一律不处理。这个处理器注册在
+      // window 的捕获阶段，先于浮层内任何目标元素触发——浮层聚焦在滑块/输入框上时，
+      // ⌘W 依然会命中下面的分支、杀掉遮罩背后正在跑的会话（用户看不见发生了什么，
+      // 属于数据丢失级）。SettingsPanel.tsx 声明了 aria-modal="true"，那是在向读屏
+      // 软件承诺"背景内容已失活"，这里的早退让快捷键这一半也兑现同一个承诺。
+      // 用 getState() 而不是订阅 useSettings((s) => s.open)：不需要因为浮层开关而
+      // 反复重新注册/摘除这个监听器，也不用碰下面这个 effect 的 [] 依赖数组。
+      // Esc 关闭浮层、⌘, 打开浮层不受影响——前者是 SettingsPanel.tsx 自己的独立
+      // window 监听，后者是 macOS 原生菜单快捷键，走 Rust 侧，根本不经过这个处理器。
+      if (useSettings.getState().open) return
       // Control+Tab / Control+Shift+Tab：像 Chrome 一样在标签间循环切换（含主页标签），
       // 越过数组两端时回绕。故意放在 metaKey 分支之前、且不要求 e.metaKey——这是 Control
       // 键组合，与下面一大段 ⌘ 快捷键是两回事。只对这两个组合调用 preventDefault/
@@ -305,6 +318,11 @@ export default function App() {
           store/dragGhost.ts）：position:fixed，挂在树里任何位置效果都一样，渲染顺序
           放最后确保画在最上层。 */}
       <DragGhost />
+      {/* 应用内设置浮层（store/settings.ts 的 open 控制开关）：position:fixed 铺满
+          视口，挂在 .app 最外层、渲染顺序最后——需要盖住包括拖拽指示在内的一切
+          （z-index 50，全仓库最高，见 App.css）。SettingsPanel 内部在 open 为
+          false 时返回 null，这里始终无条件渲染即可。 */}
+      <SettingsPanel />
     </div>
   )
 }

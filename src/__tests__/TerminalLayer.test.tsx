@@ -31,6 +31,7 @@ vi.mock('../store/hooksInstall', () => ({
 }))
 // App.tsx 顶层 side-effect 导入，替身掉的理由与 App.test.tsx 完全一致（见该文件注释）。
 vi.mock('../closeRequest', () => ({}))
+vi.mock('../menuEvents', () => ({}))
 // 与 App.test.tsx 不同：这里刻意不把 TerminalView 替身成 () => null，而是渲染一个可
 // 用 testid 定位、且带挂载计数的 div——本文件要验证的正是"DOM 节点/挂载次数是否
 // 跨标签切换、跨窗格增删保持不变"，用 () => null 就什么都测不出来了。mountCounts 只在
