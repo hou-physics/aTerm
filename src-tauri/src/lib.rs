@@ -81,8 +81,11 @@ fn emit_open_settings(app_handle: &AppHandle) {
 #[cfg(target_os = "macos")]
 const QUIT_MENU_ITEM_ID: &str = "aterm-quit";
 
+/// 实际执行 Quit 项替换的内部函数——错误处理与见证令牌的构造分开（见下面
+/// `replace_quit_menu_item`/`QuitReplaced` 的说明），这样"是否替换成功"仍然可以用 `?`
+/// 正常传播，不必把 `eprintln!` 硬塞进一个理应只做"替换"这一件事的函数体中间。
 #[cfg(target_os = "macos")]
-fn replace_quit_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+fn try_replace_quit_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let Some(menu) = app.menu() else {
         return Ok(());
     };
@@ -102,6 +105,33 @@ fn replace_quit_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Resu
     let quit_item = MenuItem::with_id(app, QUIT_MENU_ITEM_ID, quit_text, true, Some("Command+Q"))?;
     app_submenu.append(&quit_item)?;
     Ok(())
+}
+
+/// 见证令牌（witness token）：证明 `try_replace_quit_menu_item` 已经跑过。
+///
+/// 字段私有（`()`，未标 `pub`），本模块之外无法构造这个类型的值——`insert_settings_
+/// menu_item` 把它收作参数，就等于让编译器替我们守住"必须先替换 Quit、再插入
+/// 设置…"这条顺序不变式：原来只写在注释里的约定（R1 修复：把两次调用收进
+/// `setup_macos_menu` 一个函数，靠"顺序写死、注释紧邻"降低被无意间写错的概率，但
+/// 评审实测过函数体内部仍能被悄悄调换、`cargo build`/`cargo test` 拦不住），现在
+/// 顺序写错会直接编译不过——R2 修复，实测的编译错误逐字输出见任务报告「修复轮 R2」。
+#[cfg(target_os = "macos")]
+struct QuitReplaced(());
+
+/// macOS 专属：`setup_macos_menu` 用来替换 Quit 项的入口，`QuitReplaced` 见证令牌的
+/// 唯一产出处。
+///
+/// **无条件**返回 `QuitReplaced`——即使内部替换失败（`try_replace_quit_menu_item`
+/// 返回 `Err`）也照样返回，失败即降级的警告挪到了这里面处理。这是刻意的：如果改成
+/// 返回 `Result<QuitReplaced>`，失败时就没有令牌可用，`insert_settings_menu_item`
+/// 会被连带拖累一起插不进去——但"替换 Quit"与"插入设置…"是两个各自独立的功能，
+/// 一个坏了不该拖累另一个，那不是本来想要的降级行为，故意不这么做。
+#[cfg(target_os = "macos")]
+fn replace_quit_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> QuitReplaced {
+    if let Err(e) = try_replace_quit_menu_item(app) {
+        eprintln!("警告：替换 Quit 菜单项失败，⌘Q 将退回系统默认行为（不会弹出关闭确认）：{e}");
+    }
+    QuitReplaced(())
 }
 
 #[cfg(target_os = "macos")]
@@ -137,12 +167,19 @@ fn settings_insertion_index(item_count: usize) -> Option<usize> {
 
 /// macOS 专属：在 App 子菜单里插入"设置…"项（⌘,），位置在 About 之后、Quit 之前。
 ///
-/// 必须在 `replace_quit_menu_item` 之后调用——这是调用方（`setup` 里）的硬性顺序
-/// 要求，理由见该函数上方那段长注释：让它看到的子菜单仍是默认菜单固定的那个顺序
-/// （About / 分隔线 / Services / 分隔线 / Hide / HideOthers / 分隔线 / Quit(custom)），
-/// 不会因为本函数先插入了"设置…"而打乱下标、让已经过真机验证过的替换逻辑意外失灵。
+/// 必须在 `replace_quit_menu_item` 之后调用——`_order: QuitReplaced` 这个参数就是这条
+/// 顺序要求本身：`QuitReplaced` 的字段私有、只有 `replace_quit_menu_item` 能构造它，
+/// 所以能拿到一个 `QuitReplaced` 值就已经证明 Quit 项被替换过了（不管替换本身成功还是
+/// 失败——见 `replace_quit_menu_item`/`QuitReplaced` 的说明，它无条件产出令牌）。这样
+/// 调用顺序错了会编译不过，不再依赖任何人读这段注释。让它看到的子菜单仍是默认菜单
+/// 固定的那个顺序（About / 分隔线 / Services / 分隔线 / Hide / HideOthers / 分隔线 /
+/// Quit(custom)），不会因为先插入了"设置…"而打乱下标、让已经过真机验证过的替换逻辑
+/// 意外失灵。参数本身在函数体内未被使用（`_order`），只用于编译期占位。
 #[cfg(target_os = "macos")]
-fn insert_settings_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+fn insert_settings_menu_item<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+    _order: QuitReplaced,
+) -> tauri::Result<()> {
     let Some(menu) = app.menu() else {
         return Ok(());
     };
@@ -172,41 +209,26 @@ fn insert_settings_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     Ok(())
 }
 
-/// macOS 专属：`setup()` 里菜单初始化的唯一入口，把"必须先 `replace_quit_menu_item`、
-/// 再 `insert_settings_menu_item`"这条顺序不变式绑进一个函数里。
+/// macOS 专属：`setup()` 里菜单初始化的唯一入口。
 ///
-/// 为什么用结构而不是测试来守：这条顺序要求本身没法用 `cargo test` 自动化覆盖——
-/// `tauri::test::mock_builder()` 会 `.enable_macos_default_menu(false)`，mock 出来的
-/// `App` 没有真菜单可插，手工搭一份 8 项菜单成本高，且 mock runtime 未必忠实复现
-/// AppKit 行为（见 `settings_insertion_index`/`insert_settings_menu_item` 上方注释、
-/// `reveal.rs` 的同类先例）。原来这两次调用是 `setup()` 里两条独立语句，靠注释提醒
-/// 顺序——评审实测过：把这两行对调，`cargo build`/`cargo test` 照样全绿（120 passed，
-/// 0 failed），没有任何自动化信号能拦住这个回归。收进一个函数、顺序写死在函数体内部
-/// 之后，顺序和解释它的这段注释从此相邻——比隔着 `setup()` 里其它语句的两条独立调用
-/// 难破坏得多（想写错顺序，必须先看到、再无视紧挨着的这段注释去手动调换下面两行）。
+/// R1 曾把两次调用收进这一个函数、顺序写死在函数体内部，指望"顺序和解释它的注释
+/// 相邻"降低被无意间写错的概率——但评审实测过：函数体内部把下面两行对调，
+/// `cargo build`/`cargo test` 依然全绿（120 passed，0 failed），没有任何自动化信号
+/// 能拦住这个回归，注释挡不住明知故犯或没读注释的情况。
 ///
-/// `replace_quit_menu_item`/`insert_settings_menu_item` 两个函数本身保持独立、各自仍可
-/// 单测（`settings_insertion_index` 的单测见文件末尾 `#[cfg(test)]` 模块）——这里只负责
-/// 按正确顺序把它们粘在一起，不合并两者的实现，也不改动各自原有的失败即降级逻辑与
-/// 警告文案。
+/// R2 改为编译期强制：`replace_quit_menu_item` 返回一个只有它能构造的见证令牌
+/// `QuitReplaced`，`insert_settings_menu_item` 把令牌收作参数——想在这里把两行顺序
+/// 对调，`insert_settings_menu_item(app, quit_replaced)` 里的 `quit_replaced` 就是一个
+/// 尚未绑定的变量名，直接编译不过（实测的编译错误逐字输出见任务报告「修复轮 R2」）。
+///
+/// `replace_quit_menu_item`/`insert_settings_menu_item` 两个函数本身仍保持独立、各自
+/// 仍可单测（`settings_insertion_index` 的单测见文件末尾 `#[cfg(test)]` 模块）——这里
+/// 只负责按正确顺序把它们粘在一起，不合并两者的实现；两者各自的失败即降级逻辑与
+/// 警告文案也都保持独立（分别在各自函数内部处理，互不拖累）。
 #[cfg(target_os = "macos")]
 fn setup_macos_menu<R: tauri::Runtime>(app: &tauri::App<R>) {
-    // 启动可用性优先于 ⌘Q 确认：这里替换的是 Tauri 默认菜单的内部结构（见
-    // replace_quit_menu_item 上方的详细注释），一旦未来某次 tauri/muda 升级改变了默认
-    // 菜单的项数/顺序导致这里返回 Err，原先的 `?` 会让它经由 `.setup()` 直接冒泡，被
-    // `.build().expect(...)` 当场 panic 掉——应用直接无法启动，这比它想防护的问题
-    // （⌘Q 未经确认就退出）严重得多。因此改为失败即降级：打印警告后继续启动，此时 ⌘Q
-    // 会退回系统默认行为（bypass 掉关闭确认弹窗，但至少应用能正常打开）。
-    if let Err(e) = replace_quit_menu_item(app) {
-        eprintln!(
-            "警告：替换 Quit 菜单项失败，⌘Q 将退回系统默认行为（不会弹出关闭确认）：{e}"
-        );
-    }
-
-    // 必须排在 replace_quit_menu_item 之后：见本函数上方注释——它假设看到的子菜单仍是
-    // 默认菜单固定的那个顺序。同样的失败即降级理由（应用能打开比菜单项齐全重要）：
-    // 这里返回 Err 只打印警告，不让 `?`/`.expect(...)` 把它变成启动期 panic。
-    if let Err(e) = insert_settings_menu_item(app) {
+    let quit_replaced = replace_quit_menu_item(app);
+    if let Err(e) = insert_settings_menu_item(app, quit_replaced) {
         eprintln!("警告：插入\"设置…\"菜单项失败，⌘, 将不可用：{e}");
     }
 }
@@ -326,7 +348,7 @@ mod tests {
         // 会因为什么失败：如果插入下标从 1 改成了别的数（例如误改成 0，插到 About
         // 前面；或者误改成子菜单末尾），这里就会失败。默认菜单固定 8 项（About /
         // 分隔线 / Services / 分隔线 / Hide / HideOthers / 分隔线 / Quit，见
-        // replace_quit_menu_item 上方注释核实过的 tauri 2.11.5 `Menu::default`）。
+        // try_replace_quit_menu_item 上方注释核实过的 tauri 2.11.5 `Menu::default`）。
         assert_eq!(settings_insertion_index(8), Some(1));
     }
 
@@ -347,14 +369,14 @@ mod tests {
         }
     }
 
-    /// 用一个 `Vec<&str>` 模拟真实的 App 子菜单，验证 `replace_quit_menu_item` 与
+    /// 用一个 `Vec<&str>` 模拟真实的 App 子菜单，验证 `try_replace_quit_menu_item` 与
     /// `insert_settings_menu_item` 两步下标逻辑组合之后，Quit 仍稳居子菜单最后一位、
     /// 且整体顺序符合 macOS 惯例——不构造真实 `App` 句柄（那需要一整套窗口环境，见
     /// `settings_insertion_index` 上方注释里提到的、本仓库 `reveal.rs` 的既有先例）。
     ///
     /// 第二步用的下标（`settings_insertion_index(items.len())`）是生产代码
     /// `insert_settings_menu_item` 真正调用的那个函数；第一步（remove_at(len-1) 再
-    /// append）抄的是 `replace_quit_menu_item` 里同样两行的下标算法，因为那一步的
+    /// append）抄的是 `try_replace_quit_menu_item` 里同样两行的下标算法，因为那一步的
     /// 副作用（真的构造 `MenuItem`）离不开真实 `App` 句柄，没法像 `settings_insertion_
     /// index` 那样直接复用生产函数本身。`Submenu::insert`/`insert_items` 的插入语义
     /// 已对照 muda 0.19.3 源码核实为标准的"下标不变的元素依次后移"（等价于
@@ -372,7 +394,7 @@ mod tests {
             "Quit",
         ];
 
-        // 第一步：replace_quit_menu_item 的下标逻辑。
+        // 第一步：try_replace_quit_menu_item 的下标逻辑。
         let last = items.len().checked_sub(1).expect("非空菜单应有最后一项");
         assert_eq!(items[last], "Quit", "替换前最后一项应是 Quit");
         items.remove(last);
