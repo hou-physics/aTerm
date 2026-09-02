@@ -792,16 +792,17 @@ body.dragging-grab, body.dragging-grab * { cursor: grabbing !important; }
   gap: 16px;
   padding: 10px 12px;
 }
-/* 禁用态：整行置灰。control 的"不可交互"不是靠这条 CSS 做到的（jsdom 既不落地
-   <fieldset disabled> 的级联禁用，也不做 pointer-events 的真实命中测试），真正
-   拦截逻辑在 SettingRow.tsx 里用 capture 阶段事件监听实现，这里只负责视觉降权。 */
+/* 禁用态：整行置灰。R1 修复：control 的"不可交互"不是靠 SettingRow 这一层做到
+   的——SettingRow.tsx 已不再挂 capture 阶段事件拦截，真正的禁用来自调用方把
+   disabled 原生属性直接传给 control 自身（<button disabled>/<select disabled>
+   等），这里只负责视觉降权，见 SettingRow.tsx 顶部注释里的契约说明。 */
 .setting-row-disabled { opacity: .5; }
 .setting-row-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .setting-row-label { font-size: 12.5px; color: var(--color-text); }
 .setting-row-description { font-size: 11px; color: var(--color-text-faint); }
 .setting-row-control { flex: none; display: flex; align-items: center; gap: 8px; }
-/* pointer-events:none 是真实浏览器里的第二重防线（配合 SettingRow.tsx 的 capture
-   拦截）：真实鼠标点击会在命中测试阶段就被挡在 control 之外，不会等到冒泡到我们
-   自己装的监听器才拦下来，体感上更"真禁用"。jsdom 测试不做命中测试，这条规则
-   不影响 fireEvent 断言的通过与否——测试依赖的是 SettingRow.tsx 里的 JS 拦截。 */
+/* pointer-events:none 是真实浏览器里的锦上添花：即便调用方漏传了 control 自身的
+   disabled，鼠标点击也会在命中测试阶段被这条规则挡在 control 之外。但这只覆盖
+   鼠标——键盘 Tab 仍然摸得到、读屏仍然会播报成"可用"，所以不能把它当成禁用的
+   唯一防线，control 自身的原生 disabled 才是权威来源（同上，见 SettingRow.tsx）。 */
 .setting-row-disabled .setting-row-control { pointer-events: none; }

@@ -1,4 +1,4 @@
-import type { ReactNode, SyntheticEvent } from 'react'
+import type { ReactNode } from 'react'
 
 export type SettingRowProps = {
   /** 设置名，行左侧的主文字。 */
@@ -9,30 +9,49 @@ export type SettingRowProps = {
   description?: ReactNode
   /** 行右侧的控件：开关 / 下拉 / 按钮 / 数值展示……任意 ReactNode。 */
   control: ReactNode
-  /** 整行禁用态：视觉置灰 + control 不可交互（见下方实现说明），用于"当前模式
-   *  不使用这一项"这类场景（主题页三行会用到）。默认 false。 */
+  /**
+   * 整行禁用态。**契约：disabled 只管呈现与无障碍语义，不管交互**——它做的事情
+   * 只有两件：① 整行视觉置灰（`setting-row-disabled` class）；② 给包住 control
+   * 的容器打上 `aria-disabled`。control 本身是否真的不可交互，是调用方的责任：
+   * 调用方需要把 `disabled` 同时传给 control 自己（原生 `<button disabled>`/
+   * `<select disabled>`/`<input disabled>` 等）。SettingRow 不会替 control 做任何
+   * 拦截。
+   *
+   * 例：
+   *   <SettingRow
+   *     label="亮色主题"
+   *     control={<select disabled={mode !== 'dual'}>...</select>}
+   *     disabled={mode !== 'dual'}
+   *   />
+   *
+   * 默认 false。
+   */
   disabled?: boolean
 }
 
-// jsdom 既不实现 <fieldset disabled> 对子孙表单控件的级联禁用（button.disabled/
-// input.disabled 在其中始终是 false，实测见 report），也不做 pointer-events 的
-// 真实命中测试（CSS pointer-events:none 拦不住 fireEvent 直接派发到内部节点的
-// 事件）——这两种"看起来能禁用"的写法在这个项目的测试环境里都测不出效果，会
-// 变成一条量不出行为差异的死断言。
+// R1 修复：v3-2c 初版在这里用 capture 阶段事件监听（click/change/input/keydown）
+// 拦截 control 内部的交互，理由是"jsdom 不落地 <fieldset disabled> 的级联禁用、
+// 也不做 pointer-events 的命中测试"——这个前提本身没错，但被错误地推广成了
+// "所以原生 disabled 属性在这里也用不了"，这一步推广不成立，评审实测纠正：
 //
-// 所以这里换一种不依赖 control 内部实现、也不依赖 CSS 命中测试的做法：在包住
-// control 的容器上，用 capture 阶段拦截 click/change/input/keydown 四类事件，
-// disabled 时统一 preventDefault + stopPropagation。capture 阶段发生在事件到达
-// target（也就是 control 内部真正的 <button>/<input> 等节点）触发它自己的
-// onClick/onChange 之前，React 的合成事件系统按 stopPropagation() 中止同一路径
-// 上后续监听器的调用，所以无论传进来的 control 是什么实现，点了/改了都不会有
-// 任何可观察效果——这一点直接用 fireEvent.click/fireEvent.change 就能断言到。
-// 四类事件覆盖了本仓库目前所有控件的交互面：按钮用 click，滑块/下拉用 change，
-// 滑块拖动过程用 input，键盘激活（Enter/Space 触发按钮）用 keydown。
-function blockEvent(e: SyntheticEvent): void {
-  e.preventDefault()
-  e.stopPropagation()
-}
+//   - <button disabled> + fireEvent.click → onClick 调用 0 次（原生 disabled
+//     对 click 类交互在 jsdom 里是真实生效的，不需要额外拦截）。
+//   - <input type="range" disabled> + fireEvent.change → onChange 仍然调用
+//     1 次（fireEvent.change 是直接对目标节点 dispatchEvent，不经过浏览器的
+//     "用户能不能先聚焦/拖动这个被禁用的控件"这一层真实交互门槛，所以哪怕
+//     control 自己写了原生 disabled，程序化派发的 change 事件依然会到达监听器
+//     ——这是 jsdom 与真实浏览器共有的行为，不是 jsdom 的缺陷：disabled 从来
+//     约束的是"用户交互与表单提交"，不是"JS 能不能对节点 dispatchEvent"）。
+//   - 只挂 onClickCapture 时，改派发 pointerdown → 监听器仍然调用 1 次，说明
+//     当初那份拦截列表本身也有覆盖盲区（漏了 pointerdown/mousedown，下一个
+//     任务的自定义下拉多半就用这类事件开合），越补越不完整。
+//
+// 综合结论：与其在 SettingRow 里维护一份"要拦哪些事件"的清单（永远可能漏、
+// 且给出的是假的安全感——控件仍然能获得焦点、屏幕阅读器仍然会读成"可用"），
+// 不如把"控件到底禁不禁用"这件事交还给控件自己的原生语义：真正的禁用来自
+// 调用方直接把 disabled 传给 control 自身（可聚焦性、键盘不可达、表单语义、
+// 读屏播报全部正确），SettingRow 这一层只负责它自己能负责、也应该负责的两件
+// 事——视觉置灰 + aria-disabled。
 
 /**
  * 设置卡片里的一行：左边 label + 可选 description，右边 control。与 SettingCard
@@ -40,21 +59,13 @@ function blockEvent(e: SyntheticEvent): void {
  * SettingCard 负责画，SettingRow 自己不画。
  */
 export function SettingRow({ label, description, control, disabled = false }: SettingRowProps) {
-  const capture = disabled ? blockEvent : undefined
   return (
     <div className={disabled ? 'setting-row setting-row-disabled' : 'setting-row'}>
       <div className="setting-row-text">
         <div className="setting-row-label">{label}</div>
         {description != null && <div className="setting-row-description">{description}</div>}
       </div>
-      <div
-        className="setting-row-control"
-        aria-disabled={disabled || undefined}
-        onClickCapture={capture}
-        onChangeCapture={capture}
-        onInputCapture={capture}
-        onKeyDownCapture={capture}
-      >
+      <div className="setting-row-control" aria-disabled={disabled || undefined}>
         {control}
       </div>
     </div>
