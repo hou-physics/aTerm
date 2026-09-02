@@ -5,8 +5,10 @@ import { ProjectsSection } from '../components/settings/ProjectsSection'
 import { HooksSection } from '../components/settings/HooksSection'
 import { useLayout, WHEEL_MULTIPLIER_DEFAULT } from '../store/layout'
 import { useLibrary } from '../store/library'
+import { useSessions } from '../store/sessions'
 import { useHooksInstall } from '../store/hooksInstall'
 import type { HooksStatus, InstallOutcome, UninstallOutcome } from '../ipc'
+import { makeThread } from './factories'
 
 // 只给 HooksSection 的「点击『卸载』」用例用——其余用例（TerminalSection/
 // ProjectsSection/HooksSection 的三条状态展示）都不触碰 ipc，mock 对它们无影响
@@ -47,7 +49,12 @@ describe('TerminalSection', () => {
 })
 
 describe('ProjectsSection', () => {
-  beforeEach(() => { useLibrary.setState({ hiddenProjects: {}, removedSessions: {}, aliases: {} }) })
+  beforeEach(() => {
+    useLibrary.setState({ hiddenProjects: {}, removedSessions: {}, aliases: {} })
+    // 终审 I3 的测试需要摆真实的 projects 数据（ProjectsSection 现在读 useSessions 来
+    // 判定"移除是否已过期"）；不重置的话上一个测试文件/用例遗留的 projects 会泄漏进来。
+    useSessions.setState({ projects: [], loading: false })
+  })
 
   it('隐藏项目为空时显示说明而不是空框', () => {
     render(<ProjectsSection />)
@@ -87,6 +94,61 @@ describe('ProjectsSection', () => {
   it('已移除会话为空时显示说明而不是空框', () => {
     render(<ProjectsSection />)
     expect(screen.queryByText('没有移除的会话')).not.toBeNull()
+  })
+
+  // 终审 I3：removedSessions 的值是"移除时刻的毫秒时间戳"，移除是可过期的
+  // （sessionList.isSessionRemoved：移除后只要又有新活动就自动重新出现在侧栏）。
+  // 这个分区此前用 Object.keys() 全量列出、从不过滤，导致"移除后又被 resume、
+  // 或项目里又有新活动"的会话在侧栏已经正常显示，这里却仍然挂在「已移除的会话」
+  // 下面，点「恢复」没有任何可观察效果。下面两条用与侧栏（Sidebar.tsx:43）完全
+  // 相同的判定谓词钉住过滤行为。
+  it('已移除但之后有新活动的会话：不出现在列表里（移除已过期）', () => {
+    const key = '-Users-me-proj::abc123'
+    // removedAtMs=1000 < lastActivityMs=2000 → isSessionRemoved 判定"已过期"，
+    // 侧栏会让它重新出现，这个列表也必须跟着不再显示它。
+    useLibrary.setState({ removedSessions: { [key]: 1000 } })
+    useSessions.setState({
+      projects: [
+        {
+          dirName: '-Users-me-proj', cwd: '/tmp/proj', lastActivityMs: 2000,
+          threads: [makeThread({ rootKey: 'abc123', lastActivityMs: 2000 })],
+        },
+      ],
+    })
+    render(<ProjectsSection />)
+    expect(screen.queryByText(key)).toBeNull()
+    // 唯一一条记录被过滤掉之后，应该回落到空态文案，不是留一个空的 <ul>。
+    expect(screen.queryByText('没有移除的会话')).not.toBeNull()
+  })
+
+  it('移除后无新活动的会话：出现在列表里', () => {
+    const key = '-Users-me-proj::abc123'
+    // removedAtMs=2000 >= lastActivityMs=1000（活动发生在移除之前）→ 移除仍然有效，
+    // 侧栏不会让它重新出现，这个列表也应当继续把它列出来。
+    useLibrary.setState({ removedSessions: { [key]: 2000 } })
+    useSessions.setState({
+      projects: [
+        {
+          dirName: '-Users-me-proj', cwd: '/tmp/proj', lastActivityMs: 1000,
+          threads: [makeThread({ rootKey: 'abc123', lastActivityMs: 1000 })],
+        },
+      ],
+    })
+    render(<ProjectsSection />)
+    expect(screen.queryByText(key)).not.toBeNull()
+  })
+
+  // 决策点的测试：removedSessions 里的 key 在当前 projects 数据里完全找不到对应
+  // 会话时（项目目录被整个删掉、或转录文件被清理），ProjectsSection.tsx 顶部注释
+  // 记录的选择是"保守地当作仍处于移除状态"——继续显示，把「恢复」当成清理这条
+  // 陈旧记录的手动入口。这里钉住这个选择，防止日后有人在没有证据的情况下悄悄
+  // 改成"找不到就隐藏"。
+  it('removedSessions 的 key 在当前 projects 里找不到对应会话时：仍然显示（找不到活动证据，保守地当作仍处于移除状态）', () => {
+    const key = '-Users-me-deleted-proj::gone'
+    useLibrary.setState({ removedSessions: { [key]: 1000 } })
+    useSessions.setState({ projects: [] }) // 项目已经整个消失，没有任何匹配的 thread
+    render(<ProjectsSection />)
+    expect(screen.queryByText(key)).not.toBeNull()
   })
 })
 
