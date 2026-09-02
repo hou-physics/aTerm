@@ -1,10 +1,12 @@
 import { create } from 'zustand'
+import { isHandoffInFlight } from '../handoffLock'
 import { ptyIsAlive, ptyKill, ptySpawn } from '../ipc'
 import type { ProjectInfo } from '../ipc'
 import { equalPaneWidths, MAX_PANES } from '../paneLayout'
 import { dropInsertionIndex, type DropTarget } from '../paneDrop'
 import { resolvePaneIdentity } from '../paneReconcile'
 import { ptyEventsReady } from '../ptyBuffer'
+import { useHint } from './hint'
 import { useOverviewStore } from './overview'
 
 // Pane：标签内的单个终端会话。ptyId 缺省表示该窗格还没有终端——⌘D 新建的窗格先显示
@@ -67,6 +69,27 @@ export function buildTabCloseConfirmMessage(aliveCount: number): string {
 // PTY，不需要像上面那样动态报数量。
 export function buildPaneCloseConfirmMessage(): string {
   return '进程仍在运行，关闭窗格将终止它。确认关闭？'
+}
+
+// 交接期间拒绝关闭时给出的那条轻提示（V3.3 Ruling 12）。抽成常量而不是在两个调用点
+// 各写一遍字面量：closeTab 与 closePane 拒绝的是同一件事，文案漂移就意味着用户按 ⌘W
+// 和点 × 会看到两句不同的解释。
+export const HANDOFF_IN_FLIGHT_HINT = '这个标签正在移交到新窗口，稍后再关闭'
+
+// 「这个标签正在交接中，现在不能关」这道闸门（V3.3 Ruling 12 / 原 M7）。
+//
+// 拖出的握手是异步的（建窗 + 等就绪最长 10s + 等接管确认最长 5s），这段时间里标签**仍然
+// 留在旧窗口的标签栏里、可见可点**。用户此刻按 ⌘W 或点 ×，closeTab 会照常走
+// ptyIsAlive → ptyKill——而新窗口很可能**已经接管成功**（ack 还在路上），被 kill 的就是
+// 用户正在跑的 claude 会话。M6 的锁只挡"再拖一次"，挡不住关闭。
+//
+// 早退**不静默**：复用 store/hint.ts 那条既有的内联轻提示（与 ⌘D 拒绝新建窗格、两个
+// 拖拽入口的拒绝、以及交接失败回滚同一处渲染）。静默早退会让用户以为 ⌘W 坏了，反复
+// 猛按——而这本来只需要等一两秒。
+function refuseWhileHandoffInFlight(tabId: string): boolean {
+  if (!isHandoffInFlight(tabId)) return false
+  useHint.getState().show(HANDOFF_IN_FLIGHT_HINT)
+  return true
 }
 
 // 内部共享：在 tabId 的 panes 数组下标 insertAt 处插入一个新的"待选窗格"（ptyId
@@ -217,6 +240,9 @@ export const useTabs = create<TabsState>((set, get) => ({
     // 换成任何形式的"没有窗格就不给关"都会把总览标签和主页一起挡在这里，× 按钮点了
     // 会什么都不发生——见 tabs.test.ts「总览标签可以被关闭」一测。
     if (!tab || tab.kind === 'home') return
+    // 交接中的标签一律不关（Ruling 12）：新窗口可能已经接管，这里的 ptyKill 杀的会是
+    // 用户正在跑的会话。检查必须在 ptyIsAlive/ptyKill **之前**——放在后面等于先杀再问。
+    if (refuseWhileHandoffInFlight(id)) return
     // 只收集"确实有 ptyId 且确认存活"的窗格——待选会话的窗格（ptyId 缺省）从未
     // spawn 过 PTY，天然算不存活，不需要也不能查询。
     const aliveIds: string[] = []
@@ -524,6 +550,11 @@ export const useTabs = create<TabsState>((set, get) => ({
   closePane: async (tabId, paneId, confirmFn = dialogConfirm) => {
     const tab = get().tabs.find((t) => t.id === tabId)
     if (!tab || tab.kind !== 'term') return
+    // 同 closeTab（Ruling 12）：交接是按**标签**发起的，载荷带走它此刻的全部窗格，所以
+    // 多窗格标签里关掉任意一个窗格，杀的同样可能是新窗口已经接管的那个 PTY。单窗格时
+    // 下面会委托给 closeTab、由那边的同一道闸门挡住，但多窗格分支有自己的 ptyKill，
+    // 必须在这里也挡一次。
+    if (refuseWhileHandoffInFlight(tabId)) return
     // 先确认 paneId 真的是这个标签自己的窗格，再决定"标签只剩一个窗格时委托给
     // closeTab"这条分支——顺序调换过一次的话，一个陈旧/写错的 paneId（不属于该
     // 标签、甚至压根不存在）会在标签恰好只剩一个窗格时被当成"关闭它唯一的窗格"，

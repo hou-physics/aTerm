@@ -34,13 +34,97 @@ fn confirm_exit(app_handle: AppHandle) {
     app_handle.exit(0);
 }
 
-/// 窗口 `CloseRequested`、应用级 `ExitRequested`、（macOS 上替换掉默认 Quit 项后的）自定义
-/// Quit 菜单项，三条路径共用的"通知前端弹确认"逻辑，避免各自维护一份重复代码。用
-/// `AppHandle::emit` 而不是某个具体窗口的 `emit`：与被替换前的窗口路径（`window.emit`）
-/// 语义一致——两者都是广播给所有 webview，不是发给某个特定窗口的定向事件，前端
-/// `listen('app-close-requested', ...)` 本来就是全局监听，不区分来源窗口。
+/// 主窗口的 label。`tauri.conf.json` 里写死的那一个，也是"关掉它 = 退出整个应用"的
+/// 那一个（见 `on_window_event`）。拖出标签创建的窗口一律是 `term-<n>`
+/// （`new_term_window_label`），永远不会等于它。
+const MAIN_WINDOW_LABEL: &str = "main";
+
+/// 拖出标签创建的终端窗口的 label 前缀。三处共用同一份含义：`new_term_window_label`
+/// 生成它、`capabilities/default.json` 的 `windows` 用 `term-*` 授权它、前端
+/// `src/windowLabel.ts` 的 `isTornOutWindow` 用它自辨——所以这里也用同一个常量，不再
+/// 在 `format!` 里写一遍字面量。
+const TERM_WINDOW_LABEL_PREFIX: &str = "term-";
+
+/// 纯函数：一个窗口 label 是不是"拖出标签创建出来的终端窗口"。
+///
+/// `destroy_term_window` 的准入校验（该命令能**绕过 `CloseRequested`** 强行销毁窗口，
+/// 见其上方注释），因此这里是白名单式判断（必须是 `term-` 前缀）而不是
+/// `label != "main"`：漏判的代价是主窗口被一条本该只作用于拖出窗口的命令强行销毁，
+/// 而主窗口的关闭在本应用里等于"退出应用"、必须经过 ⌘Q 确认框那条路径——绕过它就是
+/// 把整个应用连同所有窗口里正在跑的会话一起无声终止。将来若出现别的用途的窗口
+/// （面板、预览…），"不是主窗口"同样会把它们也纳入销毁范围，白名单不会。
+///
+/// 与前端 `isTornOutWindow` 是同一条规则的两侧（同一个前缀），刻意各自实现：这条判断
+/// 是安全边界，两侧各自校验一次，任一侧被改坏另一侧仍然挡得住。
+fn is_term_window_label(label: &str) -> bool {
+    label.starts_with(TERM_WINDOW_LABEL_PREFIX)
+}
+
+/// **应用级**关闭请求（⌘Q / Quit 菜单项 / 主窗口的关闭按钮 / `RunEvent::ExitRequested`）
+/// 共用的"通知前端弹确认"逻辑。
+///
+/// V3.3 起用 `emit_to(MAIN_WINDOW_LABEL, …)` 而不是 `emit` 广播。改动理由：多窗口之后，
+/// 广播意味着**每个**窗口的 `src/closeRequest.ts` 都会各弹一个确认框——同一次 ⌘Q 堆出
+/// N 个对话框，随便在哪一个上点"确定"都会退出整个应用。退出是应用级的一件事，只该问
+/// 一次，问在主窗口（本应用里主窗口恒存在：关掉它就等于退出应用，见 `on_window_event`，
+/// 所以不存在"定向发给了一个已经不在的窗口"这种情况）。
+///
+/// 定向只在前端也配合限定监听 target 时才真的生效——`listen(event, handler)` 不传
+/// options 时 target 是 `{ kind: 'Any' }`，而 Any 目标的监听器对 `emit_to` 的 label
+/// 过滤**无条件命中**（tauri 2.11.5 `event/listener.rs` 的 `match_any_or_filter`，
+/// 考据见 src/windowHandoff.ts 顶部）。`src/closeRequest.ts` 因此改成
+/// `listen(…, { target: 本窗口 label })`。这个组合有一个刻意保留的降级性质：即便前端那
+/// 半边失效（回到 Any 监听），主窗口**照样收得到**这个事件，⌘Q 确认框最坏退回到 V3.2
+/// 的广播行为，而不是彻底失灵。
 fn emit_close_requested(app_handle: &AppHandle) {
-    let _ = app_handle.emit("app-close-requested", ());
+    let _ = app_handle.emit_to(MAIN_WINDOW_LABEL, "app-close-requested", ());
+}
+
+/// **单个非主窗口**（拖出来的 `term-*` 终端窗口）收到关闭请求时，定向通知**它自己的**
+/// 前端。与 `emit_close_requested` 是两件不同的事，不能合并：那条是"要退出整个应用了"，
+/// 这条是"只关你这一个窗口"。
+///
+/// 为什么关窗也要绕一趟前端，而不是让窗口直接关掉：**哪些 PTY 属于这个窗口，只有这个
+/// 窗口的前端知道**。Rust 侧的 `PtyManager` 是一张全应用的扁平 map，没有、也不该有窗口
+/// 归属信息——归属的真相在各窗口自己的 `useTabs` store 里，而且它在标签交接期间是会
+/// 变的（新窗口 adopt 在前、旧窗口移除在后）。在 Rust 里再维护一份窗口→PTY 的映射就是
+/// 第二个可以与之矛盾的真相来源。所以这里 `prevent_close` 之后把决定权交给那个窗口的
+/// 前端（src/windowClose.ts）：它清点自己持有的存活会话、必要时弹确认、终止它们，最后
+/// 调 `destroy_term_window` 真正关掉自己。这与主窗口关闭走
+/// `prevent_close` → 前端确认 → `confirm_exit` 是**同一套**既有模式，不是新引入的机制。
+fn emit_window_close_requested(app_handle: &AppHandle, label: &str) {
+    let _ = app_handle.emit_to(label, "window-close-requested", ());
+}
+
+/// 前端（src/windowClose.ts）在"已经终止完本窗口自己持有的 PTY"之后调用：真正关掉这个
+/// 拖出来的终端窗口。与 `confirm_exit` 完全对偶——那条是"确认过了，退出应用"，这条是
+/// "确认过了，关掉这一个窗口"。
+///
+/// 用 `destroy()` 而不是 `close()`：`close()` 会再触发一次 `CloseRequested`，而
+/// `on_window_event` 对非主窗口的 `CloseRequested` 一律 `prevent_close` 并回头再问前端
+/// 一次——那是一个关不掉的循环。`destroy()` 按 tauri 文档"forces the window close
+/// instead of emitting the CloseRequested event"，正是这里要的语义。
+///
+/// **同时也是标签交接回滚的唯一关窗入口**（V3.3 Ruling 7）。回滚要关掉的那个新窗口
+/// 可能其实**已经接管成功**、只是 ack 丢了/超时了；若走 `close()`，它的前端会收到
+/// `window-close-requested`、把"自己持有的"——也就是刚刚接管过来的——PTY 全部 kill 掉，
+/// 而那正是用户正在跑的会话。`destroy()` 绕过整条前端路径，因此不会有任何 kill 发生：
+/// 交接成功了的话标签仍留在旧窗口（回滚不动标签），会话继续跑；没接管成功的话本来就
+/// 没有什么可 kill 的。两个分支都对，而这正是关键——回滚方**无法知道**自己在哪个分支
+/// （ack 就是那个丢掉的信息），所以只能选一个两边都安全的动作。
+///
+/// 窗口已经不在了（label 查不到）时返回 `Ok(())` 而不是 `Err`：这个命令天然会和"窗口
+/// 自己正在关"竞争（回滚与用户手动关窗可能同时发生），"目标已经处于期望状态"不是错误。
+/// label 不是 `term-` 前缀时返回 `Err` 并且什么都不做——见 `is_term_window_label`。
+#[tauri::command]
+async fn destroy_term_window(app: AppHandle, label: String) -> Result<(), String> {
+    if !is_term_window_label(&label) {
+        return Err(format!("拒绝销毁非终端窗口：{label}"));
+    }
+    let Some(window) = app.get_webview_window(&label) else {
+        return Ok(());
+    };
+    window.destroy().map_err(|e| format!("销毁窗口失败：{e}"))
 }
 
 /// macOS 专属：App 菜单里"设置…"项被点击（或按下 ⌘,）时，广播给前端打开设置浮层
@@ -80,7 +164,10 @@ static NEXT_TERM_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 /// dir`（见 reveal.rs）那样直接单测，不需要构造真实 `App`。`create_term_window` 是
 /// 这个函数唯一的生产调用点。
 fn new_term_window_label() -> String {
-    format!("term-{}", NEXT_TERM_WINDOW_ID.fetch_add(1, Ordering::SeqCst))
+    format!(
+        "{TERM_WINDOW_LABEL_PREFIX}{}",
+        NEXT_TERM_WINDOW_ID.fetch_add(1, Ordering::SeqCst)
+    )
 }
 
 /// 从 `app.config().app.windows`（对应 `tauri.conf.json`）里选出"新终端窗口应该
@@ -582,17 +669,23 @@ pub fn run() {
         .manage(sessions::subagents::SubagentCache::default())
         .manage(ExitConfirmed(AtomicBool::new(false)))
         .on_window_event(|window, event| {
-            // 只关心主窗口（本应用只有一个窗口，label 固定为 "main"）；显式判断而非依赖
-            // "反正只有一个窗口"这个隐含前提，未来加窗口也不会意外影响到它们。
-            if window.label() != "main" {
-                return;
-            }
             // `CloseRequested` 是 `#[non_exhaustive]` 的结构体变体，匹配时必须带 `..`。
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // 挡下这次关闭：真正退出与否交给前端弹出确认对话框后决定
-                // （见 confirm_exit 命令与前端 src/closeRequest.ts）。
+                // 两条路径都先挡下这次关闭，把决定权交给前端——区别只在"问谁、问什么"。
+                // V3.3 之前这里对非 main 窗口整个早退（不 prevent、也不通知任何人），
+                // 那时拖出来的窗口关掉是"窗口没了、它里面的 claude 进程还在后台跑，谁
+                // 都看不见也关不掉"。
                 api.prevent_close();
-                emit_close_requested(window.app_handle());
+                if window.label() == MAIN_WINDOW_LABEL {
+                    // 主窗口关闭 = 退出整个应用：沿用既有的 ⌘Q 确认流程一字不改
+                    // （见 confirm_exit 命令与前端 src/closeRequest.ts）。
+                    emit_close_requested(window.app_handle());
+                } else {
+                    // 非主窗口关闭 = 只关这一个窗口，且**只终止它自己持有的 PTY**
+                    // （V3.3 设计文档 §5.3）。谁持有哪些 PTY 只有那个窗口的前端知道，
+                    // 理由见 emit_window_close_requested 上方注释。
+                    emit_window_close_requested(window.app_handle(), window.label());
+                }
             }
         })
         .on_menu_event(|app_handle, event| {
@@ -624,6 +717,7 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_is_alive,
+            pty::pty_alive_count,
             status::get_session_statuses,
             status::installer::hooks_status,
             status::installer::install_hooks,
@@ -631,7 +725,8 @@ pub fn run() {
             reveal::reveal_in_finder,
             confirm_exit,
             set_theme_mode_checked,
-            create_term_window
+            create_term_window,
+            destroy_term_window
         ])
         .setup(|app| {
             // 状态引擎（P2b）：起文件监听 + 后台刷新线程，注册管理状态。返回的句柄
@@ -912,6 +1007,38 @@ mod tests {
         // 同一时间粒度内），第二个窗口的 label 会撞上第一个——多窗口场景下这意味着
         // WebviewWindowBuilder::new 会因 label 重复而创建失败/覆盖已有窗口。
         assert_ne!(a, b, "两次生成的 label 不能相同，否则第二个窗口会撞上第一个");
+    }
+
+    // is_term_window_label：destroy_term_window 的准入校验（V3.3 Task 5）。这条命令能
+    // **绕过 CloseRequested** 强行销毁窗口——绕过意味着窗口关闭时那套"先问前端、由它
+    // 终止自己持有的 PTY"的流程整个不会跑，所以它绝不能作用到主窗口上（主窗口关闭 =
+    // 退出应用，必须走 ⌘Q 确认框）。
+
+    #[test]
+    fn term_window_labels_are_destroyable() {
+        // 会因为什么失败：如果前缀常量被改坏（例如写成 "win-"），create_term_window 发出
+        // 去的 label 就再也过不了这道校验，交接回滚将无法关掉建出来的新窗口。
+        assert!(is_term_window_label("term-1"));
+        assert!(is_term_window_label("term-42"));
+        // 与生产路径同源：真正发给前端的 label 就是这个函数生成的，两者必须自洽。
+        assert!(is_term_window_label(&new_term_window_label()));
+    }
+
+    #[test]
+    fn main_window_label_is_never_destroyable() {
+        // 最重要的一条：主窗口不能被这条绕过 CloseRequested 的命令销毁——那等于把整个
+        // 应用连同所有窗口里正在跑的会话无声终止，且完全跳过 ⌘Q 确认框。
+        assert!(!is_term_window_label(MAIN_WINDOW_LABEL));
+    }
+
+    #[test]
+    fn labels_that_merely_look_like_term_windows_are_rejected() {
+        // 会因为什么失败：如果校验写成 `label.starts_with("term")`（少了连字符）或
+        // `label != "main"`（黑名单而不是白名单），下面这几个就会被误判为可销毁。
+        assert!(!is_term_window_label("terminal-1"));
+        assert!(!is_term_window_label("panel"));
+        assert!(!is_term_window_label(""));
+        assert!(!is_term_window_label("my-term-1"));
     }
 
     // R1 修复：main_window_config / term_window_config 两个纯函数——create_term_window

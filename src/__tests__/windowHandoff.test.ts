@@ -56,11 +56,6 @@ const { listeners, listenMock, emitMock, emitToMock, ptyListenGate } = vi.hoiste
 })
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }))
-const { closeMock, getByLabelMock } = vi.hoisted(() => {
-  const closeMock = vi.fn(async () => {})
-  const getByLabelMock = vi.fn(async () => ({ close: closeMock }))
-  return { closeMock, getByLabelMock }
-})
 const { serializeTermMock } = vi.hoisted(() => ({ serializeTermMock: vi.fn((_ptyId: string) => '') }))
 // 当前窗口的 label。默认 'main'：模块顶层的 windowHandoffReady 因此按"主窗口"早退，
 // 不会在别的用例里顺手注册监听/发就绪事件。下面「新窗口启动」那组用例会临时改成
@@ -69,7 +64,6 @@ const { currentWindowMock } = vi.hoisted(() => ({ currentWindowMock: vi.fn(() =>
 
 vi.mock('@tauri-apps/api/event', () => ({ listen: listenMock, emit: emitMock, emitTo: emitToMock }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
-vi.mock('@tauri-apps/api/webviewWindow', () => ({ WebviewWindow: { getByLabel: getByLabelMock } }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: currentWindowMock }))
 vi.mock('../termSerialize', () => ({ serializeTerm: serializeTermMock }))
 vi.mock('../ipc', () => ({
@@ -80,6 +74,10 @@ vi.mock('../ipc', () => ({
   // R2/I4：回滚时用它把 PTY 尺寸拧回旧窗口的几何（见 ipc.ts 的 lastPtySizes 注释）。
   ptyResize: vi.fn(async () => {}),
   lastPtySize: vi.fn((_id: string) => undefined as { cols: number; rows: number } | undefined),
+  // Task 5 / Ruling 7：回滚改用这条 Rust 命令关掉新窗口（强制销毁、绕过
+  // CloseRequested），不再走 JS 侧 WebviewWindow 的关窗方法——那条路径会让新窗口
+  // 把它可能刚接管过来的 PTY 全部 kill 掉。
+  destroyTermWindow: vi.fn(async () => {}),
 }))
 
 import * as ipc from '../ipc'
@@ -90,14 +88,14 @@ import {
   READY_TIMEOUT_MS,
   ACK_TIMEOUT_MS,
   handleHandoff,
-  isTornOutWindow,
   tearOutTab,
   type HandoffPayload,
 } from '../windowHandoff'
+import { isTornOutWindow } from '../windowLabel'
 import { attachPty } from '../ptyBuffer'
 import { useHint } from '../store/hint'
 import { useSessions } from '../store/sessions'
-import { useTabs } from '../store/tabs'
+import { HANDOFF_IN_FLIGHT_HINT, useTabs } from '../store/tabs'
 
 const HOME = { id: 'home', kind: 'home' as const, title: '主页', panes: [] }
 const TAB_A = {
@@ -149,7 +147,9 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
   serializeTermMock.mockReturnValue('')
   invokeMock.mockResolvedValue('term-1')
-  getByLabelMock.mockResolvedValue({ close: closeMock })
+  // clearAllMocks 只清调用记录、不清实现，某条用例里设过的 mockRejectedValue 会漏到
+  // 后面去——每轮显式复位成成功。
+  vi.mocked(ipc.destroyTermWindow).mockResolvedValue(undefined)
   useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-b' })
   useSessions.setState({ projects: [] })
   useHint.setState({ message: null, action: null })
@@ -193,7 +193,7 @@ describe('tearOutTab — 完整成功路径（设计文档 §4.2 的六步）', 
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
     expect(ipc.ptyKill).not.toHaveBeenCalled()
     // 也没有把刚建好的新窗口关掉（那是失败路径才做的事）。
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
     // 两个临时监听都摘干净了——每拖出一次就漏一对监听器的话，长跑之后每个事件都要
     // 走一遍一堆早已过期的闭包。断言的是假事件总线里真实剩下的 handler 数量，不是
     // "unlisten 这个 mock 被调过"。
@@ -381,7 +381,7 @@ describe('tearOutTab — 完整成功路径（设计文档 §4.2 的六步）', 
     fireReady('term-1')
     expect(await done).toBe(false)
     expect(emitToMock).not.toHaveBeenCalled()
-    expect(closeMock).toHaveBeenCalledTimes(1)
+    expect(ipc.destroyTermWindow).toHaveBeenCalledTimes(1)
     expect(useHint.getState().message).toBe('新窗口没能接管这个标签，已留在原窗口')
   })
 })
@@ -396,7 +396,7 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
     // 用例只是在验"总有一天会超时"，而不是"在 READY_TIMEOUT_MS 这个时长上超时"（用例
     // 用同一个常量推进时间，不钉住下边界的话，实现改用任何别的时长都照样绿）。
     await vi.advanceTimersByTimeAsync(READY_TIMEOUT_MS - 1)
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
     expect(useHint.getState().message).toBeNull()
 
     await vi.advanceTimersByTimeAsync(2)
@@ -404,8 +404,8 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
 
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')!.panes[0].ptyId).toBe('pty-b')
-    expect(getByLabelMock).toHaveBeenCalledWith('term-1')
-    expect(closeMock).toHaveBeenCalledTimes(1)
+    expect(ipc.destroyTermWindow).toHaveBeenCalledWith('term-1')
+    expect(ipc.destroyTermWindow).toHaveBeenCalledTimes(1)
     expect(ipc.ptyKill).not.toHaveBeenCalled()
     expect(useHint.getState().message).toBe('新窗口没能接管这个标签，已留在原窗口')
   })
@@ -420,7 +420,7 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
     // 同上：先钉住"ACK_TIMEOUT_MS 之前一刻还没判失败"。这条下边界正是"ack 误用了
     // READY_TIMEOUT_MS（10s）"这类换错常量的缺陷唯一能被抓住的地方。
     await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS - 1)
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
     expect(useHint.getState().message).toBeNull()
 
     await vi.advanceTimersByTimeAsync(2)
@@ -428,7 +428,7 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
 
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')!.panes[0].ptyId).toBe('pty-b')
-    expect(closeMock).toHaveBeenCalledTimes(1)
+    expect(ipc.destroyTermWindow).toHaveBeenCalledTimes(1)
     expect(ipc.ptyKill).not.toHaveBeenCalled()
     expect(useHint.getState().message).toBe('新窗口没能接管这个标签，已留在原窗口')
   })
@@ -440,8 +440,7 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
 
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
     expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')!.panes[0].ptyId).toBe('pty-b')
-    expect(getByLabelMock).not.toHaveBeenCalled()
-    expect(closeMock).not.toHaveBeenCalled()
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
     expect(emitToMock).not.toHaveBeenCalled()
     expect(ipc.ptyKill).not.toHaveBeenCalled()
     expect(useHint.getState().message).toBe('新窗口创建失败，标签已留在原窗口')
@@ -450,7 +449,7 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
   })
 
   it('关掉残留窗口本身再失败也不会连累回滚：标签依然留在旧窗口', async () => {
-    getByLabelMock.mockRejectedValue(new Error('窗口已经不在了'))
+    vi.mocked(ipc.destroyTermWindow).mockRejectedValue(new Error('窗口已经不在了'))
 
     const done = tearOutTab('tab-b', { x: 1, y: 1 })
     await vi.advanceTimersByTimeAsync(0)
@@ -487,7 +486,7 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
 
     expect(ipc.ptyResize).not.toHaveBeenCalled()
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
-    expect(closeMock).toHaveBeenCalledTimes(1)
+    expect(ipc.destroyTermWindow).toHaveBeenCalledTimes(1)
   })
 
   it('就绪超时回滚：载荷压根没发出去、新窗口不可能接管过，不去动 PTY 尺寸', async () => {
@@ -518,6 +517,62 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
     // 锁在 finally 里释放：这一轮结束后同一个 id 能再次发起（虽然标签已经不在了）。
     expect(await tearOutTab('tab-b', { x: 0, y: 0 })).toBe(false) // 标签已移除，走的是"标签不存在"这条
     expect(invokeMock).toHaveBeenCalledTimes(1)
+  })
+
+  // ── Task 5 / Ruling 12：交接锁必须在**每一条**路径上释放 ──────────────────────
+  //
+  // 锁没释放的后果比它挡的问题更糟：closeTab 从此对这个标签永久早退，用户按 ⌘W、点 ×
+  // 都毫无反应，标签再也关不掉。下面两条都不满足于"某个 mock 没被调用"——它们直接用
+  // 真实的 closeTab 去关那个标签，断言 store 里标签真的没了、PTY 真的被 kill 了。
+
+  it('回滚之后锁必须已释放：该标签仍然关得掉（真的调 closeTab，断言标签从 store 消失、PTY 被 kill）', async () => {
+    const done = tearOutTab('tab-b', { x: 0, y: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+    fireReady('term-1')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS + 1)
+    expect(await done).toBe(false)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    await useTabs.getState().closeTab('tab-b', async () => true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+    expect(ipc.ptyKill).toHaveBeenCalledWith('pty-b')
+  })
+
+  // 这条挡的是一个真实存在过的泄漏路径：listen() 走的是真实 IPC，会 reject。改之前
+  // 上锁与两次 listen 都在 try **之外**，listen 失败时锁就永远留在 Set 里。
+  it('连监听都没注册成功（listen reject）也要释放锁：标签仍然关得掉', async () => {
+    listenMock.mockRejectedValueOnce(new Error('事件桥挂了'))
+
+    expect(await tearOutTab('tab-b', { x: 0, y: 0 })).toBe(false)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    await useTabs.getState().closeTab('tab-b', async () => true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+    expect(ipc.ptyKill).toHaveBeenCalledWith('pty-b')
+  })
+
+  // Ruling 12 / 原 M7：握手期间标签仍留在标签栏里、可见可点。用户此刻按 ⌘W，closeTab
+  // 会照常 ptyKill——而新窗口很可能**已经接管成功**（ack 还在路上），杀掉的就是正在跑的
+  // claude 会话。断言"该活着的确实还活着"：标签仍在 store 里、pty-b 一次都没被 kill。
+  it('交接进行中按 ⌘W 关标签：拒绝并给出可见提示，标签与 PTY 都原封不动', async () => {
+    const done = tearOutTab('tab-b', { x: 0, y: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+    fireReady('term-1')
+    await vi.advanceTimersByTimeAsync(0) // 载荷已发出，新窗口此刻可能已经接管
+
+    await useTabs.getState().closeTab('tab-b', async () => true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')!.panes[0].ptyId).toBe('pty-b')
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    // 早退不许静默：用户得知道 ⌘W 为什么没反应，否则只会反复猛按。
+    expect(useHint.getState().message).toBe(HANDOFF_IN_FLIGHT_HINT)
+
+    fireAck('term-1')
+    expect(await done).toBe(true)
   })
 
   it('目标标签不存在 / 不是终端标签时直接拒绝，不建窗', async () => {

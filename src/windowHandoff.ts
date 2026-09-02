@@ -58,12 +58,14 @@
 // alt-screen，重复的转义序列会把画面搞乱，比丢一小段更糟。
 import { invoke } from '@tauri-apps/api/core'
 import { emit, emitTo, listen } from '@tauri-apps/api/event'
-import { lastPtySize, ptyResize } from './ipc'
+import { beginHandoff, endHandoff } from './handoffLock'
+import { destroyTermWindow, lastPtySize, ptyResize } from './ipc'
 import { discardBuffered, ignorePtyOutput, ptyEventsReady, seedScrollback } from './ptyBuffer'
 import { useHint } from './store/hint'
 import { useSessions } from './store/sessions'
 import { type AdoptedPane, type Tab, useTabs } from './store/tabs'
 import { serializeTerm } from './termSerialize'
+import { currentWindowLabel, isTornOutWindow } from './windowLabel'
 
 // ── 握手协议 ────────────────────────────────────────────────────────────────
 // 事件名沿用仓库既有的 kebab-case 风格（'pty-output' / 'app-close-requested' /
@@ -144,53 +146,9 @@ export const READY_TIMEOUT_MS = 10_000
 export const ACK_TIMEOUT_MS = 5_000
 
 // ── 窗口身份 ────────────────────────────────────────────────────────────────
-
-/** 当前窗口的 label。
- *
- *  每次调用都重新读一次（`import()` 本身由模块加载器缓存，重复调用不会重复下载/求值），
- *  不做模块级缓存：这个值在 R2 之后是**安全判定的一部分**（handleHandoff 用它比对
- *  payload.toLabel），缓存一个安全判定的输入只会让"它什么时候被算出来的"变成又一件要
- *  推理的事，而这里省下的是一次 Map 查找级别的开销。
- *
- *  用 `await import(...)` 而不是顶层静态 import：`@tauri-apps/api/window` 与
- *  `@tauri-apps/api/webviewWindow` 这两个模块在本仓库里此前只出现在动态 import 里
- *  （store/layout.ts 的 runPanelResize、App.tsx 的 onDragDropEvent），从主 chunk 静态
- *  引它们会让 rollup 报 "dynamically imported by X but also statically imported by Y,
- *  dynamic import will not move module into another chunk"——基线的 `npm run build`
- *  是零警告的，不该由这个模块开这个头。
- *
- *  getCurrentWindow() 读的是 window.__TAURI_INTERNALS__.metadata，在 jsdom/浏览器
- *  预览里那个对象根本不存在、会同步抛 TypeError——这个模块是 App.tsx 的顶层
- *  side-effect 导入，抛出去会连累整个应用起不来，所以兜底成 'main'（"当作主窗口"是
- *  最保守的答案：主窗口不会去抢接管，见 isTornOutWindow）。 */
-export async function currentWindowLabel(): Promise<string> {
-  try {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window')
-    return getCurrentWindow().label
-  } catch {
-    return 'main'
-  }
-}
-
-/** 这个窗口是不是"被标签拖出创建的"。
- *
- *  **判定方式：label 前缀**（另一条可选路径是由 Rust 在创建时告知，例如往新窗口注入
- *  一个初始化状态或加个查询参数）。选前缀的理由：
- *    1. label 已经是既有契约，不是为这个判断新造的信息——create_term_window 的返回值
- *       就是 `term-<n>`（src-tauri/src/lib.rs 的 new_term_window_label），
- *       capabilities/default.json 的 windows 也已经写成 ["main", "term-*"]，同一个
- *       前缀在三处共同承载"这是拖出来的终端窗口"这一含义，再引入第二套标记只会多一
- *       处可以互相矛盾的真相来源；
- *    2. 它是**同步且零往返**的：新窗口必须先挂好接管监听、再 emit 就绪事件，中间多
- *       一次 invoke 往返就多一段"旧窗口已经在等、新窗口还没准备好"的窗口期；
- *    3. Rust 侧告知需要新增命令或窗口初始化脚本，本任务的改动面会扩到 lib.rs——那是
- *       Task 5/6 的地盘，跨任务改同一个文件是这次计划预检明确要避开的冲突。
- *
- *  用白名单式判断（必须是 `term-` 前缀）而不是 `label !== 'main'`：以后若出现别的
- *  用途的窗口（面板、预览…），"不是主窗口"会让它们也一起去抢接管载荷。 */
-export function isTornOutWindow(label: string): boolean {
-  return label.startsWith('term-')
-}
+// currentWindowLabel / isTornOutWindow 已移到 src/windowLabel.ts：Task 5 起
+// closeRequest.ts 与 windowClose.ts 也要用它们，而从这个模块导入会连带触发下面
+// windowHandoffReady 的顶层副作用（注册接管监听、广播就绪事件）。见那个文件顶部。
 
 // ── 旧窗口侧：发起交接 ───────────────────────────────────────────────────────
 
@@ -238,30 +196,36 @@ function buildHandoffPanes(tab: Tab): HandoffPane[] {
   }))
 }
 
-/** 回滚：把已经建出来的新窗口关掉。
+/** 回滚：把已经建出来的新窗口关掉，**且绝不让它顺手杀掉任何 PTY**。
  *
- *  用 close() 而不是那个更暴力的强制销毁 API：新窗口此刻还没有接管任何 PTY（接管
- *  成功的话我们压根不会走到这里），close 走的是正常的 CloseRequested 路径，语义上
- *  就是"这个窗口白开了"；顺带也少要一条 ACL 权限（capabilities/default.json 里为此
- *  新增的是 core:window:allow-close，见 src/__tests__/tauriAcl.test.ts 这道闸门）。
+ *  用 Rust 的 destroy_term_window（强制销毁，绕过 CloseRequested）而不是 JS 侧
+ *  `WebviewWindow` 的那个 close 方法——这是 V3.3 Ruling 7 的落点，改动理由完整写在这里
+ *  （顺带：本仓库生产代码里因此不再有任何 core:window 的关窗调用，capabilities 里那条
+ *  `core:window:allow-close` 已随之撤掉，src/__tests__/tauriAcl.test.ts 那道闸门会在
+ *  有人重新引入时报出来）：
+ *
+ *  Task 5 之前，非主窗口的 CloseRequested 在 Rust 侧直接早退、不杀任何 PTY，所以
+ *  普通的关窗路径是安全的（代价是拖出来的窗口关掉后它的会话变成后台孤儿）。Task 5 把那条
+ *  路径改成了"关窗只杀它自己持有的 PTY"，于是普通关窗变成一条**真正的会话损失来源**：
+ *  回滚要关掉的这个新窗口**可能其实已经接管成功**，只是 ack 丢了或超时了——它的 store
+ *  里此刻正拿着那些 ptyId，close 走一遍它自己的关窗流程就会把用户正在跑的 claude 全部
+ *  kill 掉。
+ *
+ *  回滚方**无法知道**自己在哪个分支（ack 就是那条丢掉的信息），所以只能选一个两边都
+ *  安全的动作：销毁窗口、一个 PTY 都不动。
+ *    - 新窗口其实接管成功了 → 会话继续跑，标签留在旧窗口（回滚不动标签），用户看到的
+ *      是"拖出没成功"，会话完好；
+ *    - 新窗口没接管成功 → 它本来就没有 PTY 可 kill，销毁与普通关窗等价。
+ *
  *  失败只 console.warn 不上抛——调用它的地方本身就在处理另一个失败，回滚失败不该
  *  覆盖掉原始错误，更不该影响"标签留在旧窗口"这条已经生效的保证。 */
 async function closeSpawnedWindow(label: string): Promise<void> {
   try {
-    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
-    const win = await WebviewWindow.getByLabel(label)
-    await win?.close()
+    await destroyTermWindow(label)
   } catch (err) {
     console.warn('回滚：关闭新窗口失败', label, err)
   }
 }
-
-// 正在交接中的标签 id（R2/M6）。整个握手是异步的（建窗 + 两次带超时的等待，最坏十几
-// 秒），期间标签仍然留在标签栏里、照样能被再拖一次——那会并发建出第二个窗口、发第二份
-// 载荷，两次交接争同一个标签，谁先回 ack 谁把标签删掉，另一次随后对着一个已经不在的
-// 标签走回滚。锁在 tearOutTab 这一层而不是手势层：手势层只有一处调用，而这里是唯一
-// 入口，挡在这里对未来的调用方也成立。
-const handoffInFlight = new Set<string>()
 
 /** 把一个标签拖出成新窗口（设计文档 §4.2 的六步）。TabBar.tsx 在 pointerup 命中
  *  拖出判定时调用。
@@ -275,10 +239,9 @@ const handoffInFlight = new Set<string>()
 export async function tearOutTab(tabId: string, screenPoint: { x: number; y: number }): Promise<boolean> {
   const tab = useTabs.getState().tabs.find((t) => t.id === tabId)
   if (!tab || tab.kind !== 'term') return false
-  if (handoffInFlight.has(tabId)) return false
-  handoffInFlight.add(tabId)
-
-  const fromLabel = await currentWindowLabel()
+  // 上锁失败 = 这个标签已经在交接中：直接放弃，**且不进入下面的 try**——那里的 finally
+  // 会 endHandoff，而那把锁是正在进行的那一次的，放掉就等于把 M6 的防护整个抵消。
+  if (!beginHandoff(tabId)) return false
 
   // 认领用的可变量：两个监听器都闭包捕获它。监听在建窗**之前**注册（下面），此时
   // label 还是 null——只有建窗返回之后才知道等的是谁，因此就绪事件先记进 seenReady，
@@ -293,20 +256,30 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
   const seenReady = new Set<string>()
   const ready = deferred<void>()
   const ack = deferred<void>()
+  // 两个临时监听的注销函数。声明在 try **之外**、赋值在 try **之内**，finally 里可选
+  // 调用——注册本身（listen 是一次 IPC 往返）也可能失败，那时它们仍是 undefined。
+  let unlistenReady: (() => void) | undefined
+  let unlistenAck: (() => void) | undefined
 
-  const unlistenReady = await listen<HandoffReady>(HANDOFF_READY_EVENT, (e) => {
-    const l = e.payload?.label
-    if (!l) return
-    seenReady.add(l)
-    if (label !== null && l === label) ready.resolve()
-  })
-  // ack 认领（R2/C1 之三）：载荷里的 label 是**接管方自己报出来的** label，与我们刚
-  // create_term_window 拿到的那个对上才算数——串扰过来的、或别的窗口发的 ack 一律不认。
-  const unlistenAck = await listen<HandoffAck>(HANDOFF_ACK_EVENT, (e) => {
-    if (label !== null && e.payload?.label === label) ack.resolve()
-  })
-
+  // 从上锁那一刻起的**全部**代码都在这个 try 里，一行都不许漏在外面（Ruling 12 的硬
+  // 要求）：锁没释放意味着这个标签永久关不掉、也永久拖不出，比它挡的问题更糟。改之前
+  // 这里有一段裸露在 try 之前的 await（currentWindowLabel + 两次 listen），listen()
+  // 走的是真实 IPC，它 reject 时锁就永远留在 Set 里了。
   try {
+    const fromLabel = await currentWindowLabel()
+
+    unlistenReady = await listen<HandoffReady>(HANDOFF_READY_EVENT, (e) => {
+      const l = e.payload?.label
+      if (!l) return
+      seenReady.add(l)
+      if (label !== null && l === label) ready.resolve()
+    })
+    // ack 认领（R2/C1 之三）：载荷里的 label 是**接管方自己报出来的** label，与我们刚
+    // create_term_window 拿到的那个对上才算数——串扰过来的、或别的窗口发的 ack 一律不认。
+    unlistenAck = await listen<HandoffAck>(HANDOFF_ACK_EVENT, (e) => {
+      if (label !== null && e.payload?.label === label) ack.resolve()
+    })
+
     // 第 1 步：建窗。失败（Rust 侧返回 Err）时什么窗口都没建出来，没有残留可关。
     label = await invoke<string>('create_term_window', { x: screenPoint.x, y: screenPoint.y })
     if (seenReady.has(label)) ready.resolve()
@@ -366,9 +339,9 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
     useHint.getState().show(label === null ? '新窗口创建失败，标签已留在原窗口' : '新窗口没能接管这个标签，已留在原窗口')
     return false
   } finally {
-    handoffInFlight.delete(tabId)
-    unlistenReady()
-    unlistenAck()
+    endHandoff(tabId)
+    unlistenReady?.()
+    unlistenAck?.()
   }
 }
 

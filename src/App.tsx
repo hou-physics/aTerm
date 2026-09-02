@@ -8,6 +8,10 @@ import './contextMenu'
 // 超时）。主窗口导入它是空操作：isTornOutWindow() 按 label 前缀判定，main 直接
 // 早退，既不监听也不发就绪事件（见 src/windowHandoff.ts）。
 import './windowHandoff'
+// 拖出来的终端窗口自己的关闭流程（V3.3 §5.3）：Rust 侧对非主窗口的 CloseRequested
+// prevent_close 之后定向问这个窗口，由它终止**自己持有的**那些 PTY 再销毁自己。同样
+// 是"主窗口导入它是空操作"（按 label 前缀早退，见 src/windowClose.ts 顶部的所有权模型）。
+import './windowClose'
 import './App.css'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { newTerminal } from './actions'

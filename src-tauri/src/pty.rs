@@ -72,6 +72,33 @@ pub fn pty_is_alive(state: State<PtyManager>, id: String) -> bool {
     with_pty(&state.0, &id, |h| h.is_alive()).unwrap_or(false)
 }
 
+/// 存活 PTY 的**全应用**总数——不区分是哪个窗口持有的。
+///
+/// 为什么必须由 Rust 来数（V3.3 设计文档 §5.2）：前端原来的 `countLiveTerminalTabs()`
+/// 遍历的是**本窗口**的标签，多窗口之后那只是全部会话的一个子集。而 ⌘Q 是**应用级**
+/// 退出，会连同别的窗口里正在跑的 claude 一起终止——确认框却只报本窗口那几个，用户
+/// 据此点"确定"就等于在不知情的情况下杀掉了另一个窗口里的会话。`PtyManager` 本就掌握
+/// 全部 PTY（每个窗口的 `pty_spawn` 都落进同一张 map），是这个数字唯一的、也是天然
+/// 跨窗口的真相来源。
+///
+/// **必须逐个 `is_alive()` 过滤，不能直接用 `map.len()`**：子进程自己退出（用户在终端
+/// 里敲了 exit）之后要等 `pty_spawn` 里注册的 on_exit 回调跑到才会被摘出 map，两者之间
+/// 有一段窗口期；这段时间里 `len()` 会把已经死掉的记录也算进去，确认框于是报出一个虚高
+/// 的数字（"还有 3 个会话在运行"而其实只剩 1 个）。
+///
+/// 锁中毒时返回 `Err` 而不是悄悄给个 0：0 会让确认框退化成"确定关闭 aTerm？"这条不含
+/// 任何警告的文案，而这恰恰是最需要警告的时刻。调用方（src/closeRequest.ts）接住这个
+/// `Err` 时会 console.warn 留痕，与本仓库对"静默吞异常"的一贯态度一致。
+pub fn count_alive(map: &Mutex<HashMap<String, Arc<PtyHandle>>>) -> Result<usize, String> {
+    let map = map.lock().map_err(|e| e.to_string())?;
+    Ok(map.values().filter(|h| h.is_alive()).count())
+}
+
+#[tauri::command]
+pub fn pty_alive_count(state: State<PtyManager>) -> Result<usize, String> {
+    count_alive(&state.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +134,68 @@ mod tests {
 
         let removed = map.lock().unwrap().remove("pty-1");
         if let Some(h) = removed { h.kill(); }
+    }
+
+    /// 造一个真实的、会一直活着的 PTY（`/bin/cat` 不读到 EOF 就不退出），交给
+    /// `count_alive` 数。不用 mock：`is_alive` 的真值来自 `pty_core::spawn` 起的那条
+    /// 等待线程，只有真实进程才能让"存活"这件事有意义。
+    fn spawn_living_pty() -> PtyHandle {
+        crate::pty_core::spawn(
+            "/bin/cat", &[], None, None, 80, 24,
+            Box::new(|_| {}), Box::new(|_| {}),
+        ).expect("测试用 pty 应能创建")
+    }
+
+    /// V3.3 §5.2：⌘Q 的确认框要报的是**全应用**存活会话数。空 map 必须给 0，
+    /// 否则应用刚启动、一个终端都没开时也会弹出"还有 N 个会话在运行"。
+    #[test]
+    fn count_alive_is_zero_when_no_ptys() {
+        let map: Mutex<HashMap<String, Arc<PtyHandle>>> = Mutex::new(HashMap::new());
+        assert_eq!(count_alive(&map), Ok(0));
+    }
+
+    /// 多个 PTY 一起数——这正是多窗口场景（每个窗口的 pty_spawn 都落进同一张 map）。
+    /// 会因为什么失败：如果实现只数第一个、或返回布尔/Option 之类的退化值。
+    #[test]
+    fn count_alive_counts_every_living_pty() {
+        let map: Mutex<HashMap<String, Arc<PtyHandle>>> = Mutex::new(HashMap::new());
+        {
+            let mut m = map.lock().unwrap();
+            m.insert("pty-1".to_string(), Arc::new(spawn_living_pty()));
+            m.insert("pty-2".to_string(), Arc::new(spawn_living_pty()));
+            m.insert("pty-3".to_string(), Arc::new(spawn_living_pty()));
+        }
+        assert_eq!(count_alive(&map), Ok(3));
+        for h in map.lock().unwrap().values() { h.kill(); }
+    }
+
+    /// 核心断言：已经死掉、但**还没被 on_exit 摘出 map** 的记录不算数。
+    ///
+    /// 会因为什么失败：如果实现写成 `map.len()`（少了 `is_alive()` 过滤），被 kill 掉的
+    /// 那个仍留在这张 map 里（这里的 on_exit 是空回调，与真实的 pty_spawn 不同——而真实
+    /// 路径上 on_exit 也只是**稍后**才跑，同样存在这段窗口期），计数会停在 2，确认框于是
+    /// 报出一个虚高的数字。
+    #[test]
+    fn count_alive_ignores_dead_ptys_still_present_in_the_map() {
+        let map: Mutex<HashMap<String, Arc<PtyHandle>>> = Mutex::new(HashMap::new());
+        {
+            let mut m = map.lock().unwrap();
+            m.insert("pty-alive".to_string(), Arc::new(spawn_living_pty()));
+            m.insert("pty-doomed".to_string(), Arc::new(spawn_living_pty()));
+        }
+        assert_eq!(count_alive(&map), Ok(2), "前置：两个都活着");
+
+        map.lock().unwrap().get("pty-doomed").unwrap().kill();
+        // kill 之后 alive 标志由 pty_core 那条 wait 线程置位，不是同步的——轮询到
+        // 超时，避免固定 sleep 在慢机器上偶发失败。
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if count_alive(&map) == Ok(1) { break; }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(count_alive(&map), Ok(1), "被 kill 的那个虽然还在 map 里，但不该被算进存活数");
+
+        for h in map.lock().unwrap().values() { h.kill(); }
     }
 
     /// 回归：会话被并发移除后，各命令的降级语义 —— write/resize/kill 返回 Err，

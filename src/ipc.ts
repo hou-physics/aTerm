@@ -69,7 +69,22 @@ export const ptyResize = (id: string, cols: number, rows: number) => {
 export const lastPtySize = (id: string): { cols: number; rows: number } | undefined => lastPtySizes.get(id)
 export const ptyKill = (id: string) => invoke<void>('pty_kill', { id })
 export const ptyIsAlive = (id: string) => invoke<boolean>('pty_is_alive', { id })
+/** 存活 PTY 的**全应用**总数（V3.3 §5.2）。⌘Q 是应用级退出，确认框必须报出所有窗口里
+ *  正在跑的会话数，而不是本窗口标签里那几个——只有 Rust 的 PtyManager 掌握全部。
+ *  失败时 reject（锁中毒），调用方 src/closeRequest.ts 负责降级并留痕。 */
+export const ptyAliveCount = () => invoke<number>('pty_alive_count')
 export const confirmExit = () => invoke<void>('confirm_exit')
+/** 强行销毁一个拖出来的终端窗口（`term-<n>`），**绕过 CloseRequested**。
+ *
+ *  两个调用方，都要的是"关掉这个窗口，且不触发它自己那套'杀掉我持有的 PTY'流程"：
+ *    - src/windowClose.ts：本窗口已经把自己持有的 PTY 处理完了，这一步只负责真的关掉；
+ *      走普通的关窗路径会再触发一次 CloseRequested，那是个关不掉的循环。
+ *    - src/windowHandoff.ts 的交接回滚：那个新窗口**可能已经接管成功**（只是 ack 丢
+ *      了），走普通的关窗路径会让它把刚接管过来的会话全部 kill 掉（Ruling 7）。
+ *
+ *  Rust 侧只接受 `term-` 前缀的 label（主窗口不可被这条路径销毁），失败时 reject 的是
+ *  可读的中文错误字符串。 */
+export const destroyTermWindow = (label: string) => invoke<void>('destroy_term_window', { label })
 export const hooksStatus = () => invoke<HooksStatus>('hooks_status')
 export const installHooks = () => invoke<InstallOutcome>('install_hooks')
 export const uninstallHooks = () => invoke<UninstallOutcome>('uninstall_hooks')
