@@ -137,24 +137,178 @@ async fn destroy_term_window(app: AppHandle, label: String) -> Result<(), String
     window.destroy().map_err(|e| format!("销毁窗口失败：{e}"))
 }
 
-/// macOS 专属：App 菜单里"设置…"项被点击（或按下 ⌘,）时，广播给前端打开设置浮层
-/// （`useSettings.getState().openSettings()`，见 src/App.tsx 附近对 `menu-open-settings`
-/// 的监听）。与 emit_close_requested 同一风格：用 `AppHandle::emit` 广播给所有
-/// webview，不针对某个具体窗口——前端 `listen('menu-open-settings', ...)` 本来就是
-/// 全局监听，不区分来源窗口。
+// ── 菜单事件的定向投递（V3.3 §5.4）────────────────────────────────────────────
+//
+// 菜单栏是**应用级**的一份（macOS 全局菜单栏），但它承载的两件事都是**窗口级**的：
+// "设置…"要打开的是某一个窗口里的设置浮层，「主题」三项要改的是某一个窗口的主题
+// store。V3.2 只有一个窗口，`app.emit` 广播与"发给那唯一的窗口"没有区别；多窗口
+// 之后广播意味着点一次"设置…"**每个**窗口都弹出设置浮层。
+//
+// 语义上正确的收件人是**当前聚焦的那个窗口**——菜单栏点击必然发生在应用处于活动
+// 状态时，用户心里想操作的就是眼前那个 key window。
+//
+// ## 取聚焦窗口的 API（已核实 tauri 2.11.5 源码，不凭印象）
+//
+// `Manager::get_focused_window()` 确实存在（`tauri-2.11.5/src/lib.rs:548-552`），
+// **但它带 `#[cfg(feature = "unstable")]`**，而本仓库 `Cargo.toml` 只开了
+// `features = ["devtools"]`——直接调用编译不过。为一个可以两行写出来的东西去开一个
+// 官方标注 unstable 的 feature 不划算（那个 feature 门的是整套多 webview API，
+// 语义可能随小版本变化）。
+//
+// 改用两个**未被 gate** 的公开 API 组合，逻辑与 `get_focused_window` 内部实现逐字
+// 相同（`tauri-2.11.5/src/manager/mod.rs:644-651`：遍历窗口表，`find` 第一个
+// `is_focused().unwrap_or(false)`）：
+//   - `Manager::webview_windows()`（`src/lib.rs:587`，无 cfg 门）
+//   - `WebviewWindow::is_focused()`（`src/webview/webview_window.rs:1744`，无 cfg 门）
+// macOS 上 `is_focused` 最终落到 tao 的 `ns_window.isKeyWindow()`
+// （`tao-0.35.3/src/platform_impl/macos/window.rs:698`）——菜单栏被拉开时 key window
+// 不变，因此菜单事件处理器里读到的正是用户眼前那个窗口。
+//
+// ## 两头都要做（Ruling 8）
+//
+// `emit_to(label, …)` **不是私有信道**：不传 options 的 JS `listen` 落成
+// `{ kind: 'Any' }`，而 `event/listener.rs:306-311` 的 `match_any_or_filter` 首项就是
+// `*target == EventTarget::Any`——Any 监听器无条件命中，label 过滤对它完全失效。
+// 本计划已因此吃过一次 Critical（交接载荷被兄弟窗口接管，杀掉正在跑的会话）。
+// 所以这里的每条菜单事件：
+//   - 发送端 `emit_to(label, …)`，**并且载荷里带上目标 label**（`target` 字段）；
+//   - 接收端（`src/menuEvents.ts`）`listen(…, { target: 本窗口 label })`，**并且**在
+//     handler 里再比对一次 `payload.target` 是不是自己。
+// 只做一头今天能跑，但唯一的防线就是那一个 option，退回 Any 监听即全盘失效。
+
+/// 一条菜单事件该投递给谁。
+///
+/// 存在的意义是把"emit 的目标"和"载荷里写的 target"绑成**同一个值的两个视图**——
+/// 两者若各算各的，就又多了一处可以悄悄漂移的地方，而漂移的表现是"接收端把发给自己
+/// 的事件当成别人的丢掉"，即菜单项静默失灵。
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MenuDelivery {
+    /// 定向投递给这一个窗口（当前聚焦的那个）。
+    ToWindow(String),
+    /// **降级**：取不到聚焦窗口时广播给所有窗口，载荷 `target` 为 `null`，接收端
+    /// 无条件接受。取不到聚焦窗口在 macOS 上是罕见但可能的（例如所有窗口都最小化
+    /// 而应用仍是活动应用），此时"每个窗口都弹设置浮层"虽然吵，但远好过"点了没反应"。
+    /// 这条降级只对这两条菜单事件成立：它们最坏的后果是多开一个浮层/多改一次主题，
+    /// 与 `window-close-requested` 那种"广播出去会让每个窗口杀掉自己的会话"的事件
+    /// 性质完全不同，不可类推。
+    BroadcastFallback,
+}
+
+#[cfg(target_os = "macos")]
+impl MenuDelivery {
+    /// 载荷里 `target` 字段的值。刻意由 `self` 派生而不是让调用方自己传一遍——
+    /// 见 `MenuDelivery` 上方注释。
+    fn payload_target(&self) -> Option<String> {
+        match self {
+            MenuDelivery::ToWindow(label) => Some(label.clone()),
+            MenuDelivery::BroadcastFallback => None,
+        }
+    }
+}
+
+/// 纯函数：由"当前聚焦窗口的 label"（`None` = 取不到）决定投递方式。
+/// 不接触任何 Tauri 对象，因此可以直接单测（与 `settings_insertion_index`/
+/// `theme_mode_checked_states` 同一做法）。
+#[cfg(target_os = "macos")]
+fn menu_event_delivery(focused_label: Option<String>) -> MenuDelivery {
+    match focused_label {
+        Some(label) => MenuDelivery::ToWindow(label),
+        None => MenuDelivery::BroadcastFallback,
+    }
+}
+
+/// 当前聚焦窗口的 label。取不到返回 `None`（见 `menu_event_delivery` 的降级）。
+/// 实现依据见本节顶部注释——等价于 unstable 的 `Manager::get_focused_window()`。
+#[cfg(target_os = "macos")]
+fn focused_window_label(app_handle: &AppHandle) -> Option<String> {
+    app_handle
+        .webview_windows()
+        .into_iter()
+        .find(|(_, window)| window.is_focused().unwrap_or(false))
+        .map(|(label, _)| label)
+}
+
+/// `menu-open-settings` 的载荷。`target` 见 `MenuDelivery::payload_target`。
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, serde::Serialize)]
+struct MenuOpenSettingsPayload {
+    target: Option<String>,
+}
+
+/// `menu-theme-mode` 的载荷。V3.3 之前这个事件的载荷是裸的模式字符串，现在必须多带
+/// 一个 `target`（Ruling 8 的接收端二次校验要读它），因此升格成对象。
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, serde::Serialize)]
+struct MenuThemeModePayload {
+    target: Option<String>,
+    mode: String,
+}
+
+#[cfg(target_os = "macos")]
+fn open_settings_payload(delivery: &MenuDelivery) -> MenuOpenSettingsPayload {
+    MenuOpenSettingsPayload {
+        target: delivery.payload_target(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn theme_mode_payload(delivery: &MenuDelivery, mode: &str) -> MenuThemeModePayload {
+    MenuThemeModePayload {
+        target: delivery.payload_target(),
+        mode: mode.to_string(),
+    }
+}
+
+/// 按 `delivery` 把一条菜单事件发出去。降级为广播时打警告——与 src/menuEvents.ts
+/// 顶部 `syncThemeModeToMenu` 那条注释同一理由：本仓库已经因为"失败被静默吞掉、
+/// 运行期零信号"付出过代价（`core:window:allow-set-size` 那次），降级同样要留痕。
+#[cfg(target_os = "macos")]
+fn dispatch_menu_event<P: serde::Serialize + Clone>(
+    app_handle: &AppHandle,
+    delivery: &MenuDelivery,
+    event: &str,
+    payload: P,
+) {
+    match delivery {
+        MenuDelivery::ToWindow(label) => {
+            let _ = app_handle.emit_to(label.as_str(), event, payload);
+        }
+        MenuDelivery::BroadcastFallback => {
+            eprintln!(
+                "警告：取不到聚焦窗口，菜单事件 {event} 降级为广播，所有窗口都会响应这一次点击"
+            );
+            let _ = app_handle.emit(event, payload);
+        }
+    }
+}
+
+/// macOS 专属：App 菜单里"设置…"项被点击（或按下 ⌘,）时，通知**当前聚焦的那个窗口**
+/// 打开设置浮层（`useSettings.getState().openSettings()`，见 src/menuEvents.ts 对
+/// `menu-open-settings` 的监听）。
+///
+/// V3.3 起由 `AppHandle::emit` 广播改成定向——广播会让多窗口下点一次"设置…"每个
+/// 窗口各弹一个浮层。定向的两头做法与降级见本节顶部注释。
 #[cfg(target_os = "macos")]
 fn emit_open_settings(app_handle: &AppHandle) {
-    let _ = app_handle.emit("menu-open-settings", ());
+    let delivery = menu_event_delivery(focused_window_label(app_handle));
+    let payload = open_settings_payload(&delivery);
+    dispatch_menu_event(app_handle, &delivery, "menu-open-settings", payload);
 }
 
 /// macOS 专属：菜单栏「主题」子菜单里三项之一被点击时，把选中的模式字符串
-/// （"default" / "dual" / "single"）广播给前端（见 src/menuEvents.ts 对
-/// `menu-theme-mode` 的监听：校验 payload 合法后调用 `useTheme.getState().setMode`）。
-/// 与 emit_open_settings/emit_close_requested 同一风格：`AppHandle::emit` 广播给
-/// 所有 webview。
+/// （"default" / "dual" / "single"）发给**当前聚焦的那个窗口**（见 src/menuEvents.ts
+/// 对 `menu-theme-mode` 的监听：校验 target 与 payload 合法后调用
+/// `useTheme.getState().setMode`）。
+///
+/// 定向而不是广播的理由与"设置…"相同，但这里还多一层：主题变更本身会由
+/// `src/themeSync.ts` 广播给其它窗口（§5.5），如果菜单事件自己也广播，N 个窗口会各自
+/// 改一遍 store 再各自广播一遍，同一次点击放大成 N² 条事件。
 #[cfg(target_os = "macos")]
 fn emit_theme_mode(app_handle: &AppHandle, mode: &str) {
-    let _ = app_handle.emit("menu-theme-mode", mode);
+    let delivery = menu_event_delivery(focused_window_label(app_handle));
+    let payload = theme_mode_payload(&delivery, mode);
+    dispatch_menu_event(app_handle, &delivery, "menu-theme-mode", payload);
 }
 
 /// 拖出标签页时给新窗口分配的自增序号——`new_term_window_label` 用它拼出 `term-<n>`。
@@ -1198,5 +1352,88 @@ mod tests {
             "除了 label/x/y，其余字段（含 min_width/min_height/resizable/decorations）\
              必须原样继承自主窗口配置"
         );
+    }
+
+    // ── 菜单事件的定向投递（V3.3 §5.4）─────────────────────────────────────
+    //
+    // 下面所有用到窗口 label 的地方一律用 "term-9"，**刻意不用 "main"**：这是
+    // Ruling 14 记下的教训——上一轮把测试替身的 label 设成和断言目标同一个值
+    // （都是 "main"），于是"目标取自聚焦窗口"这条断言变成恒真，把实现改成写死
+    // 常量照样全绿。用一个拖出来的窗口 label，"写死 main" 这个变异才会转红。
+
+    #[test]
+    fn menu_event_goes_to_the_focused_window() {
+        // 会因为什么失败：如果实现忽略传入的聚焦 label、写死投递给 MAIN_WINDOW_LABEL
+        // （或任何常量），这里会得到 ToWindow("main") 而不是 ToWindow("term-9")——
+        // 而那正是"在拖出窗口里按 ⌘, 却在主窗口弹出设置浮层"这个缺陷。
+        assert_eq!(
+            menu_event_delivery(Some("term-9".to_string())),
+            MenuDelivery::ToWindow("term-9".to_string())
+        );
+    }
+
+    #[test]
+    fn menu_event_falls_back_to_broadcast_when_no_window_is_focused() {
+        // 会因为什么失败：如果实现在取不到聚焦窗口时直接放弃（不 emit），菜单项会
+        // 变成"点了没反应"；如果它硬塞一个 ToWindow(某个猜的 label)，事件会打在空处。
+        // 降级必须显式是广播。
+        assert_eq!(menu_event_delivery(None), MenuDelivery::BroadcastFallback);
+    }
+
+    #[test]
+    fn payload_target_equals_the_delivery_target() {
+        // Ruling 8 的发送端那一半：载荷里必须带上目标 label，且它必须**就是** emit_to
+        // 的那个 label。会因为什么失败：如果 payload_target 返回 None（"反正 emit_to
+        // 已经定向了"），接收端的二次校验就没有可比对的东西，Ruling 8 的两层防护塌成
+        // 一层；如果它返回别的 label，接收端会把发给自己的事件当成别人的丢掉——
+        // 菜单项静默失灵。
+        let delivery = MenuDelivery::ToWindow("term-9".to_string());
+        assert_eq!(delivery.payload_target(), Some("term-9".to_string()));
+    }
+
+    #[test]
+    fn broadcast_fallback_payload_target_is_none() {
+        // 降级广播时载荷里不能写任何具体 label——写了就等于"发给所有人、但只有那一个
+        // 认领"，其余窗口全部丢弃，降级失去意义（等价于什么都没发）。
+        assert_eq!(MenuDelivery::BroadcastFallback.payload_target(), None);
+    }
+
+    #[test]
+    fn open_settings_payload_wire_shape_is_target_only() {
+        // 钉死前端 src/menuEvents.ts 实际读取的字段名与 JSON 形状。会因为什么失败：
+        // 字段被改名（例如 target -> label/toLabel），前端读到 undefined，二次校验
+        // 退化成"无条件接受"，多窗口下又变回每个窗口都弹设置浮层。
+        let delivery = MenuDelivery::ToWindow("term-9".to_string());
+        let json = serde_json::to_string(&open_settings_payload(&delivery)).unwrap();
+        assert_eq!(json, r#"{"target":"term-9"}"#);
+    }
+
+    #[test]
+    fn open_settings_payload_wire_shape_when_broadcasting() {
+        let json =
+            serde_json::to_string(&open_settings_payload(&MenuDelivery::BroadcastFallback)).unwrap();
+        assert_eq!(json, r#"{"target":null}"#);
+    }
+
+    #[test]
+    fn theme_mode_payload_carries_both_target_and_mode() {
+        // 前端要同时读这两个字段：target 决定收不收，mode 决定切到哪一档。会因为什么
+        // 失败：V3.3 之前这个事件的载荷是**裸字符串**，若实现忘了升格成对象（或者
+        // 只加了 target 却把 mode 丢了），前端 isThemeMode(payload.mode) 校验不过，
+        // 菜单栏切主题彻底失灵。
+        let delivery = MenuDelivery::ToWindow("term-9".to_string());
+        let json = serde_json::to_string(&theme_mode_payload(&delivery, "dual")).unwrap();
+        assert_eq!(json, r#"{"target":"term-9","mode":"dual"}"#);
+    }
+
+    #[test]
+    fn theme_mode_payload_passes_the_mode_through_verbatim() {
+        // mode 必须原样透传，不能被"顺手规范化"。三档逐个过一遍：这三个字符串与前端
+        // store/theme.ts 的 isThemeMode 是同一份契约，任何一个对不上，那一档菜单项
+        // 就会被前端当成非法 payload 静默忽略。
+        for mode in ["default", "dual", "single"] {
+            let payload = theme_mode_payload(&MenuDelivery::ToWindow("term-9".to_string()), mode);
+            assert_eq!(payload.mode, mode);
+        }
     }
 }

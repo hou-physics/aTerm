@@ -37,6 +37,19 @@ type ThemeState = {
   setLightThemeId(id: string): void
   setDarkThemeId(id: string): void
   setSingleThemeId(id: string): void
+  /** 把另一个窗口广播过来的主题状态整份应用到本窗口（V3.3 §5.5，唯一调用方是
+   *  src/themeSync.ts 的 applyRemoteThemeChange）。见下方实现处的注释。 */
+  applyRemoteThemeState(p: RemoteThemeState): void
+}
+
+/** 另一个窗口广播过来的主题状态（`theme-changed` 载荷里除 fromLabel 外的部分）。
+ *  字段全部按 `unknown` 之外的宽松类型声明是刻意的：它来自 IPC，编译期类型不构成
+ *  任何运行期保证，`applyRemoteThemeState` 会逐个重新校验。 */
+export type RemoteThemeState = {
+  mode: string
+  lightThemeId: string
+  darkThemeId: string
+  singleThemeId: string
 }
 
 const MODE_KEY = 'aterm-theme-mode'
@@ -200,6 +213,33 @@ export const useTheme = create<ThemeState>((set, get) => ({
     const activeTheme = resolveActiveTheme(mode, lightThemeId, darkThemeId, valid, systemPrefersDark)
     applyActiveTheme(activeTheme)
     set({ singleThemeId: valid, activeTheme })
+  },
+  // 主题跨窗口同步的接管端（V3.3 §5.5）。为什么不能用上面四个 setter 拼出来：
+  //   1. 它们各改一个字段、各自 set() 一次，四次连调会连续触发四次订阅回调 + 四次
+  //      applyUiVars，中间还会经过 (新 mode, 旧 themeId) 这类**不存在于任何窗口**的
+  //      中间态——那正是用户能看见的闪烁；
+  //   2. themeSync 的"重新应用期间不得再次广播"闸门包在一次调用外面，四次 set 意味着
+  //      四段各自需要被闸门覆盖的窗口。整份原子替换让那个闸门只需要包住一次调用。
+  //
+  // 载荷来自 IPC，编译期类型不构成运行期保证，因此逐个字段用与本地 setter **同一份**
+  // 校验（validThemeId / isThemeMode）重新过一遍——不是不信任兄弟窗口，而是不想让
+  // "远端来的值"成为唯一一条能把非法 id 写进 store 的路径。
+  //
+  // systemPrefersDark **不取自载荷**：那是本窗口自己的系统外观状态（虽然同一台机器上
+  // 各窗口必然相同），由本窗口的 matchMedia 监听维护，主题同步无权覆盖它。
+  //
+  // 仍然 persistAll：Tauri 各窗口同源、localStorage 本就共享，发送端已经写过一次，这次
+  // 写的是同样的值、幂等；留着是因为"共享"这件事是运行环境的性质而不是本模块的保证，
+  // 而少写一次的收益是零。
+  applyRemoteThemeState: (p) => {
+    const mode = isThemeMode(p.mode) ? p.mode : get().mode
+    const lightThemeId = validThemeId(p.lightThemeId, 'light', DEFAULT_LIGHT_THEME_ID)
+    const darkThemeId = validThemeId(p.darkThemeId, 'dark', DEFAULT_DARK_THEME_ID)
+    const singleThemeId = validThemeId(p.singleThemeId, undefined, DEFAULT_LIGHT_THEME_ID)
+    persistAll({ mode, lightThemeId, darkThemeId, singleThemeId })
+    const activeTheme = resolveActiveTheme(mode, lightThemeId, darkThemeId, singleThemeId, get().systemPrefersDark)
+    applyActiveTheme(activeTheme)
+    set({ mode, lightThemeId, darkThemeId, singleThemeId, activeTheme })
   },
 }))
 
