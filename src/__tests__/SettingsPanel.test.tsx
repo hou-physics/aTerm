@@ -11,13 +11,12 @@ import { useSettings } from '../store/settings'
 const flushPointerDownGuard = () => new Promise((r) => setTimeout(r, 0))
 
 describe('SettingsPanel', () => {
-  beforeEach(() => { useSettings.setState({ open: false }) })
-  // 注意：这里刻意不像 open 那样把 activeCategory 也摁回固定值。下面"分类导航"
-  // describe 块里「默认打开时选中『主题』」那条测试要验证的是 store 真实默认值在
-  // 组件里生效——如果这里强制重置成 'theme'，就算 store 默认值改错了这条测试也
-  // 测不出来（死断言，变异验证里实际跑出过这个假阳性）。它必须是本文件里第一个
-  // 触碰 activeCategory 的用例（下面 it/describe 的声明顺序保证了这点）；后面会
-  // 改动 activeCategory 的用例都自己在测试体内显式 setState，不依赖 beforeEach。
+  // activeCategory 也一起重置：本文件（组件层）要测的是"渲染的是 activeCategory
+  // 指向的那个分区"，不是 store 默认值本身（那是 settingsStore.test.ts 的活，用
+  // getInitialState() 测，见该文件 R1 修复注释）。下面用到 activeCategory 的用例
+  // 都会自己再显式 setState 一次起点分类，不依赖这里的重置值，纯粹是防止上一条
+  // 用例改过的分类泄漏到下一条。
+  beforeEach(() => { useSettings.setState({ open: false, activeCategory: 'theme' }) })
 
   it('关闭时不渲染任何内容', () => {
     const { container } = render(<SettingsPanel />)
@@ -114,11 +113,17 @@ describe('SettingsPanel', () => {
   })
 
   // v3-2b：左侧分类列表 + 右侧详情。用户明确否掉了"四个分区全部平铺展开"，这里
-  // 钉住三件事——默认选中「主题」、切换分类时未选中的分区完全不挂载（不是
-  // display:none）、关闭再打开保留上次选的分类——以及 aria-current 的选中态标记。
+  // 钉住三件事——渲染的是 activeCategory 指向的那一个分区、切换分类时未选中的
+  // 分区完全不挂载（不是 display:none）、关闭再打开保留上次选的分类——以及
+  // aria-current 的选中态标记。「activeCategory 默认值是 theme」本身不是这个文件
+  // 的活，那条断言归 settingsStore.test.ts（用 getInitialState() 测，不受
+  // beforeEach/顺序影响，见该文件 R1 修复注释）。
   describe('分类导航（左侧列表 + 右侧详情）', () => {
-    it('默认打开时选中「主题」，右侧渲染主题分区', () => {
-      useSettings.setState({ open: true })
+    it('activeCategory 为「主题」时，右侧只渲染主题分区', () => {
+      // 显式钉住 activeCategory，不依赖它恰好等于 store 的默认值——这条测的是
+      // "组件根据 activeCategory 渲染对应分区"这件事本身，跟 activeCategory 的
+      // 默认值是什么无关（那是上面提到的 store 测试的职责）。
+      useSettings.setState({ open: true, activeCategory: 'theme' })
       const { container } = render(<SettingsPanel />)
       expect(container.querySelector('.appearance-section')).not.toBeNull()
       // 其余三个分区此时不应该被挂载。
@@ -128,8 +133,7 @@ describe('SettingsPanel', () => {
     })
 
     it('点「终端」→ 右侧变成终端分区，且主题分区不再存在于 DOM 中', () => {
-      // 显式钉住起点分类——不依赖上一条用例是否碰过 activeCategory（上一条用例
-      // 刻意不重置它，见 describe 顶部注释），这条测试自己的前提自己负责。
+      // 显式钉住起点分类，自己的前提自己负责，不依赖 beforeEach 的重置值。
       useSettings.setState({ open: true, activeCategory: 'theme' })
       const { container } = render(<SettingsPanel />)
       // 起点：默认分类「主题」的分区确实在 DOM 里，与下面点击之后的状态不同——
