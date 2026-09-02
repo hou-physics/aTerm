@@ -100,3 +100,43 @@ describe('ptyBuffer.attachPty', () => {
     expect(() => handlers['pty-exit']({ payload: { id: 'ghost-2', code: 1 } })).not.toThrow()
   })
 })
+
+// 跨窗口交接（V3.3 §4.2 第 5 步，见 src/windowHandoff.ts）：新窗口把旧窗口序列化出来
+// 的滚屏交给 seedScrollback，随后 TerminalView 挂载时由既有的 attachPty 回放路径一并
+// 写进终端——不需要在受保护的 TerminalView 里另开一个"交接专用"写入口。
+describe('ptyBuffer.seedScrollback（跨窗口交接的滚屏落地）', () => {
+  it('滚屏排在交接期间已经攒下的实时输出**之前**：attachPty 回放的第一批是历史，不是新输出', async () => {
+    const { attachPty, seedScrollback } = await freshModule()
+
+    // 新窗口的 pty-output 监听在交接开始前就已就绪，这一段是交接期间到达的实时输出。
+    // 载荷经 base64 传输（b64ToBytes），这里用 ASCII 字面量——btoa 不接受非 Latin-1。
+    handlers['pty-output']({ payload: { id: 'H', data: toB64('live-during-handoff') } })
+    seedScrollback('H', 'scrollback-history')
+
+    const s = trackedSink()
+    attachPty('H', s.sink, () => {})
+    const decoder = new TextDecoder()
+    expect(s.calls.map((b) => decoder.decode(b))).toEqual(['scrollback-history', 'live-during-handoff'])
+  })
+
+  it('空字符串不入队：没有滚屏可搬时不该在缓冲里塞一个零字节块', async () => {
+    const { attachPty, seedScrollback } = await freshModule()
+
+    seedScrollback('E', '')
+
+    const s = trackedSink()
+    attachPty('E', s.sink, () => {})
+    expect(s.calls).toHaveLength(0)
+  })
+
+  it('该 PTY 已经有接收者时直接写给它，不塞进一个再也没人取走的缓冲', async () => {
+    const { attachPty, seedScrollback } = await freshModule()
+
+    const s = trackedSink()
+    attachPty('L', s.sink, () => {})
+    seedScrollback('L', 'scrollback-history')
+
+    const decoder = new TextDecoder()
+    expect(s.calls.map((b) => decoder.decode(b))).toEqual(['scrollback-history'])
+  })
+})

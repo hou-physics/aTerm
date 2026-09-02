@@ -42,8 +42,14 @@ vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 vi.mock('@tauri-apps/api/webview', () => ({
   getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
 }))
+// Task 4：TabBar 在 pointerup 命中拖出时调 windowHandoff 的 tearOutTab（真实实现会去
+// 建原生窗口、走多步事件握手，jsdom 里既跑不动也与本文件无关）。整个模块替身掉——
+// App.tsx 也顶层 side-effect 导入它，一并覆盖，不会有真实的 Tauri 事件注册发生。
+// tearOutTab 自身的六步与超时回滚见 windowHandoff.test.ts。
+vi.mock('../windowHandoff', () => ({ tearOutTab: vi.fn(async () => true) }))
 
 import App from '../App'
+import { tearOutTab } from '../windowHandoff'
 import { attachDragSafetyNet } from '../dragSafetyNet'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
@@ -366,20 +372,30 @@ describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () 
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b', 'tab-c'])
   })
 
-  it('pointerup 命中拖出：只打印占位日志，不产生任何状态变化（真正的建窗+交接由 Task 3/4 实现，见 task-2-brief.md 的裁决）', async () => {
+  // Task 4 起，命中拖出不再只打占位日志，而是发起真正的交接握手（src/windowHandoff.ts
+  // 的 tearOutTab，六步 + 超时回滚在 windowHandoff.test.ts 里单独覆盖）。这里验的是
+  // TabBar 这一侧的接线：调的是不是它、参数对不对、以及**标签在 pointerup 这一刻绝不
+  // 能被就地移除**——移除只允许发生在新窗口回 ack 之后（设计文档 §4.2 第 6 步），那是
+  // tearOutTab 内部的事。
+  it('pointerup 命中拖出：发起交接握手（tearOutTab），并且不在此刻就移除标签', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
     await renderApp()
     mockPaneRects({ 'pane-a': { left: 0, width: 400, height: 100 } })
     const b = tabEl('B')
     const before = useTabs.getState().tabs
-    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
 
-    // x=-50 落在窗口左边界之外。
-    await drag(b, { x: 500, y: 10 }, { x: -50, y: 10 })
+    // x=-50 落在窗口左边界之外；screenX/screenY 是新窗口该出现的屏幕坐标（与
+    // clientX/clientY 是两套坐标系，TabBar 必须传前者给 create_term_window）。
+    // 捕获与冒泡阶段必须在同一个 act() 里——见本文件顶部与 CLAUDE.md 的说明。
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 500, clientY: 10, screenX: 700, screenY: 210, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: -50, clientY: 10, screenX: 150, screenY: 210, pointerId: 1 })
+      fireEvent.pointerUp(b, { clientX: -50, clientY: 10, screenX: 150, screenY: 210, pointerId: 1 })
+    })
 
-    expect(infoSpy).toHaveBeenCalledTimes(1)
-    expect(infoSpy.mock.calls[0][0]).toBe('[tabTearOut] pointerup outside window bounds — handoff not yet implemented (Task 3/4)')
-    expect(useTabs.getState().tabs).toBe(before) // 连引用都没变——没有任何标签/窗格状态被动过，也没有调用任何建窗命令
+    expect(tearOutTab).toHaveBeenCalledTimes(1)
+    expect(tearOutTab).toHaveBeenCalledWith('tab-b', { x: 150, y: 210 })
+    expect(useTabs.getState().tabs).toBe(before) // 连引用都没变——标签此刻一个字节都没被动过
     expect(useDnd.getState().tearOut).toBe(false) // pointerup 已经走 endDrag()，字段随其它落点状态一起清空
   })
 

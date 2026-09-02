@@ -19,6 +19,7 @@ import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { type Tab, useTabs } from '../store/tabs'
 import { shouldTearOut } from '../tabTearOut'
+import { tearOutTab } from '../windowHandoff'
 import { ContextMenu } from './ContextMenu'
 import { type SessionPick, SessionPicker } from './SessionPicker'
 
@@ -395,15 +396,19 @@ export function TabBar() {
     if (!drag || !drag.dragging) return
     suppressClickRef.current = true
     if (tearOut) {
-      // V3.3 Task 2 裁决（task-2-brief.md）：本任务只做拖出判定，命中时先打一条占位
-      // 日志，不调用 Task 1 的建窗命令、不写任何交接握手逻辑——真正的新建窗口 + 交接
-      // 由 Task 3/4 接手，把"判定"（同步、纯函数、可单测）和"交接"（异步、多步握手、
-      // 有超时/回滚）分开，出问题时更容易定位是哪一层的锅。
-      console.info('[tabTearOut] pointerup outside window bounds — handoff not yet implemented (Task 3/4)', {
-        tabId: drag.tabId,
-        clientX: e.clientX,
-        clientY: e.clientY,
-      })
+      // V3.3 Task 4：Task 2 留下的 console.info 占位换成真实的交接握手（六步 + 超时
+      // 回滚全在 src/windowHandoff.ts 里，这里只负责"发起"这一下）。
+      //
+      // 传 screenX/screenY 而不是 clientX/clientY：create_term_window 要的是新窗口
+      // 在**屏幕**坐标系里的左上角位置，clientX/clientY 是相对本窗口视口的（上面
+      // shouldTearOut 判定用的正是后者，两者在这一段里同时出现，别搞混）。单位是
+      // 逻辑（CSS）像素，**不要**再乘 devicePixelRatio——坐标契约的三处源码核实见
+      // src-tauri/src/lib.rs 里 create_term_window 顶部的注释。
+      //
+      // 不 await：整个握手是异步的（建窗 + 两次带超时的等待），而 pointerup 这个
+      // 处理器必须立刻返回让拖拽手势正常收尾。tearOutTab 自己吞掉全部失败、失败时
+      // 保留标签并给出轻提示，不会有未处理的 rejection。
+      void tearOutTab(drag.tabId, { x: e.screenX, y: e.screenY })
       return
     }
     if (tabBarIndex !== null) {

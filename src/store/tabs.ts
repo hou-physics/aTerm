@@ -142,7 +142,16 @@ type TabsState = {
   focusPane(tabId: string, paneId: string): void
   setPaneWidths(tabId: string, widths: number[]): void
   reconcilePanes(projects: ProjectInfo[], aliases: Record<string, string>): void
+  adoptTerminalTab(o: { panes: AdoptedPane[]; activePaneIndex: number }): string | null
+  removeTabKeepingPty(id: string): boolean
 }
+
+// 跨窗口交接（V3.3 设计文档 §4.2，见 src/windowHandoff.ts）过来的窗格描述：与 Pane
+// 的区别只有一个——没有 id。窗格 id 是每个窗口自己的模块级计数器发的（nextPane），
+// 跨窗口原样搬过来会和新窗口自己已有的 id 撞车，所以由 adoptTerminalTab 在本窗口
+// 重新分配。ptyId 可缺省：⌘D 新建后还没选定会话的空槽窗格（见 Pane 类型注释）本来
+// 就没有 PTY，交接时应当原样保留成空槽，而不是被悄悄丢掉。
+export type AdoptedPane = Omit<Pane, 'id'>
 
 export const useTabs = create<TabsState>((set, get) => ({
   tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }],
@@ -598,5 +607,61 @@ export const useTabs = create<TabsState>((set, get) => ({
       })
       return changed ? { tabs } : {}
     })
+  },
+  // 跨窗口交接的接收端（V3.3 设计文档 §4.2 第 5 步，调用方是 src/windowHandoff.ts
+  // 里新窗口那侧的 handleHandoff）：按交接载荷建一个终端标签，窗格直接绑定**已经在
+  // 跑的** ptyId，绝不 ptySpawn——那会凭空多起一个 claude 进程，而原来那个还挂在
+  // 后台没人管。这是它和 openTerminal 唯一的、也是最关键的区别，别把两者合并。
+  //
+  // 窗格 id 在这里重新分配（见 AdoptedPane 的注释）；其余字段（ptyId/title/
+  // threadKey/dirName/rootKey/sessionId）原样搬过来，身份因此完整跟着标签走——
+  // 侧边栏聚焦、对话面板、底栏模型、reconcilePanes 对账在新窗口里立刻就能认出它。
+  //
+  // panes 为空时不建标签（返回 null）：空的终端标签在这个应用里没有任何合法来源，
+  // 建出来只会是一个点不动的空壳；调用方据此判定这次交接无效、不回 ack，旧窗口
+  // 那边就会走超时回滚，标签留在原处——比在新窗口里留个空壳、旧窗口又把标签删掉
+  // 要好得多（那正是本任务最不能出现的"两个窗口都没有这个标签"）。
+  adoptTerminalTab: ({ panes, activePaneIndex }) => {
+    if (panes.length === 0) return null
+    const built: Pane[] = panes.map((p) => ({ ...p, id: `pane-${nextPane++}` }))
+    const idx = Math.max(0, Math.min(activePaneIndex, built.length - 1))
+    const id = `tab-${nextTab++}`
+    const tab: Tab = {
+      id,
+      kind: 'term',
+      // 标题就地按窗格重新推导，不由交接载荷携带："标签标题 = deriveTabTitle(窗格)"
+      // 在本文件里是所有路径共同遵守的不变式，旧窗口那份标题本身也是这么算出来的，
+      // 搬一个必然相等的值过来只会多一个可以漂移的真相来源（而且它在这里恒不会被
+      // 用到：panes 非空已在上面保证，deriveTabTitle 的 fallback 分支够不着）。
+      title: deriveTabTitle(built, built[0].title),
+      panes: built,
+      activePaneId: built[idx].id,
+      // 与 insertPaneAtIndex/movePanesToTab 同一惯例：多窗格才需要显式宽度，单窗格
+      // 保持 undefined（TabPanes.tsx 对单窗格本就不读这个字段）。
+      paneWidths: built.length > 1 ? equalPaneWidths(built.length) : undefined,
+    }
+    set((s) => ({ tabs: [...s.tabs, tab], activeId: id }))
+    return id
+  },
+  // 跨窗口交接的发送端收尾（V3.3 设计文档 §4.2 第 6 步）：把标签从**本窗口**移除，
+  // 但**绝不 kill 它的 PTY**——那些会话此刻已经被新窗口接管、正在继续跑，kill 掉就是
+  // 直接杀死用户正在运行的 claude 进程。
+  //
+  // 因此这里不能复用 closeTab：它的整个职责就是"确认后终止 PTY"，语义正好相反。与
+  // movePanesToTab 移除源标签那一步是同一类操作（窗格只是换了个持有者，没有任何 PTY
+  // 被终止，也不该弹确认），区别只在于新的持有者在另一个窗口里、不在本窗口的 store。
+  //
+  // 调用方（windowHandoff.ts）必须在**收到新窗口的接管确认之后**才调这个方法，顺序
+  // 反了会在接管失败时凭空吃掉用户一个正在运行的会话。activeId 的兜底与 closeTab
+  // 逐字相同（主页标签恒存在，tabs 不可能为空）。
+  removeTabKeepingPty: (id) => {
+    const tab = get().tabs.find((t) => t.id === id)
+    if (!tab || tab.kind === 'home') return false
+    set((s) => {
+      const tabs = s.tabs.filter((t) => t.id !== id)
+      const activeId = s.activeId === id ? tabs[tabs.length - 1].id : s.activeId
+      return { tabs, activeId }
+    })
+    return true
   },
 }))

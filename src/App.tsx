@@ -2,6 +2,12 @@ import './ptyBuffer'
 import './closeRequest'
 import './menuEvents'
 import './contextMenu'
+// 新窗口（标签被拖出时由 create_term_window 建出来的 term-<n> 窗口）的接管入口：
+// 与上面几个顶层 side-effect 导入同一模式——模块加载时就挂好接管监听、随后 emit
+// 就绪事件，绝不等某个组件挂载（旧窗口那边已经在等就绪事件了，晚一步就是干等到
+// 超时）。主窗口导入它是空操作：isTornOutWindow() 按 label 前缀判定，main 直接
+// 早退，既不监听也不发就绪事件（见 src/windowHandoff.ts）。
+import './windowHandoff'
 import './App.css'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { newTerminal } from './actions'
