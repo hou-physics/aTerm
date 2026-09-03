@@ -335,6 +335,31 @@ describe('ptyBuffer：待回放缓冲的字节上限（多窗口下别的窗口�
     expect(s.calls.map(decode)).toEqual(['quiet-neighbour'])
   })
 
+  // M-2（终审定向复审补）：detach 恢复走的是「整个 Pending 记录原样放回」，而不是重新
+  // 包一个 { chunks, pinned: 0, liveBytes: 0 }。复审把它改成后者时，本文件当时的 21 条
+  // 断言**全部照常通过**——因为没有任何一条同时用到「seed 过的滚屏」+「detach 恢复」+
+  // 「恢复之后再淘汰」这三件事。pinned 一旦被归零，恢复后的第一次淘汰就会把交接滚屏
+  // 当成普通实时块删掉，而那正是这块缓冲存在的目的。
+  it('detach 恢复不会丢掉 pinned 标记：seed 过滚屏、detach 之后再灌爆上限，滚屏仍在', async () => {
+    const { attachPty, seedScrollback, MAX_BUFFERED_BYTES } = await freshModule()
+
+    seedScrollback('P', 'scrollback-history')
+
+    // 挂上又立刻 detach（未收到任何实时事件）——Pending 应被原样放回，pinned 不得归零
+    const s1 = trackedSink()
+    attachPty('P', s1.sink, () => {})()
+
+    // 恢复之后灌爆上限：淘汰只应吃掉实时块，pinned 的滚屏必须留住
+    const block = 'x'.repeat(64 * 1024)
+    for (let i = 0; i < Math.ceil(MAX_BUFFERED_BYTES / block.length) + 4; i++) {
+      handlers['pty-output']({ payload: { id: 'P', data: toB64(block) } })
+    }
+
+    const s2 = trackedSink()
+    attachPty('P', s2.sink, () => {})
+    expect(s2.calls[0]).toEqual(new TextEncoder().encode('scrollback-history'))
+  })
+
   it('单独一块就超过上限时也至少保留它，不会退化成空回放', async () => {
     const { attachPty, MAX_BUFFERED_BYTES } = await freshModule()
 
