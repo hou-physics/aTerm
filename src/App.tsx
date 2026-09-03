@@ -5,6 +5,10 @@ import './menuEvents'
 // side-effect 导入——它要在用户有机会点主题之前就挂好监听，而且订阅的是 store 而不是
 // 某个组件的生命周期。单窗口下是无害的空转（自己发的广播被 fromLabel 早退挡掉）。
 import './themeSync'
+// 用户已保存数据（别名 / 隐藏的项目 / 移除的会话 / 总览方块位置）的跨窗口同步
+// （V3.3 §5.5 的同一模式）。同样是模块顶层 side-effect 导入：它要在用户有机会改名之前
+// 就挂好监听与 persist 钩子。单窗口下是无害的空转（自己发的广播被 fromLabel 早退挡掉）。
+import './userDataSync'
 import './contextMenu'
 // 新窗口（标签被拖出时由 create_term_window 建出来的 term-<n> 窗口）的接管入口：
 // 与上面几个顶层 side-effect 导入同一模式——模块加载时就挂好接管监听、随后 emit

@@ -236,3 +236,120 @@ describe('ptyBuffer.ignorePtyOutput（已交接出去的 PTY）', () => {
     expect(s.calls.map((b) => new TextDecoder().decode(b))).toEqual(['back-again'])
   })
 })
+
+// V3.3 全分支终审 Ruling 19 / I1：pty-output 是全应用广播，**每个**窗口都会收到
+// **所有**窗口的 PTY 输出。在窗口 Y 里，窗口 X 的 ptyId 既没有 sink 也不在 ignored，
+// 于是每一条都进 buffers，而 Y 永远不会 attachPty 那个 id——没有任何路径清空它。
+// 两个窗口各自把对方每个 PTY 的输出永久攒在 JS 堆里，几小时后 WKWebView OOM。
+//
+// 下面这组用例钉的是「有界」这条性质本身，不是某个具体上限值。
+describe('ptyBuffer：待回放缓冲的字节上限（多窗口下别的窗口的 PTY 永远不会被认领）', () => {
+  const CHUNK_BYTES = 64 * 1024
+  /** 每块 64 KiB 的可区分内容：前 16 字节是序号标签，其余填充。 */
+  const chunkLabel = (i: number) => `chunk-${String(i).padStart(9, '0')}`
+  const chunkText = (i: number) => chunkLabel(i) + 'x'.repeat(CHUNK_BYTES - chunkLabel(i).length)
+  const decode = (b: Uint8Array) => new TextDecoder().decode(b)
+
+  /** 灌到超过上限：上限 / 每块 + 8 块余量。返回实际灌进去的块数与总字节数。 */
+  function floodOverCap(handler: (e: { payload: unknown }) => void, id: string, cap: number) {
+    const count = Math.ceil(cap / CHUNK_BYTES) + 8
+    for (let i = 0; i < count; i += 1) {
+      handler({ payload: { id, data: toB64(chunkText(i)) } })
+    }
+    return { count, pushedBytes: count * CHUNK_BYTES }
+  }
+
+  it('灌进去的量超过上限时，总量被压在上限之内、且不再随灌入量增长', async () => {
+    const { attachPty, MAX_BUFFERED_BYTES } = await freshModule()
+
+    const { pushedBytes } = floodOverCap(handlers['pty-output'], 'CAP1', MAX_BUFFERED_BYTES)
+
+    const s = trackedSink()
+    attachPty('CAP1', s.sink, () => {})
+    const replayedBytes = s.calls.reduce((n, b) => n + b.length, 0)
+    // 两条断言各挡一类实现错误，顺序刻意如此（前一条先跑，才能各自被单独变异出来）：
+    //   1. `< pushedBytes` 挡"根本没有淘汰"——那时 replayed 恰好等于 pushed；
+    //   2. `<= MAX_BUFFERED_BYTES` 挡"淘汰有但阈值被放宽"——总量仍随灌入量走高，
+    //      而第 1 条此时是成立的（确实丢了一些），单靠它抓不到。
+    expect(replayedBytes).toBeLessThan(pushedBytes)
+    expect(replayedBytes).toBeLessThanOrEqual(MAX_BUFFERED_BYTES)
+  })
+
+  it('丢的是**最旧**的：最新到达的那一块一定还在，最早那几块已经不在了', async () => {
+    const { attachPty, MAX_BUFFERED_BYTES } = await freshModule()
+
+    const { count } = floodOverCap(handlers['pty-output'], 'CAP2', MAX_BUFFERED_BYTES)
+
+    const s = trackedSink()
+    attachPty('CAP2', s.sink, () => {})
+    const labels = s.calls.map((b) => decode(b).slice(0, chunkLabel(0).length))
+    // 终端要的是"接上最近的画面"。两条断言顺序刻意如此，才能各自被单独变异出来：
+    //   1. "最新的还在"抓淘汰方向写反（改成丢最新的）——那时最旧的当然也还在，
+    //      第 2 条反而是成立的；
+    //   2. "最旧的不在了"抓根本没有淘汰。
+    expect(labels[labels.length - 1]).toBe(chunkLabel(count - 1))
+    expect(labels).not.toContain(chunkLabel(0))
+  })
+
+  it('上限内的正常回放完全不受影响：全部内容按原顺序一条不少地回放', async () => {
+    const { attachPty, MAX_BUFFERED_BYTES } = await freshModule()
+
+    // 这一组的总量远低于上限——它代表 buffers 的**正当用途**：PTY 已 spawn、
+    // <TerminalView> 尚未挂载的那个空档。上限绝不能把这段路径也一起砍了。
+    const count = 5
+    expect(count * CHUNK_BYTES).toBeLessThan(MAX_BUFFERED_BYTES)
+    for (let i = 0; i < count; i += 1) {
+      handlers['pty-output']({ payload: { id: 'CAP3', data: toB64(chunkText(i)) } })
+    }
+
+    const s = trackedSink()
+    attachPty('CAP3', s.sink, () => {})
+    expect(s.calls).toHaveLength(count)
+    expect(s.calls.map((b) => decode(b).slice(0, chunkLabel(0).length)))
+      .toEqual([chunkLabel(0), chunkLabel(1), chunkLabel(2), chunkLabel(3), chunkLabel(4)])
+  })
+
+  it('交接滚屏不会被实时输出挤掉：灌爆上限之后，回放的第一块仍是那份快照', async () => {
+    const { attachPty, seedScrollback, MAX_BUFFERED_BYTES } = await freshModule()
+
+    // 硬约束：buffers 存在的本意之一就是承载交接时 seedScrollback 的那份快照，它是
+    // 旧窗口整段历史的唯一副本（旧窗口的 xterm 实例随标签一起没了）。若把它当普通
+    // 实时块参与淘汰，交接期间紧随其后的实时输出会立刻把它挤出去——接管方拿到一个
+    // 没有任何历史的终端，而这正是 seedScrollback 存在的目的。
+    seedScrollback('CAP4', 'scrollback-history')
+    floodOverCap(handlers['pty-output'], 'CAP4', MAX_BUFFERED_BYTES)
+
+    const s = trackedSink()
+    attachPty('CAP4', s.sink, () => {})
+    expect(decode(s.calls[0])).toBe('scrollback-history')
+  })
+
+  it('上限是**每个 id 各自**的：一个 PTY 灌爆不会连累另一个', async () => {
+    const { attachPty, MAX_BUFFERED_BYTES } = await freshModule()
+
+    handlers['pty-output']({ payload: { id: 'CAP6', data: toB64('quiet-neighbour') } })
+    floodOverCap(handlers['pty-output'], 'CAP5', MAX_BUFFERED_BYTES)
+
+    const s = trackedSink()
+    attachPty('CAP6', s.sink, () => {})
+    expect(s.calls.map(decode)).toEqual(['quiet-neighbour'])
+  })
+
+  it('单独一块就超过上限时也至少保留它，不会退化成空回放', async () => {
+    const { attachPty, MAX_BUFFERED_BYTES } = await freshModule()
+
+    // 一次超大 paste 的回显就可能是这样。宁可越限，也不要给用户一个完全空白的终端。
+    // 先来一块小的再来那块超大的：正确行为是小的被淘汰、超大的这块**独自**留下。
+    const small = 's'.repeat(1024)
+    const huge = 'H'.repeat(MAX_BUFFERED_BYTES + 1024)
+    handlers['pty-output']({ payload: { id: 'CAP7', data: toB64(small) } })
+    handlers['pty-output']({ payload: { id: 'CAP7', data: toB64(huge) } })
+
+    const s = trackedSink()
+    attachPty('CAP7', s.sink, () => {})
+    // 两条各自可变异：删掉"至少留一块"的下界守卫 → 连超大那块也被淘汰，第 1 条红；
+    // 淘汰方向写反 → 留下的是那块小的，第 1 条仍为 1、第 2 条红。
+    expect(s.calls).toHaveLength(1)
+    expect(s.calls[0].length).toBe(huge.length)
+  })
+})
