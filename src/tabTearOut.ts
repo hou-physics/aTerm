@@ -47,9 +47,45 @@ export type TearOutWindowRect = { width: number; height: number }
  *  不做"拖回"，因此这个门槛只能设得更高、而不是更低。 */
 const TEAR_OUT_MARGIN_PX = 40
 
-export function shouldTearOut(point: TearOutPoint, windowRect: TearOutWindowRect, tabCount: number): boolean {
-  if (tabCount <= 1) return false
+/** 纯几何：光标是否已经在窗口视口之外**足够远**（含上面那个余量），**不含** tabCount
+ *  守卫。
+ *
+ *  V3.4 把它从 shouldTearOut 里摘出来单独导出：松手时的三路分流（设计文档 §5.2）里，
+ *  「指针在源窗口外」是四条路共同的入口条件，而 `tabCount <= 1` 那道守卫**只拦第 4 路**
+ *  （建新窗口）——把 `term-*` 窗口里最后一个标签拖到别的窗口正是 V3.4 的核心用例，被守卫
+ *  拦下就等于这个功能对空壳窗口不可用。余量则四条路一视同仁（设计文档 §5.2 原文"沿用
+ *  V3.3 的判定与 40px 余量"）：它挡的是"横向排序时向上晃进标题栏"这类手抖，而 V3.4 之后
+ *  那一晃的后果从"弹出一个新窗口"变成了"把标签甩进背后那个窗口"——级联摆放的窗口正好
+ *  就在源窗口标题栏背后，误触面反而更大，没有任何理由在这条路上把余量放掉。 */
+export function isPointerOutsideWindow(point: TearOutPoint, windowRect: TearOutWindowRect): boolean {
   const insideX = point.x >= -TEAR_OUT_MARGIN_PX && point.x <= windowRect.width + TEAR_OUT_MARGIN_PX
   const insideY = point.y >= -TEAR_OUT_MARGIN_PX && point.y <= windowRect.height + TEAR_OUT_MARGIN_PX
   return !(insideX && insideY)
 }
+
+export function shouldTearOut(point: TearOutPoint, windowRect: TearOutWindowRect, tabCount: number): boolean {
+  if (tabCount <= 1) return false
+  return isPointerOutsideWindow(point, windowRect)
+}
+
+/** 目标窗口「标签栏落区」的高度（逻辑像素）：`window_at_point` 返回的 `localY` 小于它，
+ *  才算落在目标窗口的标签栏上、才交接（设计文档 §5.2 第 2 路）；落在这个高度之外就是
+ *  **取消**（Ruling 2：在别的窗口的终端区域上松手，用户意图不明，更不可能是"在它上面再
+ *  叠一个新窗口"）。
+ *
+ *  **取 68 的依据 —— 关键在于 `localY` 的原点是窗口外框，不是内容区**：
+ *    1. Task 2 的 `hit_test_windows`（src-tauri/src/lib.rs）算的是
+ *       `local_y = py - rect.y`，而 `rect` 由 `outer_position()`/`outer_size()` 换算而来
+ *       ——**外框**矩形，macOS 上它把原生标题栏一并算在内（`tauri.conf.json` 没有
+ *       `titleBarStyle`，用的是原生标题栏）。也就是说 `localY === 0` 是标题栏顶边，
+ *       webview 内容区从 `localY ≈ 28` 才开始。
+ *    2. 内容区里的落区高度是 **40**：`.tabbar` 实际高约 33px（`padding: 6px 8px 0`
+ *       + `.tab` 5+13+5 + 1px 下边框，见 App.css），40 给它留一点余量。
+ *    3. 两者相加：**28（原生标题栏，macOS 标准窗口 28pt）+ 40 = 68**。少了这 28 的偏移，
+ *       用户把标签放在目标窗口标签栏正中央（`localY ≈ 28 + 19 = 47`）会被判成"不在落区"
+ *       而**静默取消**——正是本功能最主要的那一次手势。
+ *
+ *  顺带说明为什么把标题栏也算进落区：拖到另一个窗口的标题栏上松手，与拖到它的标签栏上
+ *  是同一个意图（"把这个标签交给那个窗口"），Chrome/iTerm2 同样接受标题栏落点；而它离
+ *  终端内容区仍有整条标签栏的距离，不会与 Ruling 2 要拦的"落在终端区域"混淆。 */
+export const TABBAR_DROP_ZONE_PX = 68

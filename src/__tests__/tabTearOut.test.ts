@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { shouldTearOut } from '../tabTearOut'
+import { isPointerOutsideWindow, shouldTearOut } from '../tabTearOut'
 
 const RECT = { width: 1200, height: 780 }
 
@@ -68,5 +68,28 @@ describe('shouldTearOut — 出界余量（横向排序时手抖不该弹出新�
   })
   it('向右超过余量一个像素：拖出', () => {
     expect(shouldTearOut({ x: 1241, y: 400 }, RECT, 3)).toBe(true)
+  })
+})
+
+// V3.4 §5.2：松手时的四条路里，`tabCount <= 1` 那道守卫**只拦第 4 路**（建新窗口），
+// 40px 出界余量则四条路共用。isPointerOutsideWindow 就是"共用的那一半"被摘出来的结果。
+describe('isPointerOutsideWindow — 出界判定里不含 tabCount 守卫的那一半', () => {
+  it('窗口内：不算出界', () => {
+    expect(isPointerOutsideWindow({ x: 600, y: 400 }, RECT)).toBe(false)
+  })
+
+  // 支点用例：同一个落点，只剩一个标签时 shouldTearOut 说"不拖出"（第 4 路被守卫拦下），
+  // 而出界判定仍然为真——交接那两路因此照旧走得下去。把 term-* 窗口里最后一个标签拖到
+  // 别的窗口正是 V3.4 的核心用例，被守卫拦下等于这个功能对空壳窗口完全不可用。
+  it('只剩一个标签：shouldTearOut 为 false，但出界判定仍为 true（守卫不属于这一半）', () => {
+    expect(shouldTearOut({ x: -300, y: 400 }, RECT, 1)).toBe(false)
+    expect(isPointerOutsideWindow({ x: -300, y: 400 }, RECT)).toBe(true)
+  })
+
+  // 另一半：余量确实是**同一个**，不是两处各写一份、将来各自漂移。坐标沿用上面那组的
+  // 40 / 41 这一对，值本身同样被钉住。
+  it('余量与 shouldTearOut 共用同一个值：-40 不算出界，-41 算', () => {
+    expect(isPointerOutsideWindow({ x: 600, y: -40 }, RECT)).toBe(false)
+    expect(isPointerOutsideWindow({ x: 600, y: -41 }, RECT)).toBe(true)
   })
 })

@@ -88,6 +88,7 @@ import {
   READY_TIMEOUT_MS,
   ACK_TIMEOUT_MS,
   handleHandoff,
+  handoffTabToWindow,
   tearOutTab,
   type HandoffPayload,
 } from '../windowHandoff'
@@ -596,6 +597,350 @@ describe('tearOutTab — 失败与超时一律回滚（设计文档 §4.3）', (
   })
 })
 
+// V3.4 §5.3：把标签交接给一个**已经存在的**窗口。与 tearOutTab 共用同一条尾巴
+// （handoffToLabel：序列化 → emitTo → 等 ack → 移除），差别只有三处：不建窗、不等就绪；
+// 失败时**绝不关目标窗口**；成功之后可能把自己这个空壳窗口关掉。
+describe('handoffTabToWindow — 交接给已存在的窗口（V3.4 设计文档 §5.3）', () => {
+  it('定向发载荷、等到 ack 才移除标签，全程一次都没去建新窗口', async () => {
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+
+    // 正面对照：载荷确实发出去了（否则下面那条"没建窗"就是恒真——分流压根没跑也一样绿）。
+    expect(emitToMock).toHaveBeenCalledTimes(1)
+    const [label, event, payload] = emitToMock.mock.calls[0] as [string, string, HandoffPayload]
+    expect(label).toBe('term-5')
+    expect(event).toBe(HANDOFF_EVENT)
+    expect(payload.toLabel).toBe('term-5')
+    expect(payload.panes[0].ptyId).toBe('pty-b')
+    // 目标窗口本来就在，这条路一次都不该碰 create_term_window。
+    expect(invokeMock).not.toHaveBeenCalled()
+
+    // ack 没到，标签必须还在。
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    fireAck('term-5')
+    expect(await done).toBe(true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    // 临时的 ack 监听摘干净了（断的是假事件总线里真实剩下的 handler 数量）。
+    expect(listeners.get(HANDOFF_ACK_EVENT)?.size ?? 0).toBe(0)
+  })
+
+  // V3.3 Ruling 5 在这条新路上同样成立：序列化与"重新取标签"都发生在**发送那一刻**，
+  // 不是函数开头。中间隔着 currentWindowLabel + listen 两次真实 IPC 往返，用户完全可能
+  // 在这期间 ⌘D 加个窗格——沿用陈旧快照会漏掉它，它的 PTY 随即成为孤儿。
+  it('载荷按发送那一刻的最新窗格集合打包，不用函数开头那份快照', async () => {
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    // 还没让出过任何一次微任务：此刻改 store，实现若在函数开头就取好快照就会漏掉它。
+    useTabs.setState((st) => ({
+      tabs: st.tabs.map((t) =>
+        t.id === 'tab-b'
+          ? { ...t, panes: [...t.panes, { id: 'pane-b2', ptyId: 'pty-b2', title: 'B2' }], activePaneId: 'pane-b2' }
+          : t,
+      ),
+    }))
+    await vi.advanceTimersByTimeAsync(0)
+
+    const payload = emitToMock.mock.calls[0][2] as HandoffPayload
+    expect(payload.panes.map((p) => p.ptyId)).toEqual(['pty-b', 'pty-b2'])
+    expect(payload.activePaneIndex).toBe(1)
+
+    fireAck('term-5')
+    expect(await done).toBe(true)
+  })
+
+  it('序列化发生在发送那一刻（不是函数开头）', async () => {
+    serializeTermMock.mockReturnValue('[31mRED[0m')
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    expect(serializeTermMock).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(serializeTermMock).toHaveBeenCalledWith('pty-b')
+    expect((emitToMock.mock.calls[0][2] as HandoffPayload).panes[0].scrollback).toBe('[31mRED[0m')
+
+    fireAck('term-5')
+    expect(await done).toBe(true)
+  })
+
+  // §5.3：超时的处理与 tearOutTab **只差这一处**——目标窗口本来就在，不是本次建的，
+  // 关掉它就是把用户另一个正在用的窗口连同里面所有会话一起端掉。
+  it('ack 超时：标签仍在本窗口，且绝不去关目标窗口（它不是本次建的）', async () => {
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(emitToMock).toHaveBeenCalledTimes(1) // 正面对照：载荷确实发出去了，只是没人回
+
+    // 先钉住"ACK_TIMEOUT_MS 之前一刻还没判失败"：不钉下边界的话，实现改用任何别的时长
+    // 都照样绿。
+    await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS - 1)
+    expect(useHint.getState().message).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(2)
+    expect(await done).toBe(false)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')!.panes[0].ptyId).toBe('pty-b')
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    expect(useHint.getState().message).toBe('目标窗口没能接管这个标签，已留在原窗口')
+  })
+
+  // R2/I4 在这条路上同样成立：目标窗口可能已经接管过一轮并把 PTY 拧成了它自己的几何。
+  it('ack 超时回滚：把 PTY 尺寸拧回本窗口自己的几何', async () => {
+    vi.mocked(ipc.lastPtySize).mockReturnValue({ cols: 203, rows: 51 })
+
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS + 1)
+    expect(await done).toBe(false)
+
+    expect(ipc.ptyResize).toHaveBeenCalledWith('pty-b', 203, 51)
+  })
+
+  it('载荷发送本身就失败了（emitTo reject）：目标窗口不可能接管过，不去动 PTY 尺寸，也不关它', async () => {
+    vi.mocked(ipc.lastPtySize).mockReturnValue({ cols: 203, rows: 51 })
+    emitToMock.mockRejectedValueOnce(new Error('目标窗口已经不在了'))
+
+    expect(await handoffTabToWindow('tab-b', 'term-5')).toBe(false)
+
+    expect(ipc.ptyResize).not.toHaveBeenCalled()
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
+    // 正面对照：这次失败确实是走完发送这一步之后才发生的（提示已经出来了），不是在更早
+    // 的地方就早退了。
+    expect(useHint.getState().message).toBe('目标窗口没能接管这个标签，已留在原窗口')
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+  })
+
+  it('ack 的 label 对不上时不算数：不能被别的窗口的 ack 顶掉，继续等到超时', async () => {
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+
+    fireAck('term-999')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS + 1)
+    expect(await done).toBe(false)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+  })
+
+  // 与 tearOutTab 那条 ack 监听同构的两头防护（终审 M1）。发起方 label 刻意取一个
+  // **不是 'main'** 的值（Ruling 14）：用 'main' 的话把实现写死成 `{ target: 'main' }`
+  // 这条断言照样绿。
+  it('ack 监听限定 target 为发起方自己的 label，且这道限定不会把真正该收的 ack 挡在门外', async () => {
+    currentWindowMock.mockReturnValue({ label: 'term-3' })
+
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+
+    const ackCall = listenMock.mock.calls.find((c) => c[0] === HANDOFF_ACK_EVENT)
+    expect(ackCall).toBeTruthy()
+    expect(ackCall![2]).toEqual({ target: 'term-3' })
+    // 载荷里的 fromLabel 也是它——接管方据此把 ack 定向发回来。
+    expect((emitToMock.mock.calls[0][2] as HandoffPayload).fromLabel).toBe('term-3')
+
+    // 另一半：走替身的真实投递语义（不用 fireAck 那个绕过 target 过滤的辅助函数）。
+    await emitToMock('term-3', HANDOFF_ACK_EVENT, { label: 'term-5' })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+    expect(await done).toBe(true)
+  })
+
+  // 拒绝要发生在**进入握手之前**：走进去再由共享尾巴抛出，结果虽然也是"没交接"，但会
+  // 顺带给用户弹一条"目标窗口没能接管这个标签"——一次本来就不该开始的手势弹一条像是
+  // 出了故障的提示，比什么都不做糟。
+  it('目标标签不存在 / 不是终端标签时直接拒绝：不发载荷，也不弹那条失败提示', async () => {
+    expect(await handoffTabToWindow('tab-does-not-exist', 'term-5')).toBe(false)
+    expect(await handoffTabToWindow('home', 'term-5')).toBe(false)
+    expect(emitToMock).not.toHaveBeenCalled()
+    expect(useHint.getState().message).toBeNull()
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    // 正面对照：同一份替身下，一个合法的标签确实能把载荷发出去——上面那两条"没发"不是
+    // 因为这条路在本用例的环境里压根不通。
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(emitToMock).toHaveBeenCalledTimes(1)
+    fireAck('term-5')
+    expect(await done).toBe(true)
+  })
+
+  // ── 交接锁：新增的每一条路径都要释放（Ruling 12） ─────────────────────────────
+  // 锁没释放 = 那个标签**永久关不掉**，比它挡的问题更糟。下面几条都不满足于"某个 mock
+  // 没被调用"——它们直接用真实的 closeTab 去关那个标签，断言 store 里标签真的没了、
+  // PTY 真的被 kill 了。
+
+  it('成功之后锁已释放：同一个标签能再次发起（不是被锁永久挡住）', async () => {
+    const done = handoffTabToWindow('tab-a', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    fireAck('term-5')
+    expect(await done).toBe(true)
+
+    // 标签已经交出去了，这一次走的是"标签不存在"那条；关键是它**没有**被锁早退——把
+    // tab-a 换成仍然在的 tab-b 再发一次，载荷照样发得出去。
+    emitToMock.mockClear()
+    const again = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(emitToMock).toHaveBeenCalledTimes(1)
+    fireAck('term-5')
+    expect(await again).toBe(true)
+  })
+
+  it('超时回滚之后锁已释放：该标签仍然关得掉（真的调 closeTab，断言标签从 store 消失、PTY 被 kill）', async () => {
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS + 1)
+    expect(await done).toBe(false)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    await useTabs.getState().closeTab('tab-b', async () => true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+    expect(ipc.ptyKill).toHaveBeenCalledWith('pty-b')
+  })
+
+  it('连 ack 监听都没注册成功（listen reject）也要释放锁：标签仍然关得掉', async () => {
+    listenMock.mockRejectedValueOnce(new Error('事件桥挂了'))
+
+    expect(await handoffTabToWindow('tab-b', 'term-5')).toBe(false)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    await useTabs.getState().closeTab('tab-b', async () => true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+    expect(ipc.ptyKill).toHaveBeenCalledWith('pty-b')
+  })
+
+  it('同一个标签的交接进行中时再交接一次：直接拒绝，且不会误放掉正在进行的那一把锁', async () => {
+    const first = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(emitToMock).toHaveBeenCalledTimes(1)
+
+    expect(await handoffTabToWindow('tab-b', 'term-6')).toBe(false)
+    expect(emitToMock).toHaveBeenCalledTimes(1) // 没有并发发出第二份载荷
+
+    // 被拒绝的那一次没有把第一次的锁放掉：此刻 ⌘W 仍然关不掉这个标签（正在交接中）。
+    await useTabs.getState().closeTab('tab-b', async () => true)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    expect(useHint.getState().message).toBe(HANDOFF_IN_FLIGHT_HINT)
+
+    fireAck('term-5')
+    expect(await first).toBe(true)
+  })
+
+  // 「取消」那一路（命中别的窗口但不在标签栏落区）压根不会走到这个模块——它在 TabBar 的
+  // 分流里就返回了。锁在那条路上没被占用过这件事在 TabBar.test.tsx 里钉（取消之后标签
+  // 仍然关得掉）：那里才是那条路真正跑过的地方。
+})
+
+// V3.4 §5.4 / Ruling 3：交接出最后一个终端标签之后，这个 term-* 窗口就是个空壳，关掉它。
+// **顺序写死**：ack → removeTabKeepingPty → 确认已无终端标签 → destroy。提前 destroy
+// 会让交接中的标签两边都没有。
+describe('空壳窗口自动关闭（V3.4 设计文档 §5.4）', () => {
+  it('term-* 窗口交出最后一个终端标签：ack 之后才关自己，ack 之前一步都不动', async () => {
+    currentWindowMock.mockReturnValue({ label: 'term-3' })
+    useTabs.setState({ tabs: [HOME, TAB_B], activeId: 'tab-b' })
+
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    // 载荷已发出、ack 还没到。**此刻绝不能 destroy**：本窗口连同它那份还没被移除的标签
+    // 一起消失，而目标窗口可能压根没接管成功——两个窗口都没有这个标签。
+    expect(emitToMock).toHaveBeenCalledTimes(1) // 正面对照：确实已经走到"等 ack"这一步了
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-b'])
+
+    fireAck('term-5')
+    expect(await done).toBe(true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home'])
+    expect(ipc.destroyTermWindow).toHaveBeenCalledWith('term-3')
+    expect(ipc.destroyTermWindow).toHaveBeenCalledTimes(1)
+    // 空壳窗口不持有任何 PTY，关它一个会话都不会死。
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+  })
+
+  it('本窗口还剩别的终端标签：不关自己（只有真的空壳才关）', async () => {
+    currentWindowMock.mockReturnValue({ label: 'term-3' })
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-b' })
+
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    fireAck('term-5')
+    expect(await done).toBe(true)
+
+    // 正面对照：交接本身确实成功了（标签真的没了），只是窗口里还剩 tab-a。
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
+  })
+
+  // 等 ack 期间用户给这个标签 ⌘D 加了个新窗格：removeTabKeepingPty 只摘走交接出去的那些、
+  // 标签本身留着，这个窗口还装着活着的 PTY，关掉它就是把用户正在跑的会话连窗口一起端了。
+  it('等 ack 期间又加了个窗格（标签因此留了下来）：不关自己', async () => {
+    currentWindowMock.mockReturnValue({ label: 'term-3' })
+    useTabs.setState({ tabs: [HOME, TAB_B], activeId: 'tab-b' })
+
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    useTabs.setState((st) => ({
+      tabs: st.tabs.map((t) =>
+        t.id === 'tab-b' ? { ...t, panes: [...t.panes, { id: 'pane-late', ptyId: 'pty-late', title: '后来的' }] } : t,
+      ),
+    }))
+    fireAck('term-5')
+    expect(await done).toBe(true)
+
+    // 正面对照：交接确实成功了（原来那个窗格被摘走了），只是标签因为新窗格留了下来。
+    expect(useTabs.getState().tabs.find((t) => t.id === 'tab-b')!.panes.map((p) => p.ptyId)).toEqual(['pty-late'])
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
+  })
+
+  // §3 明确列为"不做"：主窗口永远不因标签为空而关闭——它还是侧边栏/总览/设置的入口，
+  // 留个主页不算空壳。
+  it('主窗口交出最后一个终端标签：绝不自动关闭', async () => {
+    currentWindowMock.mockReturnValue({ label: 'main' })
+    useTabs.setState({ tabs: [HOME, TAB_B], activeId: 'tab-b' })
+
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    fireAck('term-5')
+    expect(await done).toBe(true)
+
+    // 正面对照：交接确实成功、窗口里确实一个终端标签都不剩了——条件全部满足，只有
+    // "我是主窗口"这一条把它拦住了。
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home'])
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
+  })
+
+  it('交接失败时不关自己（标签还在本窗口，根本不是空壳）', async () => {
+    currentWindowMock.mockReturnValue({ label: 'term-3' })
+    useTabs.setState({ tabs: [HOME, TAB_B], activeId: 'tab-b' })
+
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS + 1)
+    expect(await done).toBe(false)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-b'])
+    expect(ipc.destroyTermWindow).not.toHaveBeenCalled()
+  })
+
+  it('关自己这一步失败也不影响这次交接的结果（标签已经交出去了，窗口没关掉只是个可见但无损的结果）', async () => {
+    currentWindowMock.mockReturnValue({ label: 'term-3' })
+    useTabs.setState({ tabs: [HOME, TAB_B], activeId: 'tab-b' })
+    vi.mocked(ipc.destroyTermWindow).mockRejectedValue(new Error('窗口已经不在了'))
+
+    const done = handoffTabToWindow('tab-b', 'term-5')
+    await vi.advanceTimersByTimeAsync(0)
+    fireAck('term-5')
+
+    expect(await done).toBe(true)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home'])
+    expect(useHint.getState().message).toBeNull() // 不该报成一次失败的交接
+  })
+})
+
 describe('handleHandoff — 新窗口侧的接管（设计文档 §4.2 第 5 步）', () => {
   const payload: HandoffPayload = {
     fromLabel: 'main',
@@ -862,14 +1207,75 @@ describe('windowHandoffReady — 新窗口启动时的接管入口（设计文�
     expect(emitMock).toHaveBeenCalledWith(mod.HANDOFF_READY_EVENT, { label: 'term-8' })
   })
 
-  it('主窗口：既不挂接管监听、也不发就绪事件（它自己就是发起方）', async () => {
+  // V3.4：主窗口**也挂接管监听**（标签现在可以拖回主窗口），但仍然不发就绪事件。
+  // 就绪事件的语义是"我这个刚被 create_term_window 建出来的窗口起来了"——主窗口不是被谁
+  // 建出来的，没有任何发起方在等它宣告就绪。
+  it('主窗口：挂接管监听（V3.4 起它也是接收方），但仍然不发就绪事件', async () => {
     currentWindowMock.mockReturnValue({ label: 'main' })
     vi.resetModules()
     const mod = await import('../windowHandoff')
     await mod.windowHandoffReady
 
-    expect(listenMock.mock.calls.map((c) => c[0])).not.toContain(mod.HANDOFF_EVENT)
+    expect(listenMock.mock.calls.map((c) => c[0])).toContain(mod.HANDOFF_EVENT)
     expect(emitMock).not.toHaveBeenCalled()
+  })
+})
+
+// V3.4 §5.3：主窗口第一次成为交接的接收方。设计文档 §6 特别点名——去掉监听门禁之后，
+// 它的 `{target}` 限定与载荷 `toLabel` 校验必须与 term-* 一致，两头防护一个字都不能松。
+describe('主窗口作为接管方（V3.4：标签可以拖回主窗口）', () => {
+  it('发给 main 的载荷主窗口收得到并真的建出标签、回 ack；target 为别的 label 的监听器一次都收不到', async () => {
+    currentWindowMock.mockReturnValue({ label: 'main' })
+    vi.resetModules()
+    const mod = await import('../windowHandoff')
+    const tabsMod = await import('../store/tabs')
+    await mod.windowHandoffReady
+    tabsMod.useTabs.setState({ tabs: [HOME], activeId: 'home' })
+
+    // 主窗口真正注册时用的 options——两头防护的注册侧那一半。
+    const mainCall = listenMock.mock.calls.find((c) => c[0] === mod.HANDOFF_EVENT)
+    expect(mainCall).toBeTruthy()
+    expect(mainCall![2]).toEqual({ target: 'main' })
+    // 探针 label **刻意取 'main' 以外的值**（Ruling 14）：替身 label 与断言里的 target
+    // 相同的话，"target 限定还在"就是一条恒真断言——替身若退回"只记录不投递"，或者实现
+    // 把 target 整个删掉，用例照样绿。这个探针按 windowHandoffReady 完全一致的方式注册，
+    // 只是 label 是隔壁那个 term-7 窗口。
+    const otherWindowProbe = vi.fn()
+    await listenMock(mod.HANDOFF_EVENT, otherWindowProbe, { target: 'term-7' })
+
+    // 一个已经被拖出来的窗口把标签拖回主窗口：fromLabel 是它自己，toLabel 是 main。
+    await emitToMock('main', mod.HANDOFF_EVENT, {
+      fromLabel: 'term-7',
+      toLabel: 'main',
+      activePaneIndex: 0,
+      panes: [{ ptyId: 'pty-back', sessionId: 'sess-back', title: '拖回来的', cwd: null, scrollback: 'snap' }],
+    } satisfies HandoffPayload)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // 断真实 store 状态：标签真的建在主窗口里、追加在末尾、并且被激活。
+    const tabs = tabsMod.useTabs.getState().tabs
+    expect(tabs.map((t) => t.kind)).toEqual(['home', 'term'])
+    expect(tabs[1].panes.map((p) => p.ptyId)).toEqual(['pty-back'])
+    expect(tabsMod.useTabs.getState().activeId).toBe(tabs[1].id)
+    // ack 定向回发起方，报的是主窗口自己的 label。
+    expect(emitToMock).toHaveBeenCalledWith('term-7', mod.HANDOFF_ACK_EVENT, { label: 'main' })
+    // ……而隔壁窗口的监听器一次都没被打到。
+    expect(otherWindowProbe).not.toHaveBeenCalled()
+  })
+
+  it('发给别的窗口的载荷主窗口不接管、也不回 ack（处理侧的 toLabel 校验没有因为它加入接收方而松动）', async () => {
+    currentWindowMock.mockReturnValue({ label: 'main' })
+    useTabs.setState({ tabs: [HOME], activeId: 'home' })
+
+    await handleHandoff({
+      fromLabel: 'term-7',
+      toLabel: 'term-2', // 发给隔壁那个窗口的
+      activePaneIndex: 0,
+      panes: [{ ptyId: 'pty-x', title: 'X', cwd: null, scrollback: 'snap' }],
+    })
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home'])
+    expect(emitToMock).not.toHaveBeenCalled()
   })
 })
 
