@@ -157,7 +157,10 @@ function TabBarTearOutIndicator() {
 //   4. 谁都没命中 → V3.3 既有的"拖出成新窗口"。
 //
 // `allowNewWindow` 只作用于第 4 路：它就是 shouldTearOut 里那道 `tabCount <= 1` 守卫的
-// 结果（由调用方在 pointermove 时算好、存在 useDnd.tearOut 里）。把 `term-*` 窗口里最后
+// 结果，由 onTabPointerUp 松手那一刻就地算出。**注意它与 useDnd.tearOut 不是一回事**：
+// 后者（R2 / I1 起）装的是无守卫的 isPointerOutsideWindow，只管"要不要显示离窗指示"；
+// 在 V3.4 的招牌场景——只剩一个终端标签——两者恰好相反（tearOut=true、allowNewWindow=
+// false），别把其中一个当另一个推理。把 `term-*` 窗口里最后
 // 一个标签拖到别的窗口正是 V3.4 的核心用例，不能被这道守卫拦下；而"窗口里只剩一个标签
 // 时再给它建个新窗口"依然没有意义，第 4 路照旧拦住。
 //

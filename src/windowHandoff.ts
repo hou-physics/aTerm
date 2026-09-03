@@ -383,6 +383,9 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
     unlistenAck = await listen<HandoffAck>(HANDOFF_ACK_EVENT, (e) => {
       // 两个字段都要对上（R2 / C1）：这条路上 label 本来就足够区分（新窗口 label 每次
       // 都不一样），tabId 是与 handoffTabToWindow 共用同一套认领规则——见 HandoffAck。
+      // **这里的 tabId 比对没有任何测试能区分**（退回只比 label，全量照样全绿——终审复审
+      // 实测）。它是刻意的纵深防御：认领规则不留例外，免得日后有人照抄这条去写第三条交接
+      // 路径时把 tabId 也漏掉。**勿以"无覆盖"为由删除。**
       if (label !== null && e.payload?.label === label && e.payload?.tabId === tabId) ack.resolve()
     }, { target: fromLabel })
 
