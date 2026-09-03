@@ -18,6 +18,8 @@ import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { type Tab, useTabs } from '../store/tabs'
+import { shouldTearOut } from '../tabTearOut'
+import { tearOutTab } from '../windowHandoff'
 import { ContextMenu } from './ContextMenu'
 import { type SessionPick, SessionPicker } from './SessionPicker'
 
@@ -116,6 +118,22 @@ function TabBarDropIndicator() {
   return <div className="tabbar-drop-indicator" style={{ left }} />
 }
 
+// 标签拖出窗口边界（V3.3 设计文档 §4.1）的视觉提示：与 DropIndicator.tsx 同一套
+// "拖拽源实时写 store/dnd.ts 的 tearOut 字段、指示条只读"模式，只读不写。锚定在
+// `.tabbar` 内部（position:absolute，见 App.css 的 .tabbar-tear-out），不像
+// DragGhost.tsx 那样用 position:fixed 跟随光标——光标一旦真的移出窗口视口，
+// position:fixed 的元素会被浏览器裁剪出视口、不可见（V3.3 报告已核实这一点），这条
+// 提示必须锚定在窗口内部的既有 DOM 节点上才能在整个「将拖出」状态期间持续可见。
+function TabBarTearOutIndicator() {
+  const tearOut = useDnd((s) => s.tearOut)
+  if (!tearOut) return null
+  return (
+    <div className="tabbar-tear-out">
+      <span className="tabbar-tear-out-label">松开在新窗口打开</span>
+    </div>
+  )
+}
+
 // 把已打开的标签拖进窗格区（设计文档 §5-B 场景 A，用户明确要求）：与 TabPanes.tsx 的
 // PaneDivider / ConversationPanel.tsx 的宽度手柄同一套 pointerdown/move/up +
 // setPointerCapture 模式（复用既有拖拽 idiom），不用 HTML5 dragstart/drop——那套 API
@@ -180,6 +198,7 @@ export function TabBar() {
     useDnd.getState().setDropMode(null)
     useDnd.getState().setRefusal(null)
     useDnd.getState().setTabBarIndex(null)
+    useDnd.getState().setTearOut(false)
     useDragGhost.getState().end()
   }, [])
 
@@ -255,6 +274,42 @@ export function TabBar() {
       useDnd.getState().setDropMode(null)
       useDnd.getState().setRefusal(null)
       useDnd.getState().setTabBarIndex(null)
+      return
+    }
+    // 拖出窗口边界判定（V3.3 设计文档 §4.1）：用 src/tabTearOut.ts 的纯函数
+    // shouldTearOut 判定光标此刻是否已经落在当前窗口视口之外**足够远**——"足够远"是
+    // 那个函数自己的事（它带一个向外的余量，把整条原生标题栏盖进死区，理由见
+    // TEAR_OUT_MARGIN_PX 上方注释），这里只管把落点与视口尺寸交给它。windowRect 直接用
+    // window.innerWidth/innerHeight——与本文件 PlusMenu 的视口钳制、
+    // ConversationPanel.tsx 的宽度换算同一个既有取数方式，clientX/clientY 本就是相对
+    // 当前窗口视口的坐标，不需要另外查询某个 DOM 节点的矩形。tabCount 传的是
+    // "非主页标签"的数量（tabs.length 恒包含钉住不可拖动的主页标签，见上面的
+    // dragTab.kind === 'home' 分支——真正可能被拖拽的标签数量要减掉它），对应设计
+    // 文档"该窗口内唯一的标签"这个边界情况的口径：如果这是窗口里仅有的一个可拖拽
+    // 标签，拖出后旧窗口就只剩主页可看，等同于把整个窗口的内容搬到新窗口，没有意义。
+    //
+    // 命中拖出时，清空窗口内所有落点状态（标签栏排序 / 合并进窗格区在窗口外都没有
+    // 意义），ghost 继续跟手（与既有拖拽体验一致），然后直接 return——不再执行下面
+    // 任何一条窗口内落点分支，从而保证"落点回到窗口内时完全退回既有逻辑"（下面这些
+    // 分支本身一个字节都没有改动）。
+    // R2/M5：只有 term 标签能被拖出成新窗口。总览标签（kind === 'overview'）没有窗格、
+    // 没有 PTY，tearOutTab 对它是空操作——此前它照样会进入 tearOut 状态、照样显示
+    // 「松开在新窗口打开」，松手却什么都不发生：一个明确的视觉承诺配一个无声的空操作。
+    // 在判定这一层就排除掉，总览标签因此完全走下面既有的标签栏排序分支，行为不变。
+    const windowRect = { width: window.innerWidth, height: window.innerHeight }
+    const tearOut = dragTab.kind === 'term' && shouldTearOut({ x: e.clientX, y: e.clientY }, windowRect, tabs.length - 1)
+    useDnd.getState().setTearOut(tearOut)
+    if (tearOut) {
+      useDnd.getState().setTarget(null)
+      useDnd.getState().setDropMode(null)
+      useDnd.getState().setRefusal(null)
+      useDnd.getState().setTabBarIndex(null)
+      if (!drag.ghostStarted) {
+        drag.ghostStarted = true
+        useDragGhost.getState().start(dragTab.title, e.clientX, e.clientY)
+      } else {
+        useDragGhost.getState().move(e.clientX, e.clientY)
+      }
       return
     }
     // 光标落在标签栏上：这一段拖拽此刻的落点语义是"标签排序"（新增），不是"合并进
@@ -337,6 +392,7 @@ export function TabBar() {
     // 提前读好这两个值就不受调用顺序影响。
     const target = useDnd.getState().target
     const tabBarIndex = useDnd.getState().tabBarIndex
+    const tearOut = useDnd.getState().tearOut
     e.currentTarget.releasePointerCapture?.(e.pointerId)
     // 无条件调用，任何后续 return 都不可能让屏蔽选择的 body class 卡住；这个函数同时
     // 接在 onPointerUp 和 onPointerCancel 上，两条退出路径因此都被覆盖。与
@@ -345,6 +401,22 @@ export function TabBar() {
     endDrag()
     if (!drag || !drag.dragging) return
     suppressClickRef.current = true
+    if (tearOut) {
+      // V3.3 Task 4：Task 2 留下的 console.info 占位换成真实的交接握手（六步 + 超时
+      // 回滚全在 src/windowHandoff.ts 里，这里只负责"发起"这一下）。
+      //
+      // 传 screenX/screenY 而不是 clientX/clientY：create_term_window 要的是新窗口
+      // 在**屏幕**坐标系里的左上角位置，clientX/clientY 是相对本窗口视口的（上面
+      // shouldTearOut 判定用的正是后者，两者在这一段里同时出现，别搞混）。单位是
+      // 逻辑（CSS）像素，**不要**再乘 devicePixelRatio——坐标契约的三处源码核实见
+      // src-tauri/src/lib.rs 里 create_term_window 顶部的注释。
+      //
+      // 不 await：整个握手是异步的（建窗 + 两次带超时的等待），而 pointerup 这个
+      // 处理器必须立刻返回让拖拽手势正常收尾。tearOutTab 自己吞掉全部失败、失败时
+      // 保留标签并给出轻提示，不会有未处理的 rejection。
+      void tearOutTab(drag.tabId, { x: e.screenX, y: e.screenY })
+      return
+    }
     if (tabBarIndex !== null) {
       // 松手时落在标签栏上：这是排序落点，不是合并——纯数组挪动，不涉及窗格/上限/
       // 窄窗口降级那一整套校验（reorderTab 内部对"落回原位"这类空操作已经处理好）。
@@ -500,6 +572,9 @@ export function TabBar() {
           TabBarDropIndicator 注释。渲染顺序放最后，画在其它标签栏元素之上，
           不依赖 z-index（与 .pane-drop-indicator 在 App.tsx 里的取舍一致）。 */}
       <TabBarDropIndicator />
+      {/* 标签拖出窗口边界（V3.3 设计文档 §4.1）的「将拖出」视觉提示，见上方
+          TabBarTearOutIndicator 注释。同样放在渲染顺序最后。 */}
+      <TabBarTearOutIndicator />
       {/* 标签右键菜单：复用 TabPanes.tsx 窗格标题栏那一份 ContextMenu 组件，不写
           第二份。「拆分为独立标签」只在该标签持有多于一个窗格时才出现（单窗格标签
           没有什么可拆的，splitTabPanes 对它是 no-op，这里直接不渲染这一项，不依赖

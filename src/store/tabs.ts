@@ -1,10 +1,12 @@
 import { create } from 'zustand'
+import { isHandoffInFlight } from '../handoffLock'
 import { ptyIsAlive, ptyKill, ptySpawn } from '../ipc'
 import type { ProjectInfo } from '../ipc'
 import { equalPaneWidths, MAX_PANES } from '../paneLayout'
 import { dropInsertionIndex, type DropTarget } from '../paneDrop'
 import { resolvePaneIdentity } from '../paneReconcile'
 import { ptyEventsReady } from '../ptyBuffer'
+import { useHint } from './hint'
 import { useOverviewStore } from './overview'
 
 // Pane：标签内的单个终端会话。ptyId 缺省表示该窗格还没有终端——⌘D 新建的窗格先显示
@@ -67,6 +69,27 @@ export function buildTabCloseConfirmMessage(aliveCount: number): string {
 // PTY，不需要像上面那样动态报数量。
 export function buildPaneCloseConfirmMessage(): string {
   return '进程仍在运行，关闭窗格将终止它。确认关闭？'
+}
+
+// 交接期间拒绝关闭时给出的那条轻提示（V3.3 Ruling 12）。抽成常量而不是在两个调用点
+// 各写一遍字面量：closeTab 与 closePane 拒绝的是同一件事，文案漂移就意味着用户按 ⌘W
+// 和点 × 会看到两句不同的解释。
+export const HANDOFF_IN_FLIGHT_HINT = '这个标签正在移交到新窗口，稍后再关闭'
+
+// 「这个标签正在交接中，现在不能关」这道闸门（V3.3 Ruling 12 / 原 M7）。
+//
+// 拖出的握手是异步的（建窗 + 等就绪最长 10s + 等接管确认最长 5s），这段时间里标签**仍然
+// 留在旧窗口的标签栏里、可见可点**。用户此刻按 ⌘W 或点 ×，closeTab 会照常走
+// ptyIsAlive → ptyKill——而新窗口很可能**已经接管成功**（ack 还在路上），被 kill 的就是
+// 用户正在跑的 claude 会话。M6 的锁只挡"再拖一次"，挡不住关闭。
+//
+// 早退**不静默**：复用 store/hint.ts 那条既有的内联轻提示（与 ⌘D 拒绝新建窗格、两个
+// 拖拽入口的拒绝、以及交接失败回滚同一处渲染）。静默早退会让用户以为 ⌘W 坏了，反复
+// 猛按——而这本来只需要等一两秒。
+function refuseWhileHandoffInFlight(tabId: string): boolean {
+  if (!isHandoffInFlight(tabId)) return false
+  useHint.getState().show(HANDOFF_IN_FLIGHT_HINT)
+  return true
 }
 
 // 内部共享：在 tabId 的 panes 数组下标 insertAt 处插入一个新的"待选窗格"（ptyId
@@ -142,7 +165,16 @@ type TabsState = {
   focusPane(tabId: string, paneId: string): void
   setPaneWidths(tabId: string, widths: number[]): void
   reconcilePanes(projects: ProjectInfo[], aliases: Record<string, string>): void
+  adoptTerminalTab(o: { panes: AdoptedPane[]; activePaneIndex: number }): string | null
+  removeTabKeepingPty(id: string, paneIds: string[]): boolean
 }
+
+// 跨窗口交接（V3.3 设计文档 §4.2，见 src/windowHandoff.ts）过来的窗格描述：与 Pane
+// 的区别只有一个——没有 id。窗格 id 是每个窗口自己的模块级计数器发的（nextPane），
+// 跨窗口原样搬过来会和新窗口自己已有的 id 撞车，所以由 adoptTerminalTab 在本窗口
+// 重新分配。ptyId 可缺省：⌘D 新建后还没选定会话的空槽窗格（见 Pane 类型注释）本来
+// 就没有 PTY，交接时应当原样保留成空槽，而不是被悄悄丢掉。
+export type AdoptedPane = Omit<Pane, 'id'>
 
 export const useTabs = create<TabsState>((set, get) => ({
   tabs: [{ id: 'home', kind: 'home', title: '主页', panes: [] }],
@@ -208,6 +240,9 @@ export const useTabs = create<TabsState>((set, get) => ({
     // 换成任何形式的"没有窗格就不给关"都会把总览标签和主页一起挡在这里，× 按钮点了
     // 会什么都不发生——见 tabs.test.ts「总览标签可以被关闭」一测。
     if (!tab || tab.kind === 'home') return
+    // 交接中的标签一律不关（Ruling 12）：新窗口可能已经接管，这里的 ptyKill 杀的会是
+    // 用户正在跑的会话。检查必须在 ptyIsAlive/ptyKill **之前**——放在后面等于先杀再问。
+    if (refuseWhileHandoffInFlight(id)) return
     // 只收集"确实有 ptyId 且确认存活"的窗格——待选会话的窗格（ptyId 缺省）从未
     // spawn 过 PTY，天然算不存活，不需要也不能查询。
     const aliveIds: string[] = []
@@ -515,6 +550,11 @@ export const useTabs = create<TabsState>((set, get) => ({
   closePane: async (tabId, paneId, confirmFn = dialogConfirm) => {
     const tab = get().tabs.find((t) => t.id === tabId)
     if (!tab || tab.kind !== 'term') return
+    // 同 closeTab（Ruling 12）：交接是按**标签**发起的，载荷带走它此刻的全部窗格，所以
+    // 多窗格标签里关掉任意一个窗格，杀的同样可能是新窗口已经接管的那个 PTY。单窗格时
+    // 下面会委托给 closeTab、由那边的同一道闸门挡住，但多窗格分支有自己的 ptyKill，
+    // 必须在这里也挡一次。
+    if (refuseWhileHandoffInFlight(tabId)) return
     // 先确认 paneId 真的是这个标签自己的窗格，再决定"标签只剩一个窗格时委托给
     // closeTab"这条分支——顺序调换过一次的话，一个陈旧/写错的 paneId（不属于该
     // 标签、甚至压根不存在）会在标签恰好只剩一个窗格时被当成"关闭它唯一的窗格"，
@@ -598,5 +638,86 @@ export const useTabs = create<TabsState>((set, get) => ({
       })
       return changed ? { tabs } : {}
     })
+  },
+  // 跨窗口交接的接收端（V3.3 设计文档 §4.2 第 5 步，调用方是 src/windowHandoff.ts
+  // 里新窗口那侧的 handleHandoff）：按交接载荷建一个终端标签，窗格直接绑定**已经在
+  // 跑的** ptyId，绝不 ptySpawn——那会凭空多起一个 claude 进程，而原来那个还挂在
+  // 后台没人管。这是它和 openTerminal 唯一的、也是最关键的区别，别把两者合并。
+  //
+  // 窗格 id 在这里重新分配（见 AdoptedPane 的注释）；其余字段（ptyId/title/
+  // threadKey/dirName/rootKey/sessionId）原样搬过来，身份因此完整跟着标签走——
+  // 侧边栏聚焦、对话面板、底栏模型、reconcilePanes 对账在新窗口里立刻就能认出它。
+  //
+  // panes 为空时不建标签（返回 null）：空的终端标签在这个应用里没有任何合法来源，
+  // 建出来只会是一个点不动的空壳；调用方据此判定这次交接无效、不回 ack，旧窗口
+  // 那边就会走超时回滚，标签留在原处——比在新窗口里留个空壳、旧窗口又把标签删掉
+  // 要好得多（那正是本任务最不能出现的"两个窗口都没有这个标签"）。
+  adoptTerminalTab: ({ panes, activePaneIndex }) => {
+    if (panes.length === 0) return null
+    const built: Pane[] = panes.map((p) => ({ ...p, id: `pane-${nextPane++}` }))
+    const idx = Math.max(0, Math.min(activePaneIndex, built.length - 1))
+    const id = `tab-${nextTab++}`
+    const tab: Tab = {
+      id,
+      kind: 'term',
+      // 标题就地按窗格重新推导，不由交接载荷携带："标签标题 = deriveTabTitle(窗格)"
+      // 在本文件里是所有路径共同遵守的不变式，旧窗口那份标题本身也是这么算出来的，
+      // 搬一个必然相等的值过来只会多一个可以漂移的真相来源（而且它在这里恒不会被
+      // 用到：panes 非空已在上面保证，deriveTabTitle 的 fallback 分支够不着）。
+      title: deriveTabTitle(built, built[0].title),
+      panes: built,
+      activePaneId: built[idx].id,
+      // 与 insertPaneAtIndex/movePanesToTab 同一惯例：多窗格才需要显式宽度，单窗格
+      // 保持 undefined（TabPanes.tsx 对单窗格本就不读这个字段）。
+      paneWidths: built.length > 1 ? equalPaneWidths(built.length) : undefined,
+    }
+    set((s) => ({ tabs: [...s.tabs, tab], activeId: id }))
+    return id
+  },
+  // 跨窗口交接的发送端收尾（V3.3 设计文档 §4.2 最后一步）：把**这次确实交接出去的那些
+  // 窗格**从本窗口移除，但**绝不 kill 它们的 PTY**——那些会话此刻已经被新窗口接管、正在
+  // 继续跑，kill 掉就是直接杀死用户正在运行的 claude 进程。
+  //
+  // 因此这里不能复用 closeTab：它的整个职责就是"确认后终止 PTY"，语义正好相反。与
+  // movePanesToTab 移除源标签那一步是同一类操作（窗格只是换了个持有者，没有任何 PTY
+  // 被终止，也不该弹确认），区别只在于新的持有者在另一个窗口里、不在本窗口的 store。
+  //
+  // **R2/I2：按窗格 id 精确移除，不是按 tab id 整块删。** 交接是异步的：从"打包载荷"
+  // 到"收到 ack"之间还隔着 emitTo 和最长 5s 的等待，用户完全可能在这期间 ⌘D 给这个标签
+  // 加了个新窗格并选定了会话。整块删会把那个**没有交接出去**的窗格一起删掉，它的 PTY
+  // 于是两个窗口都没有——正是本任务绝不允许出现的状态。剩余窗格非空时保留标签本身，
+  // 并按剩余窗格重新等分宽度、重算标题、必要时改焦点（与 closePane 的既有收尾一致）。
+  //
+  // 调用方（windowHandoff.ts）必须在**收到新窗口的接管确认之后**才调这个方法，顺序
+  // 反了会在接管失败时凭空吃掉用户一个正在运行的会话。activeId 的兜底与 closeTab
+  // 逐字相同（主页标签恒存在，tabs 不可能为空）。
+  removeTabKeepingPty: (id, paneIds) => {
+    const tab = get().tabs.find((t) => t.id === id)
+    if (!tab || tab.kind === 'home') return false
+    const handed = new Set(paneIds)
+    const remaining = tab.panes.filter((p) => !handed.has(p.id))
+    if (remaining.length === tab.panes.length) return false // 一个都没交接出去：不动
+    if (remaining.length === 0) {
+      set((s) => {
+        const tabs = s.tabs.filter((t) => t.id !== id)
+        const activeId = s.activeId === id ? tabs[tabs.length - 1].id : s.activeId
+        return { tabs, activeId }
+      })
+      return true
+    }
+    set((s) => ({
+      tabs: s.tabs.map((t) => {
+        if (t.id !== id) return t
+        const activePaneId = handed.has(t.activePaneId ?? '') ? remaining[0].id : t.activePaneId
+        return {
+          ...t,
+          panes: remaining,
+          activePaneId,
+          paneWidths: remaining.length > 1 ? equalPaneWidths(remaining.length) : undefined,
+          title: deriveTabTitle(remaining, t.title),
+        }
+      }),
+    }))
+    return true
   },
 }))

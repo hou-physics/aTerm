@@ -9,7 +9,9 @@ vi.mock('../ipc', () => ({
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 import * as ipc from '../ipc'
 import { resumeThread } from '../actions'
-import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
+import { beginHandoff, endHandoff } from '../handoffLock'
+import { buildPaneCloseConfirmMessage, buildTabCloseConfirmMessage, HANDOFF_IN_FLIGHT_HINT, moveArrayItem, reorderInsertIndex, useTabs } from '../store/tabs'
+import { useHint } from '../store/hint'
 import type { ThreadInfo } from '../ipc'
 import { HOME_TAB, makePane, makeTermTab, makeThread } from './factories'
 import { MAX_PANES } from '../paneLayout'
@@ -1156,5 +1158,88 @@ describe('openOverview 与排序快照的交互（Task 4 ruling：新建总览�
     useTabs.getState().openOverview('-dir-a', 'A') // 已存在，只聚焦
 
     expect(useOverviewStore.getState().order['-dir-a']).toEqual(snapshot)
+  })
+})
+
+
+// V3.3 Ruling 12（原 M7）：标签正在被交接到新窗口的那十几秒里，它**仍然留在标签栏里、
+// 可见可点**。此时按 ⌘W / 点 × 若照常走 ptyKill，杀掉的很可能是新窗口**已经接管成功**
+// 的那个会话（ack 还在路上）。closeTab 与 closePane 两条路径各有自己的 ptyKill，两条都
+// 要挡；挡的时候不许静默，得给用户一条可见提示，否则用户只会以为 ⌘W 坏了、反复猛按。
+//
+// 这里断言的是真实状态（标签还在 store 里、PTY 一次都没被 kill、提示真的挂上了），
+// 不是"某个 mock 没被调用"。
+describe('useTabs — 交接中的标签不许关（Ruling 12）', () => {
+  beforeEach(() => {
+    useHint.setState({ message: null, action: null })
+  })
+
+  it('closeTab：交接中直接拒绝，标签与 PTY 原封不动，并给出可见提示', async () => {
+    vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
+    const p1 = makePane()
+    const tab = makeTermTab({ panes: [p1], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
+    const confirmFn = vi.fn(async () => true)
+    expect(beginHandoff(tab.id)).toBe(true)
+
+    await useTabs.getState().closeTab(tab.id, confirmFn)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([HOME_TAB.id, tab.id])
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    expect(confirmFn).not.toHaveBeenCalled() // 连问都不该问：这不是"要不要杀"的问题
+    expect(useHint.getState().message).toBe(HANDOFF_IN_FLIGHT_HINT)
+
+    endHandoff(tab.id)
+  })
+
+  it('closePane（多窗格标签，走的是它自己那条 ptyKill 分支）：同样拒绝且不杀任何 PTY', async () => {
+    vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
+    const p1 = makePane()
+    const p2 = makePane()
+    const tab = makeTermTab({ panes: [p1, p2], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
+    expect(beginHandoff(tab.id)).toBe(true)
+
+    await useTabs.getState().closePane(tab.id, p1.id, async () => true)
+
+    expect(useTabs.getState().tabs.find((t) => t.id === tab.id)!.panes.map((p) => p.id)).toEqual([p1.id, p2.id])
+    expect(ipc.ptyKill).not.toHaveBeenCalled()
+    expect(useHint.getState().message).toBe(HANDOFF_IN_FLIGHT_HINT)
+
+    endHandoff(tab.id)
+  })
+
+  it('交接结束（锁释放）之后，同一个标签立刻又能正常关闭——闸门只挡交接那一会儿', async () => {
+    vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
+    const p1 = makePane()
+    const tab = makeTermTab({ panes: [p1], activePaneId: p1.id })
+    useTabs.setState({ tabs: [HOME_TAB, tab], activeId: tab.id })
+    beginHandoff(tab.id)
+    await useTabs.getState().closeTab(tab.id, async () => true)
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([HOME_TAB.id, tab.id]) // 前置：确实被挡住了
+
+    endHandoff(tab.id)
+    await useTabs.getState().closeTab(tab.id, async () => true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([HOME_TAB.id])
+    expect(ipc.ptyKill).toHaveBeenCalledWith(p1.ptyId)
+  })
+
+  it('闸门按标签区分：另一个标签正在交接，不影响这个标签的关闭', async () => {
+    vi.mocked(ipc.ptyIsAlive).mockResolvedValue(true)
+    const p1 = makePane()
+    const p2 = makePane()
+    const busy = makeTermTab({ panes: [p1], activePaneId: p1.id })
+    const idle = makeTermTab({ panes: [p2], activePaneId: p2.id })
+    useTabs.setState({ tabs: [HOME_TAB, busy, idle], activeId: idle.id })
+    beginHandoff(busy.id)
+
+    await useTabs.getState().closeTab(idle.id, async () => true)
+
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([HOME_TAB.id, busy.id])
+    expect(ipc.ptyKill).toHaveBeenCalledWith(p2.ptyId)
+    expect(ipc.ptyKill).not.toHaveBeenCalledWith(p1.ptyId)
+
+    endHandoff(busy.id)
   })
 })

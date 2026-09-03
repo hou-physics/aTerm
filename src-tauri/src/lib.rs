@@ -4,10 +4,10 @@ mod reveal;
 mod sessions;
 mod status;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tauri::menu::{CheckMenuItem, IsMenuItem, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 
 /// 供 `RunEvent::ExitRequested` 处理器与 `confirm_exit` 共用的一个开关：前端确认弹窗里
 /// 点了"确定关闭"之后、真正调用 `AppHandle::exit` 之前，`confirm_exit` 先把它置位。
@@ -34,33 +34,449 @@ fn confirm_exit(app_handle: AppHandle) {
     app_handle.exit(0);
 }
 
-/// 窗口 `CloseRequested`、应用级 `ExitRequested`、（macOS 上替换掉默认 Quit 项后的）自定义
-/// Quit 菜单项，三条路径共用的"通知前端弹确认"逻辑，避免各自维护一份重复代码。用
-/// `AppHandle::emit` 而不是某个具体窗口的 `emit`：与被替换前的窗口路径（`window.emit`）
-/// 语义一致——两者都是广播给所有 webview，不是发给某个特定窗口的定向事件，前端
-/// `listen('app-close-requested', ...)` 本来就是全局监听，不区分来源窗口。
-fn emit_close_requested(app_handle: &AppHandle) {
-    let _ = app_handle.emit("app-close-requested", ());
+/// 主窗口的 label。`tauri.conf.json` 里写死的那一个，也是"关掉它 = 退出整个应用"的
+/// 那一个（见 `on_window_event`）。拖出标签创建的窗口一律是 `term-<n>`
+/// （`new_term_window_label`），永远不会等于它。
+const MAIN_WINDOW_LABEL: &str = "main";
+
+/// 拖出标签创建的终端窗口的 label 前缀。三处共用同一份含义：`new_term_window_label`
+/// 生成它、`capabilities/default.json` 的 `windows` 用 `term-*` 授权它、前端
+/// `src/windowLabel.ts` 的 `isTornOutWindow` 用它自辨——所以这里也用同一个常量，不再
+/// 在 `format!` 里写一遍字面量。
+const TERM_WINDOW_LABEL_PREFIX: &str = "term-";
+
+/// 纯函数：一个窗口 label 是不是"拖出标签创建出来的终端窗口"。
+///
+/// `destroy_term_window` 的准入校验（该命令能**绕过 `CloseRequested`** 强行销毁窗口，
+/// 见其上方注释），因此这里是白名单式判断（必须是 `term-` 前缀）而不是
+/// `label != "main"`：漏判的代价是主窗口被一条本该只作用于拖出窗口的命令强行销毁，
+/// 而主窗口的关闭在本应用里等于"退出应用"、必须经过 ⌘Q 确认框那条路径——绕过它就是
+/// 把整个应用连同所有窗口里正在跑的会话一起无声终止。将来若出现别的用途的窗口
+/// （面板、预览…），"不是主窗口"同样会把它们也纳入销毁范围，白名单不会。
+///
+/// 与前端 `isTornOutWindow` 是同一条规则的两侧（同一个前缀），刻意各自实现：这条判断
+/// 是安全边界，两侧各自校验一次，任一侧被改坏另一侧仍然挡得住。
+fn is_term_window_label(label: &str) -> bool {
+    label.starts_with(TERM_WINDOW_LABEL_PREFIX)
 }
 
-/// macOS 专属：App 菜单里"设置…"项被点击（或按下 ⌘,）时，广播给前端打开设置浮层
-/// （`useSettings.getState().openSettings()`，见 src/App.tsx 附近对 `menu-open-settings`
-/// 的监听）。与 emit_close_requested 同一风格：用 `AppHandle::emit` 广播给所有
-/// webview，不针对某个具体窗口——前端 `listen('menu-open-settings', ...)` 本来就是
-/// 全局监听，不区分来源窗口。
+/// **应用级**关闭请求（⌘Q / Quit 菜单项 / 主窗口的关闭按钮 / `RunEvent::ExitRequested`）
+/// 共用的"通知前端弹确认"逻辑。
+///
+/// V3.3 起用 `emit_to(MAIN_WINDOW_LABEL, …)` 而不是 `emit` 广播。改动理由：多窗口之后，
+/// 广播意味着**每个**窗口的 `src/closeRequest.ts` 都会各弹一个确认框——同一次 ⌘Q 堆出
+/// N 个对话框，随便在哪一个上点"确定"都会退出整个应用。退出是应用级的一件事，只该问
+/// 一次，问在主窗口（本应用里主窗口恒存在：关掉它就等于退出应用，见 `on_window_event`，
+/// 所以不存在"定向发给了一个已经不在的窗口"这种情况）。
+///
+/// 定向只在前端也配合限定监听 target 时才真的生效——`listen(event, handler)` 不传
+/// options 时 target 是 `{ kind: 'Any' }`，而 Any 目标的监听器对 `emit_to` 的 label
+/// 过滤**无条件命中**（tauri 2.11.5 `event/listener.rs` 的 `match_any_or_filter`，
+/// 考据见 src/windowHandoff.ts 顶部）。`src/closeRequest.ts` 因此改成
+/// `listen(…, { target: 本窗口 label })`。这个组合有一个刻意保留的降级性质：即便前端那
+/// 半边失效（回到 Any 监听），主窗口**照样收得到**这个事件，⌘Q 确认框最坏退回到 V3.2
+/// 的广播行为，而不是彻底失灵。
+///
+/// **载荷是目标窗口的 label**（终审 I3），与 `emit_window_close_requested` 一模一样的
+/// 理由，这里不再复述考据：`emit_to` 不是私有信道，定向的唯一防线是接收侧那**一个**
+/// `target` option，而"一个 option 是唯一防线"正是本分支已经吃过一次 Critical
+/// （Ruling 8）、又发现过一个半成品（Ruling 15）的形状。规矩是两头都做：发送端定向 +
+/// 载荷带目标 label，接收端限定 target + handler 里再比对载荷。这条事件此前只做了发送
+/// 侧的定向，收方（`handleCloseRequested`）完全不看载荷——一旦那个 option 掉了，每个
+/// 拖出来的 `term-*` 窗口都会各弹一个"确定关闭 aTerm？"，随便在哪一个上点确定都会退出
+/// 整个应用、连带杀光所有窗口里的会话。
+///
+/// 写 `MAIN_WINDOW_LABEL` 而不是别的：主窗口两侧恒相等（上面 `emit_to` 的目标就是它，
+/// 收方比对的是自己的 `currentWindowLabel()`，而这个常量已由
+/// `tauri_still_derives_the_label_this_module_hard_codes` 与
+/// `main_window_in_tauri_conf_resolves_to_the_hard_coded_label` 两条测试钉在 tauri 的
+/// 隐式默认值上），因此零降级损失——上面那条"前端半边失效也照样收得到"的性质讲的是
+/// **投递**，与要不要校验载荷无关。
+fn emit_close_requested(app_handle: &AppHandle) {
+    let _ = app_handle.emit_to(MAIN_WINDOW_LABEL, "app-close-requested", MAIN_WINDOW_LABEL);
+}
+
+/// **单个非主窗口**（拖出来的 `term-*` 终端窗口）收到关闭请求时，定向通知**它自己的**
+/// 前端。与 `emit_close_requested` 是两件不同的事，不能合并：那条是"要退出整个应用了"，
+/// 这条是"只关你这一个窗口"。
+///
+/// 为什么关窗也要绕一趟前端，而不是让窗口直接关掉：**哪些 PTY 属于这个窗口，只有这个
+/// 窗口的前端知道**。Rust 侧的 `PtyManager` 是一张全应用的扁平 map，没有、也不该有窗口
+/// 归属信息——归属的真相在各窗口自己的 `useTabs` store 里，而且它在标签交接期间是会
+/// 变的（新窗口 adopt 在前、旧窗口移除在后）。在 Rust 里再维护一份窗口→PTY 的映射就是
+/// 第二个可以与之矛盾的真相来源。所以这里 `prevent_close` 之后把决定权交给那个窗口的
+/// 前端（src/windowClose.ts）：它清点自己持有的存活会话、必要时弹确认、终止它们，最后
+/// 调 `destroy_term_window` 真正关掉自己。这与主窗口关闭走
+/// `prevent_close` → 前端确认 → `confirm_exit` 是**同一套**既有模式，不是新引入的机制。
+///
+/// **载荷是目标窗口自己的 label**（R1/I2）。看上去冗余——`emit_to` 的第一个参数已经是它
+/// 了——但那正是 Ruling 8 反复钉过的那件事：`emit_to` **不是私有信道**。不传 options 的
+/// JS `listen` 落成 `{ kind: 'Any' }`，而 Any 目标的监听器对 `emit_to` 的 label 过滤
+/// **无条件命中**（tauri 2.11.5 `event/listener.rs` 的 `match_any_or_filter`）。也就是说，
+/// 定向这件事的唯一防线是接收侧那一个 `target` option；漏了它，`term-2` 会收到发给
+/// `term-1` 的这条事件，而"我是不是拖出来的窗口"这个判断对它同样为真——于是它会把
+/// **自己**的全部会话杀掉再自毁。交接协议（`term-window-handoff`）为此加了
+/// `payload.toLabel` 比对，这条事件必须一视同仁：收到的一方拿载荷里的 label 与
+/// `currentWindowLabel()` 比一次，对不上就什么都不做。
+fn emit_window_close_requested(app_handle: &AppHandle, label: &str) {
+    let _ = app_handle.emit_to(label, "window-close-requested", label);
+}
+
+/// 前端（src/windowClose.ts）在"已经终止完本窗口自己持有的 PTY"之后调用：真正关掉这个
+/// 拖出来的终端窗口。与 `confirm_exit` 完全对偶——那条是"确认过了，退出应用"，这条是
+/// "确认过了，关掉这一个窗口"。
+///
+/// 用 `destroy()` 而不是 `close()`：`close()` 会再触发一次 `CloseRequested`，而
+/// `on_window_event` 对非主窗口的 `CloseRequested` 一律 `prevent_close` 并回头再问前端
+/// 一次——那是一个关不掉的循环。`destroy()` 按 tauri 文档"forces the window close
+/// instead of emitting the CloseRequested event"，正是这里要的语义。
+///
+/// **同时也是标签交接回滚的唯一关窗入口**（V3.3 Ruling 7）。回滚要关掉的那个新窗口
+/// 可能其实**已经接管成功**、只是 ack 丢了/超时了；若走 `close()`，它的前端会收到
+/// `window-close-requested`、把"自己持有的"——也就是刚刚接管过来的——PTY 全部 kill 掉，
+/// 而那正是用户正在跑的会话。`destroy()` 绕过整条前端路径，因此不会有任何 kill 发生：
+/// 交接成功了的话标签仍留在旧窗口（回滚不动标签），会话继续跑；没接管成功的话本来就
+/// 没有什么可 kill 的。两个分支都对，而这正是关键——回滚方**无法知道**自己在哪个分支
+/// （ack 就是那个丢掉的信息），所以只能选一个两边都安全的动作。
+///
+/// 窗口已经不在了（label 查不到）时返回 `Ok(())` 而不是 `Err`：这个命令天然会和"窗口
+/// 自己正在关"竞争（回滚与用户手动关窗可能同时发生），"目标已经处于期望状态"不是错误。
+/// label 不是 `term-` 前缀时返回 `Err` 并且什么都不做——见 `is_term_window_label`。
+#[tauri::command]
+async fn destroy_term_window(app: AppHandle, label: String) -> Result<(), String> {
+    if !is_term_window_label(&label) {
+        return Err(format!("拒绝销毁非终端窗口：{label}"));
+    }
+    let Some(window) = app.get_webview_window(&label) else {
+        return Ok(());
+    };
+    window.destroy().map_err(|e| format!("销毁窗口失败：{e}"))
+}
+
+// ── 菜单事件的定向投递（V3.3 §5.4）────────────────────────────────────────────
+//
+// 菜单栏是**应用级**的一份（macOS 全局菜单栏），但它承载的两件事都是**窗口级**的：
+// "设置…"要打开的是某一个窗口里的设置浮层，「主题」三项要改的是某一个窗口的主题
+// store。V3.2 只有一个窗口，`app.emit` 广播与"发给那唯一的窗口"没有区别；多窗口
+// 之后广播意味着点一次"设置…"**每个**窗口都弹出设置浮层。
+//
+// 语义上正确的收件人是**当前聚焦的那个窗口**——菜单栏点击必然发生在应用处于活动
+// 状态时，用户心里想操作的就是眼前那个 key window。
+//
+// ## 取聚焦窗口的 API（已核实 tauri 2.11.5 源码，不凭印象）
+//
+// `Manager::get_focused_window()` 确实存在（`tauri-2.11.5/src/lib.rs:548-552`），
+// **但它带 `#[cfg(feature = "unstable")]`**，而本仓库 `Cargo.toml` 只开了
+// `features = ["devtools"]`——直接调用编译不过。为一个可以两行写出来的东西去开一个
+// 官方标注 unstable 的 feature 不划算（那个 feature 门的是整套多 webview API，
+// 语义可能随小版本变化）。
+//
+// 改用两个**未被 gate** 的公开 API 组合，逻辑与 `get_focused_window` 内部实现逐字
+// 相同（`tauri-2.11.5/src/manager/mod.rs:644-651`：遍历窗口表，`find` 第一个
+// `is_focused().unwrap_or(false)`）：
+//   - `Manager::webview_windows()`（`src/lib.rs:587`，无 cfg 门）
+//   - `WebviewWindow::is_focused()`（`src/webview/webview_window.rs:1744`，无 cfg 门）
+// macOS 上 `is_focused` 最终落到 tao 的 `ns_window.isKeyWindow()`
+// （`tao-0.35.3/src/platform_impl/macos/window.rs:698`）——菜单栏被拉开时 key window
+// 不变，因此菜单事件处理器里读到的正是用户眼前那个窗口。
+//
+// ## 两头都要做（Ruling 8）
+//
+// `emit_to(label, …)` **不是私有信道**：不传 options 的 JS `listen` 落成
+// `{ kind: 'Any' }`，而 `event/listener.rs:306-311` 的 `match_any_or_filter` 首项就是
+// `*target == EventTarget::Any`——Any 监听器无条件命中，label 过滤对它完全失效。
+// 本计划已因此吃过一次 Critical（交接载荷被兄弟窗口接管，杀掉正在跑的会话）。
+// 所以这里的每条菜单事件：
+//   - 发送端 `emit_to(label, …)`，**并且载荷里带上目标 label**（`target` 字段）；
+//   - 接收端（`src/menuEvents.ts`）`listen(…, { target: 本窗口 label })`，**并且**在
+//     handler 里再比对一次 `payload.target` 是不是自己。
+// 只做一头今天能跑，但唯一的防线就是那一个 option，退回 Any 监听即全盘失效。
+
+/// 一条菜单事件该投递给谁。
+///
+/// 存在的意义是把"emit 的目标"和"载荷里写的 target"绑成**同一个值的两个视图**——
+/// 两者若各算各的，就又多了一处可以悄悄漂移的地方，而漂移的表现是"接收端把发给自己
+/// 的事件当成别人的丢掉"，即菜单项静默失灵。
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MenuDelivery {
+    /// 定向投递给这一个窗口（当前聚焦的那个）。
+    ToWindow(String),
+    /// **降级**：取不到聚焦窗口时广播给所有窗口，载荷 `target` 为 `null`，接收端
+    /// 无条件接受。取不到聚焦窗口在 macOS 上是罕见但可能的（例如所有窗口都最小化
+    /// 而应用仍是活动应用），此时"每个窗口都弹设置浮层"虽然吵，但远好过"点了没反应"。
+    /// 这条降级只对这两条菜单事件成立：它们最坏的后果是多开一个浮层/多改一次主题，
+    /// 与 `window-close-requested` 那种"广播出去会让每个窗口杀掉自己的会话"的事件
+    /// 性质完全不同，不可类推。
+    BroadcastFallback,
+}
+
+#[cfg(target_os = "macos")]
+impl MenuDelivery {
+    /// 载荷里 `target` 字段的值。刻意由 `self` 派生而不是让调用方自己传一遍——
+    /// 见 `MenuDelivery` 上方注释。
+    fn payload_target(&self) -> Option<String> {
+        match self {
+            MenuDelivery::ToWindow(label) => Some(label.clone()),
+            MenuDelivery::BroadcastFallback => None,
+        }
+    }
+}
+
+/// 纯函数：由"当前聚焦窗口的 label"（`None` = 取不到）决定投递方式。
+/// 不接触任何 Tauri 对象，因此可以直接单测（与 `settings_insertion_index`/
+/// `theme_mode_checked_states` 同一做法）。
+#[cfg(target_os = "macos")]
+fn menu_event_delivery(focused_label: Option<String>) -> MenuDelivery {
+    match focused_label {
+        Some(label) => MenuDelivery::ToWindow(label),
+        None => MenuDelivery::BroadcastFallback,
+    }
+}
+
+/// 当前聚焦窗口的 label。取不到返回 `None`（见 `menu_event_delivery` 的降级）。
+/// 实现依据见本节顶部注释——等价于 unstable 的 `Manager::get_focused_window()`。
+#[cfg(target_os = "macos")]
+fn focused_window_label(app_handle: &AppHandle) -> Option<String> {
+    app_handle
+        .webview_windows()
+        .into_iter()
+        .find(|(_, window)| window.is_focused().unwrap_or(false))
+        .map(|(label, _)| label)
+}
+
+/// `menu-open-settings` 的载荷。`target` 见 `MenuDelivery::payload_target`。
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, serde::Serialize)]
+struct MenuOpenSettingsPayload {
+    target: Option<String>,
+}
+
+/// `menu-theme-mode` 的载荷。V3.3 之前这个事件的载荷是裸的模式字符串，现在必须多带
+/// 一个 `target`（Ruling 8 的接收端二次校验要读它），因此升格成对象。
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, serde::Serialize)]
+struct MenuThemeModePayload {
+    target: Option<String>,
+    mode: String,
+}
+
+#[cfg(target_os = "macos")]
+fn open_settings_payload(delivery: &MenuDelivery) -> MenuOpenSettingsPayload {
+    MenuOpenSettingsPayload {
+        target: delivery.payload_target(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn theme_mode_payload(delivery: &MenuDelivery, mode: &str) -> MenuThemeModePayload {
+    MenuThemeModePayload {
+        target: delivery.payload_target(),
+        mode: mode.to_string(),
+    }
+}
+
+/// 按 `delivery` 把一条菜单事件发出去。降级为广播时打警告——与 src/menuEvents.ts
+/// 顶部 `syncThemeModeToMenu` 那条注释同一理由：本仓库已经因为"失败被静默吞掉、
+/// 运行期零信号"付出过代价（`core:window:allow-set-size` 那次），降级同样要留痕。
+#[cfg(target_os = "macos")]
+fn dispatch_menu_event<P: serde::Serialize + Clone>(
+    app_handle: &AppHandle,
+    delivery: &MenuDelivery,
+    event: &str,
+    payload: P,
+) {
+    match delivery {
+        MenuDelivery::ToWindow(label) => {
+            let _ = app_handle.emit_to(label.as_str(), event, payload);
+        }
+        MenuDelivery::BroadcastFallback => {
+            eprintln!(
+                "警告：取不到聚焦窗口，菜单事件 {event} 降级为广播，所有窗口都会响应这一次点击"
+            );
+            let _ = app_handle.emit(event, payload);
+        }
+    }
+}
+
+/// macOS 专属：App 菜单里"设置…"项被点击（或按下 ⌘,）时，通知**当前聚焦的那个窗口**
+/// 打开设置浮层（`useSettings.getState().openSettings()`，见 src/menuEvents.ts 对
+/// `menu-open-settings` 的监听）。
+///
+/// V3.3 起由 `AppHandle::emit` 广播改成定向——广播会让多窗口下点一次"设置…"每个
+/// 窗口各弹一个浮层。定向的两头做法与降级见本节顶部注释。
 #[cfg(target_os = "macos")]
 fn emit_open_settings(app_handle: &AppHandle) {
-    let _ = app_handle.emit("menu-open-settings", ());
+    let delivery = menu_event_delivery(focused_window_label(app_handle));
+    let payload = open_settings_payload(&delivery);
+    dispatch_menu_event(app_handle, &delivery, "menu-open-settings", payload);
 }
 
 /// macOS 专属：菜单栏「主题」子菜单里三项之一被点击时，把选中的模式字符串
-/// （"default" / "dual" / "single"）广播给前端（见 src/menuEvents.ts 对
-/// `menu-theme-mode` 的监听：校验 payload 合法后调用 `useTheme.getState().setMode`）。
-/// 与 emit_open_settings/emit_close_requested 同一风格：`AppHandle::emit` 广播给
-/// 所有 webview。
+/// （"default" / "dual" / "single"）发给**当前聚焦的那个窗口**（见 src/menuEvents.ts
+/// 对 `menu-theme-mode` 的监听：校验 target 与 payload 合法后调用
+/// `useTheme.getState().setMode`）。
+///
+/// 定向而不是广播的理由与"设置…"相同，但这里还多一层：主题变更本身会由
+/// `src/themeSync.ts` 广播给其它窗口（§5.5），如果菜单事件自己也广播，N 个窗口会各自
+/// 改一遍 store 再各自广播一遍，同一次点击放大成 N² 条事件。
 #[cfg(target_os = "macos")]
 fn emit_theme_mode(app_handle: &AppHandle, mode: &str) {
-    let _ = app_handle.emit("menu-theme-mode", mode);
+    let delivery = menu_event_delivery(focused_window_label(app_handle));
+    let payload = theme_mode_payload(&delivery, mode);
+    dispatch_menu_event(app_handle, &delivery, "menu-theme-mode", payload);
+}
+
+/// 拖出标签页时给新窗口分配的自增序号——`new_term_window_label` 用它拼出 `term-<n>`。
+///
+/// 没有用 `uuid` crate：仓库要求本任务不得新增依赖，而 `uuid` 虽然已经通过
+/// tauri/notify 等间接依赖出现在 `Cargo.lock` 里，若要在这里 `use uuid::...`，仍必须
+/// 在 `Cargo.toml` 的 `[dependencies]` 里新增一行显式声明——那就是名副其实的"新增
+/// 依赖"，即便它不会真的多下载/多编译一个新 crate。改用本仓库 `pty.rs::pty_spawn`
+/// 已经验证过的同一手法：进程内单调递增的 `AtomicU64` 计数器。这满足这里唯一需要
+/// 的不变式——窗口 label 只需要在应用这一次运行期间不重复（label 不跨进程/跨重启
+/// 持久化，重启后旧窗口早已不存在，序号从 1 重来不会与任何"仍然活着"的窗口冲突）。
+static NEXT_TERM_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 纯函数：生成新终端窗口的 label，形如 `term-<n>`。
+///
+/// 不接触任何 Tauri/窗口对象，因此可以像 `settings_insertion_index`/`validate_reveal_
+/// dir`（见 reveal.rs）那样直接单测，不需要构造真实 `App`。`create_term_window` 是
+/// 这个函数唯一的生产调用点。
+fn new_term_window_label() -> String {
+    format!(
+        "{TERM_WINDOW_LABEL_PREFIX}{}",
+        NEXT_TERM_WINDOW_ID.fetch_add(1, Ordering::SeqCst)
+    )
+}
+
+/// 从 `app.config().app.windows`（对应 `tauri.conf.json`）里选出"新终端窗口应该
+/// 以谁为模板"的那一份**完整** `WindowConfig`——不是只挑宽高/URL/标题几个字段，
+/// 是整份配置对象本身。
+///
+/// R1 修复背景：上一轮实现手动挑了 `width`/`height`/`url`/`title` 四个字段，遗漏了
+/// `minWidth`/`minHeight`（评审指出：新窗口能被拖成一条缝，主窗口不能）。手动挑选
+/// 字段这个模式本身就是问题根源——`WindowConfig` 有约 50 个字段（`resizable`/
+/// `decorations`/`titleBarStyle`/`maximizable`/`minimizable`/`closable`/`focus`/
+/// `alwaysOnTop`/`theme`/… 已逐一读过 tauri-utils 2.9.3 `src/config.rs` 的
+/// `WindowConfig` 定义，第 1917-2294 行），今天补上 `minWidth`/`minHeight` 不代表
+/// 以后不会再漏别的。已确认当前 `tauri.conf.json` 的主窗口条目只显式设置了
+/// `title`/`width`/`height`/`minWidth`/`minHeight` 这五项，`resizable`/
+/// `decorations`/`titleBarStyle` 等未出现——但即便如此，也不再逐字段挑，而是让
+/// `term_window_config` 整份克隆再只改 label/位置，这样"以后 tauri.conf.json 里
+/// 主窗口新增了 `alwaysOnTop: true` 之类的字段"也会被新窗口自动继承，不需要回来改
+/// 这个函数。
+///
+/// 优先选 label 为 `"main"` 的那项；找不到就退回数组第一项（本仓库目前只有一个
+/// 窗口配置，二者等价）；数组整体为空这种理论上不该发生的情况（tauri.conf.json
+/// 至少声明了一个窗口）才退回硬编码兜底值——与当前 `tauri.conf.json` 主窗口配置
+/// 逐字段一致（title/width/height/minWidth/minHeight），其余字段用
+/// `WindowConfig::default()`（已对照 `tauri-utils` 源码里 `impl Default for
+/// WindowConfig` 核实，与 `tauri.conf.json` 未显式声明字段时 serde
+/// `#[serde(default = ...)]` 解析出的值逐一相同，例如 `resizable`/`decorations`
+/// 的 serde 默认与 `Default` 默认都是 `true`）。
+///
+/// 纯函数：只读一个切片、返回一份克隆，不接触 `AppHandle`，因此可以直接单测。
+fn main_window_config(windows: &[tauri::utils::config::WindowConfig]) -> tauri::utils::config::WindowConfig {
+    windows
+        .iter()
+        .find(|w| w.label == MAIN_WINDOW_LABEL)
+        .or_else(|| windows.first())
+        .cloned()
+        .unwrap_or_else(|| tauri::utils::config::WindowConfig {
+            title: "aTerm".to_string(),
+            width: 1200.0,
+            height: 780.0,
+            min_width: Some(800.0),
+            min_height: Some(500.0),
+            ..Default::default()
+        })
+}
+
+/// 纯函数：由主窗口的完整 `WindowConfig` 派生新终端窗口应使用的 `WindowConfig`——
+/// 只改 `label`（新窗口自己的 label，不能和主窗口撞）与位置（`x`/`y`，调用方传入的
+/// 逻辑像素坐标，见 `create_term_window` 顶部注释的坐标契约）；其余字段——包括
+/// R1 补上的 `min_width`/`min_height`，以及 `resizable`/`decorations`/
+/// `title_bar_style` 等——原样整份克隆自主窗口配置，一次性继承，不逐个字段挑
+/// （逐字段挑正是上一轮遗漏 minWidth/minHeight 的根因）。
+fn term_window_config(
+    main: &tauri::utils::config::WindowConfig,
+    label: &str,
+    x: f64,
+    y: f64,
+) -> tauri::utils::config::WindowConfig {
+    let mut config = main.clone();
+    config.label = label.to_string();
+    config.x = Some(x);
+    config.y = Some(y);
+    config
+}
+
+/// 把一个标签页拖出主窗口时，创建接管它的新窗口。
+///
+/// ## 坐标契约：`x`/`y` 是逻辑（CSS）像素，不是物理像素，调用方不需要按
+/// `devicePixelRatio` 换算
+///
+/// 依据：已对照本机 `tauri 2.11.5` 源码 `src/webview/webview_window.rs` 里
+/// `WebviewWindowBuilder::position` 的文档字符串——"The initial position of the
+/// window in logical pixels."（`inner_size` 同一文件、同一措辞："Window size in
+/// logical pixels."）核实。
+///
+/// 这与 `src/store/layout.ts` 的 `runPanelResize` 刻意相反，容易搞反、所以在这里
+/// 写清楚：那段代码调用的是**已存在窗口**的 JS 端 API
+/// `win.setPosition(new PhysicalPosition(...))`——显式构造 `PhysicalPosition`
+/// 包装类型，因此要求物理像素，需要先把 CSS 像素的 `panelWidth` 乘上
+/// `window.devicePixelRatio` 才能传进去（该文件里那段注释："panelWidth 存的是 CSS
+/// 像素，而 outerPosition/outerSize/Monitor.workArea 全部是物理像素"）。而这里调用的
+/// 是**创建期**的 Rust 端 builder 方法，同一个 `f64` 参数在 `position`/`inner_size`
+/// 这两个方法上就是逻辑像素，没有 Physical/Logical 包装类型的选择余地——如果调用方
+/// （前端拖出手势）在传入前又乘了一次 dpr，Retina 屏（dpr=2）上新窗口就会出现在期望
+/// 位置 2 倍偏移处，且非 Retina 屏上又恰好正确，是最难查的那类缺陷（与 layout.ts 里
+/// 那条注释描述的坑同构，方向相反）。调用方应直接传入拖放事件里的 CSS 像素坐标
+/// （例如 `DragEvent.screenX`/`screenY`），不要再乘 dpr。
+///
+/// ## 尺寸/外观/行为——R1：改用 `WebviewWindowBuilder::from_config` 整份继承
+///
+/// 不再手动 `.inner_size(width, height)`/`.title(title)` 逐个字段搭 builder（上一轮
+/// 做法，遗漏了 minWidth/minHeight）。改为整份克隆主窗口 `WindowConfig`（见
+/// `main_window_config`/`term_window_config`），交给
+/// `WebviewWindowBuilder::from_config`。已对照本机 `tauri-runtime-wry 2.11.4`
+/// 源码 `src/lib.rs` 的 `WindowBuilderWry::with_config`（第 862-996 行）核实：
+/// 这条路径会把 `WindowConfig` 的 `width`/`height`/`min_width`/`min_height`/
+/// `max_width`/`max_height`/`resizable`/`decorations`/`fullscreen`/`maximized`/
+/// `always_on_top`/`always_on_bottom`/`visible_on_all_workspaces`/
+/// `content_protected`/`skip_taskbar`/`theme`/`closable`/`maximizable`/
+/// `minimizable`/`shadow`/`title`/`focus`/`focusable`/`visible`/`title_bar_style`
+/// （macOS 分支）等**全部**字段应用到新窗口，以及当 `x`/`y` 同时为 `Some` 时调用
+/// `.position(x, y)`——`term_window_config` 正是把这两个字段设成调用方传入的坐标。
+/// 这样"主窗口有哪些外观/行为配置，新窗口就继承哪些"是结构性保证，不依赖这里
+/// 手动枚举字段列表（枚举列表今天补全了，明天 tauri.conf.json 加新字段又会漏）。
+///
+/// ## 失败即降级
+///
+/// `WebviewWindowBuilder::from_config`/`.build()` 出错只把错误信息通过 `Err` 传回
+/// 前端，绝不 panic——与仓库里其它命令的一贯做法一致（`reveal_in_finder`、
+/// `set_theme_mode_checked` 等），也是本仓库明确要求的纪律：`core:window:allow-
+/// set-size` 未授权那次事故就是"该报错的地方被静默吞掉"，这里不重蹈覆辙。
+///
+/// 用 `async fn`：已对照 `WebviewWindowBuilder::new`/`from_config` 文档字符串
+/// 核实——"On Windows, this function deadlocks when used in a synchronous
+/// command and event handlers ... You should use `async` commands and separate
+/// threads when creating windows."，仓库里 `count_subagents`
+/// （sessions/subagents.rs）已有 `async` 命令先例，这里照官方建议同样写成
+/// `async`。
+#[tauri::command]
+async fn create_term_window(app: AppHandle, x: f64, y: f64) -> Result<String, String> {
+    let label = new_term_window_label();
+    let main = main_window_config(&app.config().app.windows);
+    let config = term_window_config(&main, &label, x, y);
+
+    WebviewWindowBuilder::from_config(&app, &config)
+        .map_err(|e| format!("创建新窗口失败：{e}"))?
+        .build()
+        .map_err(|e| format!("创建新窗口失败：{e}"))?;
+
+    Ok(label)
 }
 
 /// macOS 专属：把 Tauri 自动生成的默认菜单里那个"Quit"项换成一个自定义菜单项。
@@ -433,17 +849,23 @@ pub fn run() {
         .manage(sessions::subagents::SubagentCache::default())
         .manage(ExitConfirmed(AtomicBool::new(false)))
         .on_window_event(|window, event| {
-            // 只关心主窗口（本应用只有一个窗口，label 固定为 "main"）；显式判断而非依赖
-            // "反正只有一个窗口"这个隐含前提，未来加窗口也不会意外影响到它们。
-            if window.label() != "main" {
-                return;
-            }
             // `CloseRequested` 是 `#[non_exhaustive]` 的结构体变体，匹配时必须带 `..`。
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // 挡下这次关闭：真正退出与否交给前端弹出确认对话框后决定
-                // （见 confirm_exit 命令与前端 src/closeRequest.ts）。
+                // 两条路径都先挡下这次关闭，把决定权交给前端——区别只在"问谁、问什么"。
+                // V3.3 之前这里对非 main 窗口整个早退（不 prevent、也不通知任何人），
+                // 那时拖出来的窗口关掉是"窗口没了、它里面的 claude 进程还在后台跑，谁
+                // 都看不见也关不掉"。
                 api.prevent_close();
-                emit_close_requested(window.app_handle());
+                if window.label() == MAIN_WINDOW_LABEL {
+                    // 主窗口关闭 = 退出整个应用：沿用既有的 ⌘Q 确认流程一字不改
+                    // （见 confirm_exit 命令与前端 src/closeRequest.ts）。
+                    emit_close_requested(window.app_handle());
+                } else {
+                    // 非主窗口关闭 = 只关这一个窗口，且**只终止它自己持有的 PTY**
+                    // （V3.3 设计文档 §5.3）。谁持有哪些 PTY 只有那个窗口的前端知道，
+                    // 理由见 emit_window_close_requested 上方注释。
+                    emit_window_close_requested(window.app_handle(), window.label());
+                }
             }
         })
         .on_menu_event(|app_handle, event| {
@@ -475,13 +897,16 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_is_alive,
+            pty::pty_alive_count,
             status::get_session_statuses,
             status::installer::hooks_status,
             status::installer::install_hooks,
             status::installer::uninstall_hooks,
             reveal::reveal_in_finder,
             confirm_exit,
-            set_theme_mode_checked
+            set_theme_mode_checked,
+            create_term_window,
+            destroy_term_window
         ])
         .setup(|app| {
             // 状态引擎（P2b）：起文件监听 + 后台刷新线程，注册管理状态。返回的句柄
@@ -743,5 +1168,288 @@ mod tests {
             1,
             "任意时刻必须恰好一项勾选"
         );
+    }
+
+    // new_term_window_label：拖出标签页时新窗口的 label 生成规则，纯函数，不接触任何
+    // 真实 App/WebviewWindow（与 settings_insertion_index / validate_reveal_dir 同一
+    // 做法）。create_term_window 本身要构造真实窗口，未覆盖单测（先例见
+    // theme_mode_checked_states_overwrites_stale_state 上方注释里对 apply_theme_mode_
+    // checked 覆盖缺口的说明）。
+
+    #[test]
+    fn term_window_label_has_expected_shape() {
+        // 会因为什么失败：如果实现改成不带 "term-" 前缀（例如直接返回裸数字/uuid），
+        // starts_with 断言就会失败。
+        let a = new_term_window_label();
+        let b = new_term_window_label();
+        assert!(a.starts_with("term-"), "label 必须以 term- 开头，实际：{a}");
+        // 会因为什么失败：如果生成规则退化成常量或基于不够精细的时钟（两次调用落在
+        // 同一时间粒度内），第二个窗口的 label 会撞上第一个——多窗口场景下这意味着
+        // WebviewWindowBuilder::new 会因 label 重复而创建失败/覆盖已有窗口。
+        assert_ne!(a, b, "两次生成的 label 不能相同，否则第二个窗口会撞上第一个");
+    }
+
+    // MAIN_WINDOW_LABEL：⌘Q / 主窗口关闭那条链的整条命脉（R1/I3）。
+    //
+    // V3.3 之前 emit_close_requested 是 `emit` 广播，谁在监听都收得到，这个常量写成什么
+    // 都无所谓。改成 `emit_to(MAIN_WINDOW_LABEL, …)` 之后它变成了定向投递的**目标地址**：
+    // 一旦它与主窗口的真实 label 对不上，RunEvent::ExitRequested 会照常 prevent_exit，
+    // 而那条事件发给了一个不存在的窗口、没有任何前端在听——**应用彻底退不出去**，且
+    // 全部单测照样绿（没有任何用例把两侧钉在一起）。这两条测试就是那颗钉子。
+    //
+    // 主窗口的真实 label 由两件事共同决定，所以分两条各钉一件：
+
+    #[test]
+    fn tauri_still_derives_the_label_this_module_hard_codes() {
+        // 其一：tauri 的**隐式默认值**。tauri.conf.json 的窗口条目没有 label 字段（见下
+        // 一条测试），运行期的 label 因此来自 tauri-utils 的 default_window_label()。
+        // 会因为什么失败：升级 tauri 时那个默认推导变了（例如改成 "window-0"）。
+        assert_eq!(
+            tauri::utils::config::WindowConfig::default().label,
+            MAIN_WINDOW_LABEL,
+            "tauri 对窗口 label 的默认推导变了，⌘Q 的定向投递会打在空处"
+        );
+    }
+
+    #[test]
+    fn main_window_in_tauri_conf_resolves_to_the_hard_coded_label() {
+        // 其二：tauri.conf.json 自己。会因为什么失败：有人给主窗口加一句
+        // `"label": "primary"`——那一刻 emit_to("main") 就发给了一个不存在的窗口。
+        // 直接读真实配置文件，与 theme_mode_labels_match_frontend_appearance_section
+        // 读真实前端源码是同一惯例：不在测试里重抄一份配置，那样两边会各自漂移。
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 应由 cargo 设置");
+        let path = std::path::Path::new(&manifest_dir).join("tauri.conf.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败：{e}", path.display()));
+        let config: serde_json::Value =
+            serde_json::from_str(&source).expect("tauri.conf.json 应是合法 JSON");
+        let windows = config["app"]["windows"]
+            .as_array()
+            .expect("tauri.conf.json 的 app.windows 应是数组");
+        assert!(!windows.is_empty(), "app.windows 不能为空，否则没有主窗口");
+        // 缺省 label 的窗口条目由 tauri 推导成 default_window_label()（上一条测试已把它
+        // 钉成 MAIN_WINDOW_LABEL）；显式写了 label 的必须自己等于它。至少要有一个窗口
+        // 最终解析成 MAIN_WINDOW_LABEL，否则"关掉主窗口 = 退出应用"这条链没有落点。
+        let resolved: Vec<String> = windows
+            .iter()
+            .map(|w| match w.get("label").and_then(|l| l.as_str()) {
+                Some(explicit) => explicit.to_string(),
+                None => tauri::utils::config::WindowConfig::default().label,
+            })
+            .collect();
+        assert!(
+            resolved.iter().any(|l| l == MAIN_WINDOW_LABEL),
+            "tauri.conf.json 里没有任何窗口的 label 解析成 {MAIN_WINDOW_LABEL}，\
+             emit_close_requested 的定向投递会打在空处、⌘Q 将无法退出应用（实际解析结果：{resolved:?}）"
+        );
+    }
+
+    // is_term_window_label：destroy_term_window 的准入校验（V3.3 Task 5）。这条命令能
+    // **绕过 CloseRequested** 强行销毁窗口——绕过意味着窗口关闭时那套"先问前端、由它
+    // 终止自己持有的 PTY"的流程整个不会跑，所以它绝不能作用到主窗口上（主窗口关闭 =
+    // 退出应用，必须走 ⌘Q 确认框）。
+
+    #[test]
+    fn term_window_labels_are_destroyable() {
+        // 会因为什么失败：如果前缀常量被改坏（例如写成 "win-"），create_term_window 发出
+        // 去的 label 就再也过不了这道校验，交接回滚将无法关掉建出来的新窗口。
+        assert!(is_term_window_label("term-1"));
+        assert!(is_term_window_label("term-42"));
+        // 与生产路径同源：真正发给前端的 label 就是这个函数生成的，两者必须自洽。
+        assert!(is_term_window_label(&new_term_window_label()));
+    }
+
+    #[test]
+    fn main_window_label_is_never_destroyable() {
+        // 最重要的一条：主窗口不能被这条绕过 CloseRequested 的命令销毁——那等于把整个
+        // 应用连同所有窗口里正在跑的会话无声终止，且完全跳过 ⌘Q 确认框。
+        assert!(!is_term_window_label(MAIN_WINDOW_LABEL));
+    }
+
+    #[test]
+    fn labels_that_merely_look_like_term_windows_are_rejected() {
+        // 会因为什么失败：如果校验写成 `label.starts_with("term")`（少了连字符）或
+        // `label != "main"`（黑名单而不是白名单），下面这几个就会被误判为可销毁。
+        assert!(!is_term_window_label("terminal-1"));
+        assert!(!is_term_window_label("panel"));
+        assert!(!is_term_window_label(""));
+        assert!(!is_term_window_label("my-term-1"));
+    }
+
+    // R1 修复：main_window_config / term_window_config 两个纯函数——create_term_window
+    // 遗漏了 minWidth/minHeight（评审发现：新窗口能被拖成一条缝，主窗口不能）之后新增，
+    // 覆盖"新窗口必须整份继承主窗口配置，不是逐字段挑"这条不变式。
+
+    fn sample_window_config(label: &str, width: f64) -> tauri::utils::config::WindowConfig {
+        tauri::utils::config::WindowConfig {
+            label: label.to_string(),
+            width,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn main_window_config_prefers_label_main_even_if_listed_second() {
+        // 会因为什么失败：如果实现改成直接取 windows.first()（不再按 label 找
+        // "main"），这里会选中 "other"（width=1.0）而不是 "main"（width=2.0）。
+        let windows = vec![
+            sample_window_config("other", 1.0),
+            sample_window_config("main", 2.0),
+        ];
+        let picked = main_window_config(&windows);
+        assert_eq!(picked.label, "main");
+        assert_eq!(picked.width, 2.0);
+    }
+
+    #[test]
+    fn main_window_config_falls_back_to_first_when_no_main_label() {
+        // 会因为什么失败：如果 or_else 分支被删掉（只认 label == "main"，找不到就
+        // 直接走空配置兜底），这里会错误地落到硬编码兜底值（width 1200.0）而不是
+        // 列表里唯一那一项（width 3.0）。
+        let windows = vec![sample_window_config("not-main", 3.0)];
+        let picked = main_window_config(&windows);
+        assert_eq!(picked.label, "not-main");
+        assert_eq!(picked.width, 3.0);
+    }
+
+    #[test]
+    fn main_window_config_fallback_when_list_empty_includes_min_size() {
+        // R1 核心断言：这条测试就是为上一轮遗漏的 minWidth/minHeight 补的。会因为
+        // 什么失败：如果硬编码兜底值里 min_width/min_height 漏写（回到 R0 的老样子，
+        // 只兜底 width/height/title），这里的 min_width/min_height 断言会失败
+        // （变成 None 而不是 Some(800.0)/Some(500.0)）。
+        let picked = main_window_config(&[]);
+        assert_eq!(picked.width, 1200.0);
+        assert_eq!(picked.height, 780.0);
+        assert_eq!(
+            picked.min_width,
+            Some(800.0),
+            "兜底值必须包含 minWidth，否则连极端情况（配置列表为空）下新窗口都能被拖成一条缝"
+        );
+        assert_eq!(picked.min_height, Some(500.0), "兜底值必须包含 minHeight");
+        assert_eq!(picked.title, "aTerm");
+    }
+
+    #[test]
+    fn term_window_config_overrides_label_and_position_but_preserves_everything_else() {
+        // main 里 resizable/decorations 故意设成与 WindowConfig::default() 不同的
+        // 值（默认都是 true），min_width/min_height 故意设成 Some 而非默认 None——
+        // 这样如果实现"顺手"把某个未提及的字段悄悄重置成默认值，下面的整份 struct
+        // 相等断言就会抓到，不只是抓 min_width/min_height 这两个 R1 修的字段。
+        let main = tauri::utils::config::WindowConfig {
+            label: "main".to_string(),
+            width: 1200.0,
+            height: 780.0,
+            min_width: Some(800.0),
+            min_height: Some(500.0),
+            resizable: false,
+            decorations: false,
+            title: "aTerm".to_string(),
+            ..Default::default()
+        };
+        let out = term_window_config(&main, "term-9", 111.0, 222.0);
+
+        assert_eq!(out.label, "term-9", "label 必须替换成传入的新窗口 label");
+        assert_eq!(out.x, Some(111.0), "x 必须写成调用方传入的坐标");
+        assert_eq!(out.y, Some(222.0), "y 必须写成调用方传入的坐标");
+
+        // 除 label/x/y 外，其余字段必须与 main 逐位相同——用"整份克隆 main 再只改
+        // 这三个字段"构造期望值，而不是逐个字段断言，这样任何字段（不只是
+        // min_width/min_height）被意外改动都会被这条测试抓到。
+        let expected = tauri::utils::config::WindowConfig {
+            label: "term-9".to_string(),
+            x: Some(111.0),
+            y: Some(222.0),
+            ..main.clone()
+        };
+        assert_eq!(
+            out, expected,
+            "除了 label/x/y，其余字段（含 min_width/min_height/resizable/decorations）\
+             必须原样继承自主窗口配置"
+        );
+    }
+
+    // ── 菜单事件的定向投递（V3.3 §5.4）─────────────────────────────────────
+    //
+    // 下面所有用到窗口 label 的地方一律用 "term-9"，**刻意不用 "main"**：这是
+    // Ruling 14 记下的教训——上一轮把测试替身的 label 设成和断言目标同一个值
+    // （都是 "main"），于是"目标取自聚焦窗口"这条断言变成恒真，把实现改成写死
+    // 常量照样全绿。用一个拖出来的窗口 label，"写死 main" 这个变异才会转红。
+
+    #[test]
+    fn menu_event_goes_to_the_focused_window() {
+        // 会因为什么失败：如果实现忽略传入的聚焦 label、写死投递给 MAIN_WINDOW_LABEL
+        // （或任何常量），这里会得到 ToWindow("main") 而不是 ToWindow("term-9")——
+        // 而那正是"在拖出窗口里按 ⌘, 却在主窗口弹出设置浮层"这个缺陷。
+        assert_eq!(
+            menu_event_delivery(Some("term-9".to_string())),
+            MenuDelivery::ToWindow("term-9".to_string())
+        );
+    }
+
+    #[test]
+    fn menu_event_falls_back_to_broadcast_when_no_window_is_focused() {
+        // 会因为什么失败：如果实现在取不到聚焦窗口时直接放弃（不 emit），菜单项会
+        // 变成"点了没反应"；如果它硬塞一个 ToWindow(某个猜的 label)，事件会打在空处。
+        // 降级必须显式是广播。
+        assert_eq!(menu_event_delivery(None), MenuDelivery::BroadcastFallback);
+    }
+
+    #[test]
+    fn payload_target_equals_the_delivery_target() {
+        // Ruling 8 的发送端那一半：载荷里必须带上目标 label，且它必须**就是** emit_to
+        // 的那个 label。会因为什么失败：如果 payload_target 返回 None（"反正 emit_to
+        // 已经定向了"），接收端的二次校验就没有可比对的东西，Ruling 8 的两层防护塌成
+        // 一层；如果它返回别的 label，接收端会把发给自己的事件当成别人的丢掉——
+        // 菜单项静默失灵。
+        let delivery = MenuDelivery::ToWindow("term-9".to_string());
+        assert_eq!(delivery.payload_target(), Some("term-9".to_string()));
+    }
+
+    #[test]
+    fn broadcast_fallback_payload_target_is_none() {
+        // 降级广播时载荷里不能写任何具体 label——写了就等于"发给所有人、但只有那一个
+        // 认领"，其余窗口全部丢弃，降级失去意义（等价于什么都没发）。
+        assert_eq!(MenuDelivery::BroadcastFallback.payload_target(), None);
+    }
+
+    #[test]
+    fn open_settings_payload_wire_shape_is_target_only() {
+        // 钉死前端 src/menuEvents.ts 实际读取的字段名与 JSON 形状。会因为什么失败：
+        // 字段被改名（例如 target -> label/toLabel），前端读到 undefined，二次校验
+        // 退化成"无条件接受"，多窗口下又变回每个窗口都弹设置浮层。
+        let delivery = MenuDelivery::ToWindow("term-9".to_string());
+        let json = serde_json::to_string(&open_settings_payload(&delivery)).unwrap();
+        assert_eq!(json, r#"{"target":"term-9"}"#);
+    }
+
+    #[test]
+    fn open_settings_payload_wire_shape_when_broadcasting() {
+        let json =
+            serde_json::to_string(&open_settings_payload(&MenuDelivery::BroadcastFallback)).unwrap();
+        assert_eq!(json, r#"{"target":null}"#);
+    }
+
+    #[test]
+    fn theme_mode_payload_carries_both_target_and_mode() {
+        // 前端要同时读这两个字段：target 决定收不收，mode 决定切到哪一档。会因为什么
+        // 失败：V3.3 之前这个事件的载荷是**裸字符串**，若实现忘了升格成对象（或者
+        // 只加了 target 却把 mode 丢了），前端 isThemeMode(payload.mode) 校验不过，
+        // 菜单栏切主题彻底失灵。
+        let delivery = MenuDelivery::ToWindow("term-9".to_string());
+        let json = serde_json::to_string(&theme_mode_payload(&delivery, "dual")).unwrap();
+        assert_eq!(json, r#"{"target":"term-9","mode":"dual"}"#);
+    }
+
+    #[test]
+    fn theme_mode_payload_passes_the_mode_through_verbatim() {
+        // mode 必须原样透传，不能被"顺手规范化"。三档逐个过一遍：这三个字符串与前端
+        // store/theme.ts 的 isThemeMode 是同一份契约，任何一个对不上，那一档菜单项
+        // 就会被前端当成非法 payload 静默忽略。
+        for mode in ["default", "dual", "single"] {
+            let payload = theme_mode_payload(&MenuDelivery::ToWindow("term-9".to_string()), mode);
+            assert_eq!(payload.mode, mode);
+        }
     }
 }

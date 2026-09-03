@@ -1,7 +1,25 @@
 import './ptyBuffer'
 import './closeRequest'
 import './menuEvents'
+// 主题跨窗口同步（V3.3 §5.5）：在一个窗口改主题，其它窗口跟着变。同样是模块顶层
+// side-effect 导入——它要在用户有机会点主题之前就挂好监听，而且订阅的是 store 而不是
+// 某个组件的生命周期。单窗口下是无害的空转（自己发的广播被 fromLabel 早退挡掉）。
+import './themeSync'
+// 用户已保存数据（别名 / 隐藏的项目 / 移除的会话 / 总览方块位置）的跨窗口同步
+// （V3.3 §5.5 的同一模式）。同样是模块顶层 side-effect 导入：它要在用户有机会改名之前
+// 就挂好监听与 persist 钩子。单窗口下是无害的空转（自己发的广播被 fromLabel 早退挡掉）。
+import './userDataSync'
 import './contextMenu'
+// 新窗口（标签被拖出时由 create_term_window 建出来的 term-<n> 窗口）的接管入口：
+// 与上面几个顶层 side-effect 导入同一模式——模块加载时就挂好接管监听、随后 emit
+// 就绪事件，绝不等某个组件挂载（旧窗口那边已经在等就绪事件了，晚一步就是干等到
+// 超时）。主窗口导入它是空操作：isTornOutWindow() 按 label 前缀判定，main 直接
+// 早退，既不监听也不发就绪事件（见 src/windowHandoff.ts）。
+import './windowHandoff'
+// 拖出来的终端窗口自己的关闭流程（V3.3 §5.3）：Rust 侧对非主窗口的 CloseRequested
+// prevent_close 之后定向问这个窗口，由它终止**自己持有的**那些 PTY 再销毁自己。同样
+// 是"主窗口导入它是空操作"（按 label 前缀早退，见 src/windowClose.ts 顶部的所有权模型）。
+import './windowClose'
 import './App.css'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { newTerminal } from './actions'
