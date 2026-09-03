@@ -581,7 +581,7 @@ describe('TabBar — 松手时的三路分流（V3.4 设计文档 §5.2）', () 
   it('命中其它窗口的标签栏落区：交接给那个窗口，一次都没去建新窗口', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
     await renderApp()
-    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 120, localY: 40 })
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 120, localY: 19 })
 
     await dragOut(tabEl('B'))
 
@@ -633,12 +633,15 @@ describe('TabBar — 松手时的三路分流（V3.4 设计文档 §5.2）', () 
     expect(windowAtPoint).toHaveBeenCalledWith(2500, 60, 'term-9')
   })
 
-  // 落区边界（TABBAR_DROP_ZONE_PX = 68）。坐标写字面量、不从被测模块导入那个常量：
-  // 导入的话"落区内就交接"会退化成恒真（常量改成 0 时 localY=0 仍然算在落区内）。
-  it('落区边界：localY=67 交接，localY=68 取消', async () => {
+  // 落区边界（TABBAR_DROP_ZONE_PX = 40，localY 的原点是目标窗口内容区顶边）。坐标写
+  // 字面量、不从被测模块导入那个常量：导入的话"落区内就交接"会退化成恒真（常量改成 0
+  // 时 localY=0 仍然算在落区内）。两侧刻意贴着落区取值（39 / 40）而不是"10 与 300"那种
+  // 宽松的一对：后者只能说明落区落在 (10, 300] 里的某处，把 40 改成 68（修复轮 R1 之前
+  // 那个含标题栏偏移的值）照样全绿。
+  it('落区边界：localY=39 交接，localY=40 取消', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
     const { unmount } = await renderApp()
-    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 10, localY: 67 })
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 10, localY: 39 })
     await dragOut(tabEl('B'))
     expect(handoffTabToWindow).toHaveBeenCalledTimes(1)
     unmount()
@@ -646,7 +649,7 @@ describe('TabBar — 松手时的三路分流（V3.4 设计文档 §5.2）', () 
     vi.mocked(handoffTabToWindow).mockClear()
     useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
     await renderApp()
-    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 10, localY: 68 })
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 10, localY: 40 })
     await dragOut(tabEl('B'))
     expect(handoffTabToWindow).not.toHaveBeenCalled()
     expect(tearOutTab).not.toHaveBeenCalled()
@@ -658,7 +661,7 @@ describe('TabBar — 松手时的三路分流（V3.4 设计文档 §5.2）', () 
   it('只剩一个非主页标签时拖到其它窗口的标签栏：仍然交接（守卫只拦建窗那一路）', async () => {
     useTabs.setState({ tabs: [HOME, TAB_B], activeId: 'tab-b' })
     await renderApp()
-    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 120, localY: 40 })
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 120, localY: 19 })
 
     await dragOut(tabEl('B'))
 

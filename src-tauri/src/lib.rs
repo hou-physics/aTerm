@@ -479,10 +479,19 @@ async fn create_term_window(app: AppHandle, x: f64, y: f64) -> Result<String, St
     Ok(label)
 }
 
-/// 逻辑（CSS）像素下的窗口外接矩形：左上角 `(x, y)` + 宽高。`window_at_point` 由每个
-/// 窗口自己的 `outer_position()`/`outer_size()`（物理像素）与 `scale_factor()` 换算
-/// 得到（见 `physical_rect_to_logical`），命中判定本身（`hit_test_windows`）只认逻辑
-/// 矩形——换算的正确性和包含判定的正确性因此各自独立可测，互不牵连。
+/// 逻辑（CSS）像素下的一个窗口矩形：左上角 `(x, y)` + 宽高。`window_at_point` 由每个
+/// 窗口自己的 `inner_position()`/`inner_size()`（**内容区**，物理像素）与
+/// `scale_factor()` 换算得到（见 `physical_rect_to_logical`），命中判定本身
+/// （`hit_test_windows`）只认逻辑矩形——换算的正确性和包含判定的正确性因此各自独立
+/// 可测，互不牵连。
+///
+/// **为什么是内容区而不是外框**（V3.4 修复轮 R1）：这个矩形的左上角同时是
+/// `WindowHit::local_x`/`local_y` 的原点，而前端拿 `local_y` 去比的是「标签栏落区高度」
+/// （`src/tabTearOut.ts` 的 `TABBAR_DROP_ZONE_PX`）——标签栏是 webview 内容区的第一个
+/// 元素，从内容区顶部开始。用外框（`outer_*`）的话原点会跑到原生标题栏顶边，`local_y`
+/// 里凭空混进一个标题栏高度，前端只能在自己那边加一个魔数补偿；而那个补偿数在全屏窗口
+/// （没有标题栏）上又是错的，`tauri.conf.json` 一旦加上 `titleBarStyle` 也会失效。
+/// 规格 §5.1 原文要的就是"点在其**内容区**的本地逻辑坐标"。
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct LogicalRect {
     x: f64,
@@ -491,8 +500,10 @@ struct LogicalRect {
     height: f64,
 }
 
-/// `window_at_point` 命中时的返回值：命中窗口的 label，以及点相对该窗口左上角的本地
-/// 逻辑坐标。字段用 `camelCase` 序列化（`local_x`/`local_y` -> `localX`/`localY`），
+/// `window_at_point` 命中时的返回值：命中窗口的 label，以及点相对该窗口**内容区**
+/// 左上角的本地逻辑坐标（原点是 webview 内容区顶边，不含原生标题栏——理由见
+/// `LogicalRect` 上方那段）。字段用 `camelCase` 序列化（`local_x`/`local_y` ->
+/// `localX`/`localY`），
 /// 与仓库其它多字段返回结构体同一约定（见 `status/installer.rs` 的
 /// `HookInstallState`/`HooksStatus` 等；`src/ipc.ts` 侧的 `WindowHit` 接口逐字段沿用
 /// 这份 camelCase，见其注释）。
@@ -504,9 +515,10 @@ struct WindowHit {
     local_y: f64,
 }
 
-/// 纯函数：把一个窗口的物理像素外接矩形（`outer_position()`/`outer_size()` 的原始
-/// 返回值，调用方各自转成 `f64` 后传入）按它自己的 `scale_factor()` 换算成逻辑
-/// （CSS）像素矩形。
+/// 纯函数：把一个窗口的物理像素矩形（`window_at_point` 传的是 `inner_position()`/
+/// `inner_size()` 的原始返回值，调用方各自转成 `f64` 后传入）按它自己的
+/// `scale_factor()` 换算成逻辑（CSS）像素矩形。函数本身不关心传进来的是内容区还是
+/// 外框——它只做除法。
 ///
 /// 换算方向是**物理 ÷ scale = 逻辑**，不是反过来——方向写反时在非 Retina 屏
 /// （`scale_factor() == 1.0`）上除和乘结果相同，完全测不出来，必须用 `scale != 1.0`
@@ -601,14 +613,19 @@ fn hit_test_windows(
 ///
 /// ## 每个窗口用它自己的 `scale_factor()` 换算
 ///
-/// 多显示器环境下不同窗口可能挂在不同缩放比例的屏幕上，`outer_position`/
-/// `outer_size` 各自返回该窗口所在屏幕的物理像素，不能用某一个全局/固定的 scale
+/// 多显示器环境下不同窗口可能挂在不同缩放比例的屏幕上，`inner_position`/
+/// `inner_size` 各自返回该窗口所在屏幕的物理像素，不能用某一个全局/固定的 scale
 /// factor 统一换算，必须逐窗口各取各的（与 `window_logical_origin` 同一手法，见其
 /// 上方注释）。
 ///
+/// ## 取的是**内容区**（`inner_*`），不是外框（`outer_*`）
+///
+/// 见 `LogicalRect` 上方那段：`local_y` 的原点必须是 webview 内容区顶边，前端的
+/// 「标签栏落区」常量才是一个相对标签栏本身定义的、与标题栏高度无关的数。
+///
 /// ## 失败即降级
 ///
-/// 遍历中任一窗口的 `outer_position()`/`outer_size()`/`scale_factor()` 读取失败，
+/// 遍历中任一窗口的 `inner_position()`/`inner_size()`/`scale_factor()` 读取失败，
 /// 只跳过这一个窗口，不让整个命令返回 `Err`——可能只是窗口在被查询的同时刚好正在
 /// 关闭这类竞态，不是调用方能规避的错误；命令在没有任何窗口可读、或没有任何窗口命中
 /// 时仍返回 `Ok(None)`，不是 `Err`。
@@ -631,8 +648,8 @@ async fn window_at_point(
         .webview_windows()
         .into_iter()
         .filter_map(|(label, window)| {
-            let pos = window.outer_position().ok()?;
-            let size = window.outer_size().ok()?;
+            let pos = window.inner_position().ok()?;
+            let size = window.inner_size().ok()?;
             let scale = window.scale_factor().ok()?;
             let rect = physical_rect_to_logical(
                 pos.x as f64,
@@ -940,8 +957,14 @@ fn new_window_cascade_position(origin: Option<(f64, f64)>) -> (f64, f64) {
 /// `outer_position` 返回的是物理像素（`PhysicalPosition<i32>`），而
 /// `create_term_window` 的坐标契约是逻辑像素（见其上方注释），这里用
 /// `scale_factor` 转换——与 V3.4 设计文档 §2 提到的"Rust 能枚举所有窗口的屏幕矩形：
-/// webview_windows() + outer_position() + outer_size() + scale_factor()"是同一手法，
-/// Task 2 的 `window_at_point` 命中测试会复用同一套换算。
+/// webview_windows() + 位置/尺寸 + scale_factor()"是同一手法，`window_at_point` 的
+/// 命中测试复用同一套物理→逻辑换算（`physical_rect_to_logical`）。
+///
+/// **这里刻意用 `outer_position`，与 `window_at_point` 的 `inner_position` 不同**：
+/// 这个函数的用途是给新窗口算级联落点，而 `WebviewWindowBuilder::position` 设的是
+/// 窗口**外框**左上角——参考原点必须和它同一个坐标系，否则每级联一次就偏一个标题栏的
+/// 高度。`window_at_point` 要的则是内容区原点（见 `LogicalRect` 上方那段）。两处用途
+/// 不同、取值不同，都是有意的。
 #[cfg(target_os = "macos")]
 fn window_logical_origin(window: &tauri::WebviewWindow) -> Option<(f64, f64)> {
     let physical = window.outer_position().ok()?;
@@ -1748,6 +1771,12 @@ mod tests {
     // hit_test_windows（包含判定）。window_at_point 本身是 async fn、需要真实
     // AppHandle/WebviewWindow 才能测，未覆盖单测——与 create_term_window 同一模式
     // （见 term_window_label_has_expected_shape 上方注释）。
+    //
+    // 下面所有矩形都是**内容区**（webview）的逻辑矩形，不是外框：命令体传给
+    // physical_rect_to_logical 的是 inner_position()/inner_size()，于是 local_x/local_y
+    // 的原点就是内容区左上角（V3.4 修复轮 R1，理由见 LogicalRect 上方那段——前端的
+    // 「标签栏落区」常量必须相对标签栏本身定义，不能把标题栏高度混进来）。这一点在
+    // 这两个纯函数里没有任何可断言的痕迹（它们只认传进来的矩形），所以只能写在这里。
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> LogicalRect {
         LogicalRect { x, y, width, height }

@@ -73,19 +73,20 @@ export function shouldTearOut(point: TearOutPoint, windowRect: TearOutWindowRect
  *  **取消**（Ruling 2：在别的窗口的终端区域上松手，用户意图不明，更不可能是"在它上面再
  *  叠一个新窗口"）。
  *
- *  **取 68 的依据 —— 关键在于 `localY` 的原点是窗口外框，不是内容区**：
- *    1. Task 2 的 `hit_test_windows`（src-tauri/src/lib.rs）算的是
- *       `local_y = py - rect.y`，而 `rect` 由 `outer_position()`/`outer_size()` 换算而来
- *       ——**外框**矩形，macOS 上它把原生标题栏一并算在内（`tauri.conf.json` 没有
- *       `titleBarStyle`，用的是原生标题栏）。也就是说 `localY === 0` 是标题栏顶边，
- *       webview 内容区从 `localY ≈ 28` 才开始。
- *    2. 内容区里的落区高度是 **40**：`.tabbar` 实际高约 33px（`padding: 6px 8px 0`
- *       + `.tab` 5+13+5 + 1px 下边框，见 App.css），40 给它留一点余量。
- *    3. 两者相加：**28（原生标题栏，macOS 标准窗口 28pt）+ 40 = 68**。少了这 28 的偏移，
- *       用户把标签放在目标窗口标签栏正中央（`localY ≈ 28 + 19 = 47`）会被判成"不在落区"
- *       而**静默取消**——正是本功能最主要的那一次手势。
+ *  **坐标原点是目标窗口的内容区顶边**，不含原生标题栏：`window_at_point` 用的是
+ *  `inner_position()`/`inner_size()`（src-tauri/src/lib.rs，V3.4 修复轮 R1 把它从
+ *  `outer_*` 改了过来）。这一条是这个常量能被定义清楚的前提——用外框原点的话，这里就得
+ *  额外加一个标题栏高度的补偿，而那个补偿数在全屏窗口（没有标题栏）上是错的、
+ *  `tauri.conf.json` 一旦加上 `titleBarStyle` 也会失效，常量的名字更会名不副实。
  *
- *  顺带说明为什么把标题栏也算进落区：拖到另一个窗口的标题栏上松手，与拖到它的标签栏上
- *  是同一个意图（"把这个标签交给那个窗口"），Chrome/iTerm2 同样接受标题栏落点；而它离
- *  终端内容区仍有整条标签栏的距离，不会与 Ruling 2 要拦的"落在终端区域"混淆。 */
-export const TABBAR_DROP_ZONE_PX = 68
+ *  **取 40 的依据**：`.tabbar` 是 `.main` 的第一个子元素、从内容区顶边开始，实际高度
+ *  **约 33px**——`padding: 6px 8px 0` + `.tab`（`padding: 5px 12px` + 13px 字号的一行
+ *  文字，与 `.tabbar-pinned` 里那几个 `height: 26px` 的按钮同高）+ 1px 的
+ *  `border-bottom`，即 6 + 26 + 1 = 33（见 App.css 的 `.tabbar` / `.tab` 规则）。
+ *  40 = 33 + 7 的余量：标签栏高度随字号/主题会有一两个像素的浮动，紧贴 33 会让最下面
+ *  那一两行像素落进"取消"里；而 7px 的溢出仍然远在终端内容区的上边缘，不会与 Ruling 2
+ *  要拦的"落在别人的终端上"混淆。
+ *
+ *  与 `TEAR_OUT_MARGIN_PX` 是两个独立的数，别互相看齐：那个管"用户是不是有意离开本
+ *  窗口"，这个管"离开之后落在了目标窗口的哪一块"。 */
+export const TABBAR_DROP_ZONE_PX = 40

@@ -115,6 +115,11 @@ export const revealInFinder = (path: string) => invoke<void>('reveal_in_finder',
  *  的窗口，连同点在该窗口内的本地逻辑坐标；一个都不命中则 `null`。V3.4 拖标签到别的
  *  窗口标签栏的落点判定，Task 3 消费它。
  *
+ *  **`localX`/`localY` 的原点是该窗口的内容区（webview）左上角**，不含原生标题栏：
+ *  Rust 侧取的是 `inner_position()`/`inner_size()`（V3.4 修复轮 R1）。调用方拿 `localY`
+ *  去比的 `TABBAR_DROP_ZONE_PX`（src/tabTearOut.ts）因此是一个相对标签栏本身定义的数，
+ *  不需要在前端补一个标题栏高度的魔数。
+ *
  *  坐标契约与 `create_term_window`（`windowHandoff.ts` 的调用点）同一份：x/y 是逻辑
  *  （CSS）像素，直接传 `PointerEvent.screenX`/`screenY`，不做 devicePixelRatio 换算
  *  （见 src-tauri/src/lib.rs 里 window_at_point 顶部注释的坐标契约）。
