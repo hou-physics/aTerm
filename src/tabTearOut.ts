@@ -47,9 +47,46 @@ export type TearOutWindowRect = { width: number; height: number }
  *  不做"拖回"，因此这个门槛只能设得更高、而不是更低。 */
 const TEAR_OUT_MARGIN_PX = 40
 
-export function shouldTearOut(point: TearOutPoint, windowRect: TearOutWindowRect, tabCount: number): boolean {
-  if (tabCount <= 1) return false
+/** 纯几何：光标是否已经在窗口视口之外**足够远**（含上面那个余量），**不含** tabCount
+ *  守卫。
+ *
+ *  V3.4 把它从 shouldTearOut 里摘出来单独导出：松手时的三路分流（设计文档 §5.2）里，
+ *  「指针在源窗口外」是四条路共同的入口条件，而 `tabCount <= 1` 那道守卫**只拦第 4 路**
+ *  （建新窗口）——把 `term-*` 窗口里最后一个标签拖到别的窗口正是 V3.4 的核心用例，被守卫
+ *  拦下就等于这个功能对空壳窗口不可用。余量则四条路一视同仁（设计文档 §5.2 原文"沿用
+ *  V3.3 的判定与 40px 余量"）：它挡的是"横向排序时向上晃进标题栏"这类手抖，而 V3.4 之后
+ *  那一晃的后果从"弹出一个新窗口"变成了"把标签甩进背后那个窗口"——级联摆放的窗口正好
+ *  就在源窗口标题栏背后，误触面反而更大，没有任何理由在这条路上把余量放掉。 */
+export function isPointerOutsideWindow(point: TearOutPoint, windowRect: TearOutWindowRect): boolean {
   const insideX = point.x >= -TEAR_OUT_MARGIN_PX && point.x <= windowRect.width + TEAR_OUT_MARGIN_PX
   const insideY = point.y >= -TEAR_OUT_MARGIN_PX && point.y <= windowRect.height + TEAR_OUT_MARGIN_PX
   return !(insideX && insideY)
 }
+
+export function shouldTearOut(point: TearOutPoint, windowRect: TearOutWindowRect, tabCount: number): boolean {
+  if (tabCount <= 1) return false
+  return isPointerOutsideWindow(point, windowRect)
+}
+
+/** 目标窗口「标签栏落区」的高度（逻辑像素）：`window_at_point` 返回的 `localY` 小于它，
+ *  才算落在目标窗口的标签栏上、才交接（设计文档 §5.2 第 2 路）；落在这个高度之外就是
+ *  **取消**（Ruling 2：在别的窗口的终端区域上松手，用户意图不明，更不可能是"在它上面再
+ *  叠一个新窗口"）。
+ *
+ *  **坐标原点是目标窗口的内容区顶边**，不含原生标题栏：`window_at_point` 用的是
+ *  `inner_position()`/`inner_size()`（src-tauri/src/lib.rs，V3.4 修复轮 R1 把它从
+ *  `outer_*` 改了过来）。这一条是这个常量能被定义清楚的前提——用外框原点的话，这里就得
+ *  额外加一个标题栏高度的补偿，而那个补偿数在全屏窗口（没有标题栏）上是错的、
+ *  `tauri.conf.json` 一旦加上 `titleBarStyle` 也会失效，常量的名字更会名不副实。
+ *
+ *  **取 40 的依据**：`.tabbar` 是 `.main` 的第一个子元素、从内容区顶边开始，实际高度
+ *  **约 33px**——`padding: 6px 8px 0` + `.tab`（`padding: 5px 12px` + 13px 字号的一行
+ *  文字，与 `.tabbar-pinned` 里那几个 `height: 26px` 的按钮同高）+ 1px 的
+ *  `border-bottom`，即 6 + 26 + 1 = 33（见 App.css 的 `.tabbar` / `.tab` 规则）。
+ *  40 = 33 + 7 的余量：标签栏高度随字号/主题会有一两个像素的浮动，紧贴 33 会让最下面
+ *  那一两行像素落进"取消"里；而 7px 的溢出仍然远在终端内容区的上边缘，不会与 Ruling 2
+ *  要拦的"落在别人的终端上"混淆。
+ *
+ *  与 `TEAR_OUT_MARGIN_PX` 是两个独立的数，别互相看齐：那个管"用户是不是有意离开本
+ *  窗口"，这个管"离开之后落在了目标窗口的哪一块"。 */
+export const TABBAR_DROP_ZONE_PX = 40

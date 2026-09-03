@@ -11,6 +11,10 @@ vi.mock('../ipc', () => ({
   // App.tsx 因此挂载 OverviewPage，后者会异步补 sub-agent 徽章。给一个永不 resolve 的
   // promise：本文件不关心徽章，也不希望它在断言体跑完之后才落地的 setState 冒出 act 警告。
   countSubagents: vi.fn(() => new Promise<number>(() => {})),
+  // V3.4 Task 3：pointerup 在指针出界时先做一次落点命中测试（真实实现是 Rust 命令
+  // window_at_point，jsdom 里没有任何原生窗口）。默认返回 null = "谁都没命中"，于是
+  // 本文件既有的那一整组 V3.3 拖出用例照旧走"建新窗口"那一路，行为不变。
+  windowAtPoint: vi.fn(async () => null as { label: string; localX: number; localY: number } | null),
 }))
 vi.mock('../ptyBuffer', () => ({ ptyEventsReady: Promise.resolve(), attachPty: vi.fn() }))
 // 与 ptyBuffer 同一理由：这批测试不关心会话状态，整个模块换成不触碰真实 Tauri 事件桥的
@@ -34,6 +38,10 @@ vi.mock('../store/hooksInstall', () => ({
 }))
 vi.mock('../closeRequest', () => ({}))
 vi.mock('../menuEvents', () => ({}))
+// 与上面两个同一理由（App.tsx 都是顶层 side-effect 导入，本文件不测它们）。下面把
+// currentWindowLabel 替身成 'term-9' 之后 windowClose 不再按"主窗口"早退，会去注册一条
+// 真实的 listen——在 jsdom 里必然失败，只会往每条用例的 stderr 上刷一条无关噪声。
+vi.mock('../windowClose', () => ({}))
 vi.mock('../components/TerminalView', () => ({ TerminalView: () => null }))
 // App.tsx 挂载时会动态 import('@tauri-apps/api/webview') 接线文件拖放；理由与
 // App.test.tsx 完全一致（见该文件注释）——不替身会让每条用例都触发一次真实的、时机
@@ -46,10 +54,26 @@ vi.mock('@tauri-apps/api/webview', () => ({
 // 建原生窗口、走多步事件握手，jsdom 里既跑不动也与本文件无关）。整个模块替身掉——
 // App.tsx 也顶层 side-effect 导入它，一并覆盖，不会有真实的 Tauri 事件注册发生。
 // tearOutTab 自身的六步与超时回滚见 windowHandoff.test.ts。
-vi.mock('../windowHandoff', () => ({ tearOutTab: vi.fn(async () => true) }))
+// V3.4 Task 3 起同一个模块还导出 handoffTabToWindow（交接给一个已经存在的窗口），
+// pointerup 的三路分流按落点在两者之间选一个。两条路的内部实现同样只在
+// windowHandoff.test.ts 里覆盖，这里只验 TabBar 这一侧的分流判定与接线。
+vi.mock('../windowHandoff', () => ({
+  tearOutTab: vi.fn(async () => true),
+  handoffTabToWindow: vi.fn(async () => true),
+}))
+// 本窗口的 label（命中测试的 exclude 参数）。**刻意不用 'main'**（V3.3 Ruling 14）：
+// 'main' 既是 windowLabel 在 jsdom 里的兜底返回值、又是最容易被随手写死的字面量，用它
+// 的话"exclude 传的是本窗口 label"这条断言在实现写死成 'main' 时照样绿。
+// isTornOutWindow 取真实实现：App.tsx 顶层导入的 windowClose 用它决定要不要注册关窗
+// 监听，替身成别的值会改变那个模块在本文件里的行为。
+vi.mock('../windowLabel', async () => {
+  const actual = await vi.importActual<typeof import('../windowLabel')>('../windowLabel')
+  return { ...actual, currentWindowLabel: vi.fn(async () => 'term-9') }
+})
 
 import App from '../App'
-import { tearOutTab } from '../windowHandoff'
+import { windowAtPoint } from '../ipc'
+import { handoffTabToWindow, tearOutTab } from '../windowHandoff'
 import { attachDragSafetyNet } from '../dragSafetyNet'
 import { useDnd } from '../store/dnd'
 import { useDragGhost } from '../store/dragGhost'
@@ -463,7 +487,12 @@ describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () 
     expect(t.panes.map((p) => p.id)).toEqual(['pane-a', 'pane-b'])
   })
 
-  it('只剩一个（非主页）标签时，移出窗口边界也不进入 tearOut 状态（等于把窗口整体搬走，没有意义，退回既有行为）', async () => {
+  // V3.4 修复轮 R2 / I1 **改变了这条用例的预期**：V3.3 时 tabCount<=1 连"将离开本窗口"
+  // 的视觉状态都不给（守卫写在 pointermove 那一行里）。V3.4 之后这个标签是**可以**被拖到
+  // 别的窗口的——那正是招牌用例——于是整个拖拽过程零反馈就成了缺陷：光标下没有 ghost、
+  // 标签栏不高亮，松手前无从知道会发生什么。守卫本身没取消，它挪到了 pointerup 的
+  // allowNewWindow，只拦"建新窗口"那一路（下面那条用例把着）。
+  it('只剩一个（非主页）标签时移出窗口边界：照常进入 tearOut 状态、出 ghost 与离窗指示', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' }) // 唯一的非主页标签就是被拖的这一个
     await renderApp()
     const a = tabEl('A')
@@ -473,15 +502,21 @@ describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () 
       fireEvent.pointerMove(a, { clientX: 2000, clientY: 10, pointerId: 1 }) // 移出窗口边界
     })
 
-    expect(useDnd.getState().tearOut).toBe(false)
-    expect(document.querySelector('.tabbar-tear-out')).toBeNull()
+    expect(useDnd.getState().tearOut).toBe(true)
+    expect(document.querySelector('.tabbar-tear-out')).not.toBeNull()
+    expect(useDragGhost.getState().visible).toBe(true) // 光标下确实有东西在跟手
+    // 次生问题的另一半：tearOut 为真时窗口内的落点状态必须清空，不能再亮起一个与实际
+    // 结果无关的窗格合并预览。
+    expect(useDnd.getState().target).toBeNull()
+    expect(useDnd.getState().tabBarIndex).toBeNull()
 
     await act(async () => {
       fireEvent.pointerUp(a, { clientX: 2000, clientY: 10, pointerId: 1 })
     })
-    // 拖的正是当前激活标签本身——这条路径本就是既有的"空操作"分支（见上面"拖到自己
-    // 标签的窗格区"用例），没有任何标签/窗格状态发生变化。
+    await act(async () => { await Promise.resolve() })
+    // 松手后仍然什么都没发生（谁都没命中 + 守卫拦住建窗那一路），标签原封不动。
     expect(useTabs.getState().tabs).toEqual([HOME, TAB_A])
+    expect(tearOutTab).not.toHaveBeenCalled()
   })
 
   // R2/M5：总览标签没有窗格、没有 PTY，tearOutTab 对它是空操作。此前它照样会进入
@@ -522,6 +557,204 @@ describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () 
 
     expect(useDnd.getState().tearOut).toBe(true)
     expect(document.querySelector('.tabbar-tear-out')).not.toBeNull()
+  })
+})
+
+// V3.4 Task 3：松手时的三路分流（设计文档 §5.2）。这里测的是 TabBar 这一侧的**判定**
+// ——命中测试问了没有、参数对不对、按 localY 选了哪一条路；两条落地路径（交接 /
+// 建新窗口）自身的行为在 windowHandoff.test.ts 里覆盖，这里只看它们有没有被调用。
+//
+// 每条用例都同时断言"该发生的确实发生了"和"不该发生的确实没发生"：异步多路径场景里
+// 单看"某个 mock 没被调用过"几乎总是成立（分流链跑没跑完都一样绿），必须配正面对照。
+describe('TabBar — 松手时的三路分流（V3.4 设计文档 §5.2）', () => {
+  const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 2000 })
+    vi.mocked(windowAtPoint).mockResolvedValue(null)
+  })
+  afterEach(() => {
+    if (originalClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalClientWidth)
+  })
+
+  // 把标签从窗口右边界（jsdom 默认 innerWidth=1024）拖出去足够远再松手。screenX/screenY
+  // 与 clientX/clientY 刻意取不同的值：命中测试与建窗要的是**屏幕**坐标，传成 client
+  // 坐标是这条接线上最容易犯的错。
+  async function dragOut(el: HTMLElement) {
+    await act(async () => {
+      fireEvent.pointerDown(el, { clientX: 400, clientY: 10, screenX: 900, screenY: 60, pointerId: 1 })
+      fireEvent.pointerMove(el, { clientX: 2000, clientY: 10, screenX: 2500, screenY: 60, pointerId: 1 })
+      fireEvent.pointerUp(el, { clientX: 2000, clientY: 10, screenX: 2500, screenY: 60, pointerId: 1 })
+    })
+    // 分流链是异步的（命中测试在真实环境里是一次 IPC 往返），让它落地。
+    await act(async () => { await Promise.resolve() })
+  }
+
+  it('命中其它窗口的标签栏落区：交接给那个窗口，一次都没去建新窗口', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 120, localY: 19 })
+
+    await dragOut(tabEl('B'))
+
+    expect(handoffTabToWindow).toHaveBeenCalledTimes(1)
+    expect(handoffTabToWindow).toHaveBeenCalledWith('tab-b', 'term-4')
+    // 目标窗口本来就在，不是这次要建的——建窗那一路一步都不能走。
+    expect(tearOutTab).not.toHaveBeenCalled()
+  })
+
+  it('命中其它窗口、但落点在标签栏落区之外：取消——既不交接也不建窗，标签留在原处', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    // localY=300 落在目标窗口的终端区域里（Ruling 2：在别的窗口的终端上松手，用户意图
+    // 不明；在它上面再叠一个新窗口更不可能是本意）。
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 120, localY: 300 })
+
+    await dragOut(tabEl('B'))
+
+    // 正面对照：命中测试确实跑到了（否则下面两条"没被调用"就是恒真）。
+    expect(windowAtPoint).toHaveBeenCalledTimes(1)
+    expect(handoffTabToWindow).not.toHaveBeenCalled()
+    expect(tearOutTab).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    // 取消这一路一次都没碰交接锁（src/handoffLock.ts，这里用的是真实实现——被替身掉的
+    // 只有 windowHandoff）。锁若被占上，这个标签从此**永久关不掉**：closeTab 会一直早退。
+    // 断真实 store 状态，不是"某个 mock 没被调用"。
+    await act(async () => { await useTabs.getState().closeTab('tab-b', async () => true) })
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a'])
+  })
+
+  it('谁都没命中：走 V3.3 既有的建新窗口路径，坐标是屏幕坐标', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+
+    await dragOut(tabEl('B'))
+
+    expect(tearOutTab).toHaveBeenCalledTimes(1)
+    expect(tearOutTab).toHaveBeenCalledWith('tab-b', { x: 2500, y: 60 })
+    expect(handoffTabToWindow).not.toHaveBeenCalled()
+  })
+
+  it('命中测试传的 exclude 是本窗口自己的 label（不排除源窗口就永远只命中它自己）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+
+    await dragOut(tabEl('B'))
+
+    expect(windowAtPoint).toHaveBeenCalledWith(2500, 60, 'term-9')
+  })
+
+  // 落区边界（TABBAR_DROP_ZONE_PX = 40，localY 的原点是目标窗口内容区顶边）。坐标写
+  // 字面量、不从被测模块导入那个常量：导入的话"落区内就交接"会退化成恒真（常量改成 0
+  // 时 localY=0 仍然算在落区内）。两侧刻意贴着落区取值（39 / 40）而不是"10 与 300"那种
+  // 宽松的一对：后者只能说明落区落在 (10, 300] 里的某处，把 40 改成 68（修复轮 R1 之前
+  // 那个含标题栏偏移的值）照样全绿。
+  it('落区边界：localY=39 交接，localY=40 取消', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    const { unmount } = await renderApp()
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 10, localY: 39 })
+    await dragOut(tabEl('B'))
+    expect(handoffTabToWindow).toHaveBeenCalledTimes(1)
+    unmount()
+
+    vi.mocked(handoffTabToWindow).mockClear()
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 10, localY: 40 })
+    await dragOut(tabEl('B'))
+    expect(handoffTabToWindow).not.toHaveBeenCalled()
+    expect(tearOutTab).not.toHaveBeenCalled()
+  })
+
+  // §5.2：`tabCount <= 1` 那道守卫只拦第 4 路。把 `term-*` 窗口里最后一个标签拖到别的
+  // 窗口正是 V3.4 的核心用例（拖完这个窗口就空了、随即自动关闭），被守卫拦下等于这个
+  // 功能对空壳窗口完全不可用。
+  it('只剩一个非主页标签时拖到其它窗口的标签栏：仍然交接（守卫只拦建窗那一路）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_B], activeId: 'tab-b' })
+    await renderApp()
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 120, localY: 19 })
+
+    await dragOut(tabEl('B'))
+
+    expect(handoffTabToWindow).toHaveBeenCalledWith('tab-b', 'term-4')
+  })
+
+  // 同一次改动的另一半：守卫在它本来管的那一路上必须原样生效（别把"只拦第 4 路"写成
+  // "哪一路都不拦"）。
+  it('只剩一个非主页标签、且谁都没命中：仍然不建新窗口（守卫在它管的那一路上照旧生效）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_B], activeId: 'tab-b' })
+    await renderApp()
+
+    await dragOut(tabEl('B'))
+
+    // 正面对照：命中测试确实问过了，只是没命中——不是整条分流压根没跑。
+    expect(windowAtPoint).toHaveBeenCalledTimes(1)
+    expect(tearOutTab).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-b'])
+  })
+
+  // 40px 出界余量四条路共用（见 tabTearOut.ts 的 isPointerOutsideWindow 注释）：横向排序
+  // 时向上晃进原生标题栏（clientY=-20）不该触发任何跨窗口动作。V3.4 之后这一晃的后果
+  // 从"弹出一个新窗口"变成"把标签甩进背后那个窗口"——级联摆放的窗口正好就在源窗口标题栏
+  // 背后，误触面反而更大。
+  it('横向排序时向上晃进标题栏（clientY=-20）：连命中测试都不问', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    mockTabBarRects({
+      tabbar: { left: 0, top: 0, width: 800, height: 30 },
+      'tab:home': { left: 0, width: 50 },
+      'tab:tab-a': { left: 50, width: 100 },
+      'tab:tab-b': { left: 150, width: 100 },
+    })
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 10, localY: 10 })
+    const b = tabEl('B')
+
+    await act(async () => {
+      fireEvent.pointerDown(b, { clientX: 200, clientY: 19, screenX: 700, screenY: 100, pointerId: 1 })
+      fireEvent.pointerMove(b, { clientX: 100, clientY: -20, screenX: 600, screenY: 61, pointerId: 1 })
+      fireEvent.pointerUp(b, { clientX: 100, clientY: -20, screenX: 600, screenY: 61, pointerId: 1 })
+    })
+    await act(async () => { await Promise.resolve() })
+
+    expect(windowAtPoint).not.toHaveBeenCalled()
+    expect(handoffTabToWindow).not.toHaveBeenCalled()
+    expect(tearOutTab).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-b'])
+
+    // 正面对照，同一个渲染、同一个标签、同一份替身：再拖一次，这次真的走远。命中测试
+    // 立刻就被问到、并且真的交接了——证明上面那三条"没被调用"是余量挡下来的，不是这条
+    // 接线在本用例的环境里压根没通。
+    await dragOut(b)
+    expect(windowAtPoint).toHaveBeenCalledTimes(1)
+    expect(handoffTabToWindow).toHaveBeenCalledWith('tab-b', 'term-4')
+  })
+
+  // R2/M5 在新分流下的延续：总览标签没有窗格、没有 PTY，交接与拖出对它都是空操作。
+  it('拖总览标签出界：连命中测试都不问（它没有窗格可搬）', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, OVERVIEW_TAB], activeId: 'tab-a' })
+    await renderApp()
+    vi.mocked(windowAtPoint).mockResolvedValue({ label: 'term-4', localX: 10, localY: 10 })
+
+    await dragOut(tabEl('总览页'))
+
+    expect(windowAtPoint).not.toHaveBeenCalled()
+    expect(handoffTabToWindow).not.toHaveBeenCalled()
+    expect(tearOutTab).not.toHaveBeenCalled()
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['home', 'tab-a', 'tab-ov'])
+  })
+
+  // 命中测试本身失败时的降级：退回 V3.3 既有行为，而不是静默取消（用户的手势毫无反应
+  // 且无从判断原因）。
+  it('命中测试失败：按“谁都没命中”处理，退回建新窗口那一路', async () => {
+    useTabs.setState({ tabs: [HOME, TAB_A, TAB_B], activeId: 'tab-a' })
+    await renderApp()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.mocked(windowAtPoint).mockRejectedValue(new Error('窗口枚举失败'))
+
+    await dragOut(tabEl('B'))
+
+    expect(tearOutTab).toHaveBeenCalledWith('tab-b', { x: 2500, y: 60 })
+    expect(handoffTabToWindow).not.toHaveBeenCalled()
   })
 })
 

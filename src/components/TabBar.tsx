@@ -10,6 +10,7 @@ import {
 import { createPortal } from 'react-dom'
 import { newConversation, newTerminal, resumeThread } from '../actions'
 import { attachDragSafetyNet } from '../dragSafetyNet'
+import { type WindowHit, windowAtPoint } from '../ipc'
 import { DRAG_THRESHOLD_PX, pointInRect, resolveDropMode, resolveDropTarget, resolveTabBarInsertIndex } from '../paneDrop'
 import { getContentWidth, getPaneSlotRects, getTabBarRect, getTabRects } from '../paneDropDom'
 import { previewPaneDrop } from '../paneLayout'
@@ -18,8 +19,9 @@ import { useDragGhost } from '../store/dragGhost'
 import { useHint } from '../store/hint'
 import { useLayout } from '../store/layout'
 import { type Tab, useTabs } from '../store/tabs'
-import { shouldTearOut } from '../tabTearOut'
-import { tearOutTab } from '../windowHandoff'
+import { isPointerOutsideWindow, shouldTearOut, TABBAR_DROP_ZONE_PX } from '../tabTearOut'
+import { handoffTabToWindow, tearOutTab } from '../windowHandoff'
+import { currentWindowLabel } from '../windowLabel'
 import { ContextMenu } from './ContextMenu'
 import { type SessionPick, SessionPicker } from './SessionPicker'
 
@@ -118,7 +120,13 @@ function TabBarDropIndicator() {
   return <div className="tabbar-drop-indicator" style={{ left }} />
 }
 
-// 标签拖出窗口边界（V3.3 设计文档 §4.1）的视觉提示：与 DropIndicator.tsx 同一套
+// 标签离开窗口边界（V3.3 设计文档 §4.1，V3.4 §5.2 起不只"拖出成新窗口"）的视觉提示：
+//
+// 文案在 V3.4 修复轮 R2 从「松开在新窗口打开」改成「松开以移出此窗口」：松手后有三种
+// 结局（交接给命中的窗口 / 建一个新窗口 / 什么都不做），指示条出现的那一刻并不知道是哪
+// 一种——目标窗口收不到指针事件，实时落点指示是规格 §3 明确不做的。原文案在另外两种
+// 结局下都是错的承诺，改成只陈述这条指示唯一确知的事实："指针已经离开这个窗口"。
+//与 DropIndicator.tsx 同一套
 // "拖拽源实时写 store/dnd.ts 的 tearOut 字段、指示条只读"模式，只读不写。锚定在
 // `.tabbar` 内部（position:absolute，见 App.css 的 .tabbar-tear-out），不像
 // DragGhost.tsx 那样用 position:fixed 跟随光标——光标一旦真的移出窗口视口，
@@ -129,9 +137,51 @@ function TabBarTearOutIndicator() {
   if (!tearOut) return null
   return (
     <div className="tabbar-tear-out">
-      <span className="tabbar-tear-out-label">松开在新窗口打开</span>
+      <span className="tabbar-tear-out-label">松开以移出此窗口</span>
     </div>
   )
+}
+
+// 松手时的三路分流（V3.4 设计文档 §5.2）。指针已经在源窗口外**足够远**（
+// isPointerOutsideWindow，含 V3.3 那个 40px 余量）时由 pointerup 调用，异步跑完
+// ——命中测试是一次真实的 IPC 往返，pointerup 处理器本身必须立刻返回让拖拽手势正常收尾。
+//
+// 四条路，判定顺序写死（先问"落在谁身上"，再问"落在它的哪儿"）：
+//   1. window_at_point(screenX, screenY, 本窗口 label)。**exclude 必传**（Ruling 1）：
+//      源窗口整个手势期间持有指针 capture、通常也是聚焦窗口，它的屏幕矩形必然包含当前
+//      指针位置，不排除就永远只命中它自己。
+//   2. 命中其它窗口、且落点在它的标签栏落区内（localY < TABBAR_DROP_ZONE_PX，原点是该
+//      窗口**内容区**左上角，不含原生标题栏，见那个常量的注释）→ 交接给它。
+//   3. 命中其它窗口但不在落区 → **取消**（Ruling 2）：标签留在原处，既不交接也不建窗。
+//      在别的窗口的终端区域上松手，用户意图不明；在它上面再叠一个新窗口更不可能是本意。
+//   4. 谁都没命中 → V3.3 既有的"拖出成新窗口"。
+//
+// `allowNewWindow` 只作用于第 4 路：它就是 shouldTearOut 里那道 `tabCount <= 1` 守卫的
+// 结果，由 onTabPointerUp 松手那一刻就地算出。**注意它与 useDnd.tearOut 不是一回事**：
+// 后者（R2 / I1 起）装的是无守卫的 isPointerOutsideWindow，只管"要不要显示离窗指示"；
+// 在 V3.4 的招牌场景——只剩一个终端标签——两者恰好相反（tearOut=true、allowNewWindow=
+// false），别把其中一个当另一个推理。把 `term-*` 窗口里最后
+// 一个标签拖到别的窗口正是 V3.4 的核心用例，不能被这道守卫拦下；而"窗口里只剩一个标签
+// 时再给它建个新窗口"依然没有意义，第 4 路照旧拦住。
+//
+// 命中测试本身失败（Rust 侧 Err、事件桥挂了）时按"谁都没命中"处理：退回 V3.3 的既有行为
+// 是这里唯一有意义的降级——静默取消会让用户的手势毫无反应且无从判断原因。
+async function routeTabDrop(tabId: string, screenPoint: { x: number; y: number }, allowNewWindow: boolean): Promise<void> {
+  let hit: WindowHit | null = null
+  try {
+    hit = await windowAtPoint(screenPoint.x, screenPoint.y, await currentWindowLabel())
+  } catch (err) {
+    console.warn('落点命中测试失败，按“没有命中任何窗口”处理', err)
+  }
+  if (hit) {
+    // 第 2 / 3 路。handoffTabToWindow 自己吞掉全部失败、失败时保留标签并给出轻提示。
+    if (hit.localY < TABBAR_DROP_ZONE_PX) await handoffTabToWindow(tabId, hit.label)
+    return
+  }
+  // 第 4 路。传 screenX/screenY 而不是 clientX/clientY：create_term_window 要的是新窗口
+  // 在**屏幕**坐标系里的左上角位置，逻辑（CSS）像素，**不要**再乘 devicePixelRatio
+  // ——坐标契约的三处源码核实见 src-tauri/src/lib.rs 里 create_term_window 顶部的注释。
+  if (allowNewWindow) await tearOutTab(tabId, screenPoint)
 }
 
 // 把已打开的标签拖进窗格区（设计文档 §5-B 场景 A，用户明确要求）：与 TabPanes.tsx 的
@@ -296,8 +346,17 @@ export function TabBar() {
     // 没有 PTY，tearOutTab 对它是空操作——此前它照样会进入 tearOut 状态、照样显示
     // 「松开在新窗口打开」，松手却什么都不发生：一个明确的视觉承诺配一个无声的空操作。
     // 在判定这一层就排除掉，总览标签因此完全走下面既有的标签栏排序分支，行为不变。
+    //
+    // V3.4 修复轮 R2 / I1：这里用 isPointerOutsideWindow 而**不是** shouldTearOut。
+    // shouldTearOut 含 `tabCount <= 1` 那道守卫，而 `term-*` 窗口恒有一个主页标签——只剩
+    // 一个终端标签时守卫恒为真，于是把它拖出去的**整个过程零视觉反馈**：光标下没有 ghost、
+    // 标签栏不高亮，松手前无从知道会发生什么，然后标签突然消失、窗口突然自毁。而"把
+    // `term-*` 里最后一个终端标签拖到别的窗口"恰恰是 V3.4 的招牌用例。次生问题同样在这
+    // 一行：tearOut 恒 false 会让下面继续走「标签栏排序 / 合并进窗格区」两条分支，被拖的
+    // 若不是激活标签还会亮起窗格合并预览——一个与实际结果毫无关系的承诺。
+    // 守卫本身没有取消，它挪到了 pointerup 的 allowNewWindow（只拦"建新窗口"那一路）。
     const windowRect = { width: window.innerWidth, height: window.innerHeight }
-    const tearOut = dragTab.kind === 'term' && shouldTearOut({ x: e.clientX, y: e.clientY }, windowRect, tabs.length - 1)
+    const tearOut = dragTab.kind === 'term' && isPointerOutsideWindow({ x: e.clientX, y: e.clientY }, windowRect)
     useDnd.getState().setTearOut(tearOut)
     if (tearOut) {
       useDnd.getState().setTarget(null)
@@ -392,7 +451,6 @@ export function TabBar() {
     // 提前读好这两个值就不受调用顺序影响。
     const target = useDnd.getState().target
     const tabBarIndex = useDnd.getState().tabBarIndex
-    const tearOut = useDnd.getState().tearOut
     e.currentTarget.releasePointerCapture?.(e.pointerId)
     // 无条件调用，任何后续 return 都不可能让屏蔽选择的 body class 卡住；这个函数同时
     // 接在 onPointerUp 和 onPointerCancel 上，两条退出路径因此都被覆盖。与
@@ -401,20 +459,44 @@ export function TabBar() {
     endDrag()
     if (!drag || !drag.dragging) return
     suppressClickRef.current = true
-    if (tearOut) {
-      // V3.3 Task 4：Task 2 留下的 console.info 占位换成真实的交接握手（六步 + 超时
-      // 回滚全在 src/windowHandoff.ts 里，这里只负责"发起"这一下）。
-      //
-      // 传 screenX/screenY 而不是 clientX/clientY：create_term_window 要的是新窗口
-      // 在**屏幕**坐标系里的左上角位置，clientX/clientY 是相对本窗口视口的（上面
-      // shouldTearOut 判定用的正是后者，两者在这一段里同时出现，别搞混）。单位是
-      // 逻辑（CSS）像素，**不要**再乘 devicePixelRatio——坐标契约的三处源码核实见
-      // src-tauri/src/lib.rs 里 create_term_window 顶部的注释。
-      //
-      // 不 await：整个握手是异步的（建窗 + 两次带超时的等待），而 pointerup 这个
-      // 处理器必须立刻返回让拖拽手势正常收尾。tearOutTab 自己吞掉全部失败、失败时
-      // 保留标签并给出轻提示，不会有未处理的 rejection。
-      void tearOutTab(drag.tabId, { x: e.screenX, y: e.screenY })
+    // 指针是不是已经在本窗口之外（V3.4 §5.2 三路分流的入口条件）。它与上面那个 tearOut
+    // 字段现在是同一件事（修复轮 R2 / I1 起 pointermove 也用 isPointerOutsideWindow），
+    // 但仍然在这里就地重算而不是读 tearOut：endDrag() 已经在上面把 useDnd 清过一轮，落点
+    // 状态是提前取好的快照，而这两个坐标就在手上，重算一次比多依赖一个快照更直接。
+    //
+    // `tabCount <= 1` 那道守卫**不在这里**，它只作用于第 4 路（见下面的 allowNewWindow）
+    // ——把窗口里最后一个标签拖到别的窗口正是 V3.4 的核心用例。
+    //
+    // **40px 出界余量则四条路共用**（isPointerOutsideWindow 自己带着，见它上方注释）。
+    // 这不是顺手保留 V3.3 的写法：余量回答的是"用户是不是**有意**离开本窗口"，这个问题
+    // 先于"离开之后去了哪"，四条路都要先过它。把余量从这里拿掉的话，指针只要越出窗口
+    // 1px 就会发起命中测试——而"横向拖动标签排序时向上晃 20px"落在的正是**本窗口自己的
+    // 原生标题栏**（`clientY ∈ [-28, 0)`，见 tabTearOut.ts 的 TEAR_OUT_MARGIN_PX），
+    // 命中测试排除源窗口之后命中的会是**背后那个窗口**，而 ⌘N 的级联摆放（+30/+30）
+    // 恰好让它此处的 localY 落在标签栏落区内。也就是说去掉余量，会把终审 I4 那类误触从
+    // "弹出一个新窗口"升级成"标签被甩进背后那个窗口"，触发条件反而更宽。
+    //
+    // clientX/clientY 是相对本窗口视口的坐标，screenX/screenY 是屏幕坐标；出界判定用
+    // 前者，命中测试与建窗位置用后者，两者在这一段里同时出现，别搞混。
+    const dragTab = useTabs.getState().tabs.find((t) => t.id === drag.tabId)
+    // 只有 term 标签能离开本窗口（R2/M5）：主页标签钉住不可拖；总览标签没有窗格、没有
+    // PTY，交接与拖出对它都是空操作，在判定这一层就排除掉，与 pointermove 那侧一致。
+    const outside =
+      dragTab?.kind === 'term' &&
+      isPointerOutsideWindow({ x: e.clientX, y: e.clientY }, { width: window.innerWidth, height: window.innerHeight })
+    if (outside) {
+      // 第 4 路（建新窗口）专用的那道守卫：窗口里只剩这一个可拖拽标签时，把它拖出去等于
+      // 把整个窗口搬到新窗口，没有意义（V3.3 §4.1 的边界情况，口径未变——tabs.length 恒
+      // 含钉住不可拖的主页标签，故减一）。第 2/3 路不受它约束。
+      const allowNewWindow = shouldTearOut(
+        { x: e.clientX, y: e.clientY },
+        { width: window.innerWidth, height: window.innerHeight },
+        useTabs.getState().tabs.length - 1,
+      )
+      // 不 await：整条分流是异步的（命中测试一次 IPC 往返，其后的握手还有两次带超时的
+      // 等待），而 pointerup 这个处理器必须立刻返回让拖拽手势正常收尾。routeTabDrop 及
+      // 它调用的两个函数各自吞掉全部失败，不会有未处理的 rejection。
+      void routeTabDrop(drag.tabId, { x: e.screenX, y: e.screenY }, allowNewWindow)
       return
     }
     if (tabBarIndex !== null) {

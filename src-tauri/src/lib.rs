@@ -479,6 +479,212 @@ async fn create_term_window(app: AppHandle, x: f64, y: f64) -> Result<String, St
     Ok(label)
 }
 
+/// 逻辑（CSS）像素下的一个窗口矩形：左上角 `(x, y)` + 宽高。`window_at_point` 由每个
+/// 窗口自己的 `inner_position()`/`inner_size()`（**内容区**，物理像素）与
+/// `scale_factor()` 换算得到（见 `physical_rect_to_logical`），命中判定本身
+/// （`hit_test_windows`）只认逻辑矩形——换算的正确性和包含判定的正确性因此各自独立
+/// 可测，互不牵连。
+///
+/// **为什么是内容区而不是外框**（V3.4 修复轮 R1）：这个矩形的左上角同时是
+/// `WindowHit::local_x`/`local_y` 的原点，而前端拿 `local_y` 去比的是「标签栏落区高度」
+/// （`src/tabTearOut.ts` 的 `TABBAR_DROP_ZONE_PX`）——标签栏是 webview 内容区的第一个
+/// 元素，从内容区顶部开始。用外框（`outer_*`）的话原点会跑到原生标题栏顶边，`local_y`
+/// 里凭空混进一个标题栏高度，前端只能在自己那边加一个魔数补偿；而那个补偿数在全屏窗口
+/// （没有标题栏）上又是错的，`tauri.conf.json` 一旦加上 `titleBarStyle` 也会失效。
+/// 规格 §5.1 原文要的就是"点在其**内容区**的本地逻辑坐标"。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LogicalRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// `window_at_point` 命中时的返回值：命中窗口的 label，以及点相对该窗口**内容区**
+/// 左上角的本地逻辑坐标（原点是 webview 内容区顶边，不含原生标题栏——理由见
+/// `LogicalRect` 上方那段）。字段用 `camelCase` 序列化（`local_x`/`local_y` ->
+/// `localX`/`localY`），
+/// 与仓库其它多字段返回结构体同一约定（见 `status/installer.rs` 的
+/// `HookInstallState`/`HooksStatus` 等；`src/ipc.ts` 侧的 `WindowHit` 接口逐字段沿用
+/// 这份 camelCase，见其注释）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowHit {
+    label: String,
+    local_x: f64,
+    local_y: f64,
+}
+
+/// 纯函数：把一个窗口的物理像素矩形（`window_at_point` 传的是 `inner_position()`/
+/// `inner_size()` 的原始返回值，调用方各自转成 `f64` 后传入）按它自己的
+/// `scale_factor()` 换算成逻辑（CSS）像素矩形。函数本身不关心传进来的是内容区还是
+/// 外框——它只做除法。
+///
+/// 换算方向是**物理 ÷ scale = 逻辑**，不是反过来——方向写反时在非 Retina 屏
+/// （`scale_factor() == 1.0`）上除和乘结果相同，完全测不出来，必须用 `scale != 1.0`
+/// 的输入才能验证方向对不对（下方 `physical_rect_to_logical_divides_not_multiplies_
+/// with_dpr_two` 单测用 scale=2.0 构造）。方向依据：`src/store/layout.ts` 的
+/// `runPanelResize`（约 190 行）踩过反方向的坑——那里是**逻辑 → 物理**，要把 CSS
+/// 像素的 `panelWidth` 乘上 `devicePixelRatio` 才能传给期望物理像素的
+/// `PhysicalPosition`（该文件注释："这一步换算漏了的话，Retina 上面板只会长出该有
+/// 宽度的一半，非 Retina 屏上又恰好正确"）；这里做的是反方向的换算（物理 → 逻辑），
+/// 所以是除不是乘。也与 `create_term_window`/`window_logical_origin` 已核实过的
+/// tauri `dpi` 换算惯例一致（已对照本机 `dpi 0.1.2` 源码核实：
+/// `PhysicalPosition::to_logical`/`PhysicalSize::to_logical` 内部同样是
+/// `self.x.into() / scale_factor`）——这里没有直接调用 `to_logical`，而是手写除法，
+/// 为的是让这段算术本身可以被单测覆盖、被变异验证（`to_logical` 是库代码，改乘改除
+/// 不会出现在这个仓库的 diff 里）。
+fn physical_rect_to_logical(
+    physical_x: f64,
+    physical_y: f64,
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+) -> LogicalRect {
+    LogicalRect {
+        x: physical_x / scale_factor,
+        y: physical_y / scale_factor,
+        width: physical_width / scale_factor,
+        height: physical_height / scale_factor,
+    }
+}
+
+/// 纯函数：给定一个逻辑屏幕坐标点与一组窗口 `(label, 逻辑矩形)`，找出第一个包含该
+/// 点、且 label != exclude 的窗口，返回其 label 与点在其内的本地逻辑坐标（点减去
+/// 矩形左上角）。一个都不命中（含全部被 exclude 排除）返回 `None`。
+///
+/// **包含判定边界**：左/上闭区间，右/下开区间——`x` 落在
+/// `[rect.x, rect.x + rect.width)`、`y` 落在 `[rect.y, rect.y + rect.height)` 才算
+/// 命中，与 DOM `getBoundingClientRect()` 系列 API 的惯例一致：矩形右/下边界那一条
+/// 线本身不属于这个矩形（属于相邻下一个像素的起点）。四条边界分别单测：左边界与上
+/// 边界命中，右边界（`rect.x + rect.width`）与下边界（`rect.y + rect.height`）不
+/// 命中。
+///
+/// **`exclude`**（V3.4 设计 Ruling 1）：源窗口在整个拖拽手势期间持有指针 capture
+/// （`setPointerCapture`），通常也是当前聚焦窗口——它的屏幕矩形必然包含指针当前
+/// 位置，调用方（`window_at_point`）不传自身 label 作为 `exclude` 的话，这里遍历到
+/// 它时会提前命中并返回它自己，交接手势永远找不到目标窗口。
+///
+/// **重叠命中**：`windows` 里排在前面的优先——调用方 `window_at_point` 直接把
+/// `app.webview_windows()`（`HashMap`，不保证顺序、更不反映屏幕 z-order）转成的
+/// `Vec` 传进来，因此"排在前面"不代表"显示在最上层"，这是本命令的已知局限，记入真机
+/// 验收（tao/tauri 都没有暴露查询窗口 z-order 的 API），不是这个函数能修的。
+///
+/// 不接触任何 Tauri/窗口对象，因此可以像 `settings_insertion_index` 一样直接单测，
+/// 不需要构造真实 `AppHandle`/`WebviewWindow`。
+fn hit_test_windows(
+    point: (f64, f64),
+    windows: &[(String, LogicalRect)],
+    exclude: &str,
+) -> Option<WindowHit> {
+    let (px, py) = point;
+    windows.iter().find_map(|(label, rect)| {
+        if label == exclude {
+            return None;
+        }
+        let within_x = px >= rect.x && px < rect.x + rect.width;
+        let within_y = py >= rect.y && py < rect.y + rect.height;
+        if !(within_x && within_y) {
+            return None;
+        }
+        Some(WindowHit {
+            label: label.clone(),
+            local_x: px - rect.x,
+            local_y: py - rect.y,
+        })
+    })
+}
+
+/// 命中测试命令：给定一个逻辑屏幕坐标点，找出（排除 `exclude`）第一个包含它的窗口，
+/// 返回其 label 与点在其内的本地逻辑坐标；一个都不命中则 `Ok(None)`。V3.4 拖标签到
+/// 其它窗口标签栏的落点判定入口，Task 3 消费这个命令。
+///
+/// ## 坐标契约：与 `create_term_window` 完全一致——`x`/`y` 是逻辑（CSS）像素
+///
+/// 调用方不做 `devicePixelRatio` 换算，直接传 `PointerEvent.screenX`/`screenY`
+/// （依据见 `create_term_window` 顶部注释：已对照 tauri 2.11.5
+/// `WebviewWindowBuilder::position`/`inner_size` 文档字符串——"in logical
+/// pixels"——核实的同一份考据，这里不重复贴一遍）。
+///
+/// ## `exclude` 必传（V3.4 设计 Ruling 1）
+///
+/// 见 `hit_test_windows` 顶部注释——源窗口自己的矩形必然包含指针当前位置，不排除它
+/// 就永远只会命中它自己，调用方（Task 3 的拖拽手势）必须传自身 label。
+///
+/// ## 每个窗口用它自己的 `scale_factor()` 换算
+///
+/// 多显示器环境下不同窗口可能挂在不同缩放比例的屏幕上，`inner_position`/
+/// `inner_size` 各自返回该窗口所在屏幕的物理像素，不能用某一个全局/固定的 scale
+/// factor 统一换算，必须逐窗口各取各的（与 `window_logical_origin` 同一手法，见其
+/// 上方注释）。
+///
+/// ## 取的是**内容区**（`inner_*`），不是外框（`outer_*`）
+///
+/// 见 `LogicalRect` 上方那段：`local_y` 的原点必须是 webview 内容区顶边，前端的
+/// 「标签栏落区」常量才是一个相对标签栏本身定义的、与标题栏高度无关的数。
+///
+/// ## 只考虑**看得见**的窗口（V3.4 修复轮 R2 / I2）
+///
+/// 最小化的窗口在 macOS 上仍然保留它的 frame，`inner_position()`/`inner_size()` 照常
+/// 返回一个正常矩形——不过滤的话，用户明明看着的是一片空桌面（以为松手会弹出一个新
+/// 窗口），标签却被交给了一个屏幕上根本不存在的窗口，随后无从找回。`is_visible()` 同理
+/// 覆盖"窗口被 hide 掉"这一类。
+///
+/// 读取失败一律**视为可见**（`is_visible` 取 `unwrap_or(true)`、`is_minimized` 取
+/// `unwrap_or(false)`）：这两个 getter 走的是与位置/尺寸同一类的窗口查询，失败通常只是
+/// 竞态。保守方向是"宁可让它参与命中"——漏掉一个其实可见的窗口会让用户明明拖到了目标
+/// 窗口标签栏上却弹出一个新窗口（一次不可见的错投），而多算一个其实不可见的窗口至多回到
+/// 修复前的行为。
+///
+/// ## 失败即降级
+///
+/// 遍历中任一窗口的 `inner_position()`/`inner_size()`/`scale_factor()` 读取失败，
+/// 只跳过这一个窗口，不让整个命令返回 `Err`——可能只是窗口在被查询的同时刚好正在
+/// 关闭这类竞态，不是调用方能规避的错误；命令在没有任何窗口可读、或没有任何窗口命中
+/// 时仍返回 `Ok(None)`，不是 `Err`。
+///
+/// ## 多窗口重叠、未覆盖单测
+///
+/// 重叠时的已知局限见 `hit_test_windows` 顶部注释。这个 `async fn` 本身需要构造
+/// 真实 `AppHandle`/`WebviewWindow` 才能测，未覆盖单测——与 `create_term_window` 本身
+/// 同一模式（见文件末尾 `#[cfg(test)]` 模块 `new_term_window_label` 单测上方那条
+/// 注释）；真正做判定的两个纯函数（`physical_rect_to_logical`/`hit_test_windows`）
+/// 各自独立覆盖单测。
+#[tauri::command]
+async fn window_at_point(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    exclude: String,
+) -> Result<Option<WindowHit>, String> {
+    let windows: Vec<(String, LogicalRect)> = app
+        .webview_windows()
+        .into_iter()
+        .filter_map(|(label, window)| {
+            // 看不见的窗口不参与命中（I2，理由见上方"只考虑看得见的窗口"一节）。读取
+            // 失败按"可见"处理，与下面几个 `ok()?` 的"读不到就跳过"方向刻意相反：那几个
+            // 读不到就连矩形都算不出来、没有别的选择，而这两个读不到时矩形是好的，把它
+            // 排除掉才是更坏的那一侧。
+            if !window.is_visible().unwrap_or(true) || window.is_minimized().unwrap_or(false) {
+                return None;
+            }
+            let pos = window.inner_position().ok()?;
+            let size = window.inner_size().ok()?;
+            let scale = window.scale_factor().ok()?;
+            let rect = physical_rect_to_logical(
+                pos.x as f64,
+                pos.y as f64,
+                size.width as f64,
+                size.height as f64,
+                scale,
+            );
+            Some((label, rect))
+        })
+        .collect();
+
+    Ok(hit_test_windows((x, y), &windows, &exclude))
+}
+
 /// macOS 专属：把 Tauri 自动生成的默认菜单里那个"Quit"项换成一个自定义菜单项。
 ///
 /// 背景（已通过阅读本机 `tao 0.35.3`/`muda 0.19.3`/`tauri 2.11.5` 源码 + 核对
@@ -541,7 +747,15 @@ fn try_replace_quit_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::
 /// `setup_macos_menu` 一个函数，靠"顺序写死、注释紧邻"降低被无意间写错的概率，但
 /// 评审实测过函数体内部仍能被悄悄调换、`cargo build`/`cargo test` 拦不住），现在
 /// 顺序写错会直接编译不过——R2 修复，实测的编译错误逐字输出见任务报告「修复轮 R2」。
+///
+/// V3.4 起 `derive(Clone, Copy)`：`insert_new_window_menu_item`（File 子菜单「新建
+/// 窗口」）加入后，同一个令牌需要交给两个插入函数各收一份——`Copy` 只是让
+/// `setup_macos_menu` 里那一个 `quit_replaced` 变量可以被传两次，不改变"只有
+/// `replace_quit_menu_item` 能构造它"这条约束（字段仍然私有），也不减弱顺序不变式
+/// 本身：把两行调用对调仍然是"变量在声明前使用"，`cargo build` 照样报 E0425，与
+/// `Copy` 与否无关。
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
 struct QuitReplaced(());
 
 /// macOS 专属：`setup_macos_menu` 用来替换 Quit 项的入口，`QuitReplaced` 见证令牌的
@@ -633,6 +847,198 @@ fn insert_settings_menu_item<R: tauri::Runtime>(
         MenuItem::with_id(app, SETTINGS_MENU_ITEM_ID, "设置…", true, Some("Command+,"))?;
     app_submenu.insert_items(&[&separator, &settings_item], insert_at)?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+const NEW_WINDOW_MENU_ITEM_ID: &str = "aterm-new-window";
+
+/// 纯函数：给定插入前 File 子菜单的项数，算出「新建窗口」+ 分隔线该插入的下标。
+///
+/// 与 `settings_insertion_index` 同一做法（见其上方注释）：把可测的下标算术从会
+/// 触碰 muda/AppKit 对象的副作用函数（`insert_new_window_menu_item`）里摘出来，
+/// 后者直接调用这一份，测试和生产代码用的是同一个函数，不会出现两边各写一份、
+/// 彼此漂移的问题。
+///
+/// 固定插到下标 0：File 子菜单默认只有 Close Window 一项（已对照本机 tauri 2.11.5
+/// `src/menu/menu.rs` 里 `Menu::default` 的 File 子菜单构成核实——它的 cfg 是
+/// `not(any(linux, dragonfly, freebsd, netbsd, openbsd))`，macOS 不在排除名单内；
+/// 内容只有 `PredefinedMenuItem::close_window`，`quit` 那一项只在非 macOS 分支才会
+/// 出现在 File 子菜单里）。「新建窗口」要出现在 Close Window 之前，插入
+/// `[新建窗口, 分隔线]` 两项后，原来的 Close Window 自然被推到分隔线之后——不需要
+/// 先算出 Close Window 当前下标，永远插在最前面就是"它之前"。
+///
+/// 返回 `None`：`item_count` 为 0 时——插入的意图是"新项要出现在已有项之前"，空
+/// 子菜单没有可以"之前"的锚点项，插入没有意义。生产代码走到这个分支意味着 File
+/// 子菜单形状异常于预期（当前固定 1 项），与 `settings_insertion_index` 对
+/// `item_count < 2` 的处理同一动机。
+#[cfg(target_os = "macos")]
+fn new_window_insertion_index(item_count: usize) -> Option<usize> {
+    if item_count == 0 {
+        return None;
+    }
+    Some(0)
+}
+
+/// macOS 专属：在 File 子菜单里插入「新建窗口」项（⌘N），位置在 Close Window 之前、
+/// 以分隔线相隔。
+///
+/// **按标题查找 File 子菜单，不按下标**：与 `try_replace_quit_menu_item`/
+/// `insert_settings_menu_item` 用 `top_items.first()` 拿 App 子菜单不同——App 子菜单
+/// 在 tauri 默认菜单里恒是第一个顶层项，但 File 子菜单不是（顺序是 App / File / Edit /
+/// View / Window / Help），且 `Submenu::with_items` 构造它时没有传显式 id（对照
+/// `Menu::default` 源码核实：与 `THEME_SUBMENU_ID`/tauri 自己给 Window/Help 子菜单
+/// 显式指定 id 不同，File 子菜单只传了标题字符串），因此这里学 `apply_theme_mode_
+/// checked` 找"主题"子菜单那样，用 `top_items.iter().find_map` 按 `.text()` 精确匹配
+/// `"File"`，不硬编码下标——下标假设一旦被将来的 tauri 升级打破（顶层子菜单顺序
+/// 变化），按下标找会静默命中错误的子菜单（可能在 Edit/View 里插错两个不相关的菜单
+/// 项）；按标题找则会走进下面的"找不到"分支，只是功能不可用，不会插错地方。
+///
+/// 必须在 `replace_quit_menu_item` 之后调用（`_order: QuitReplaced` 同
+/// `insert_settings_menu_item` 的用法，见其上方注释）——File 子菜单的改动本身不触及
+/// App 子菜单、不影响 Quit 的末位下标，但仍与"设置…"一起走 `setup_macos_menu` 这同一
+/// 个函数，纳入同一条令牌链只是让"哪些插入步骤发生在 Quit 替换之后"这件事在编译期
+/// 有统一的证明方式，不需要为这一步单独判断"是不是真的需要在 Quit 替换之后"。
+/// `QuitReplaced` 因此改成 `Copy`（见其定义处注释）——两个插入函数都要收一份令牌。
+///
+/// 失败即降级：拿不到菜单/顶层菜单项、找不到 File 子菜单、File 子菜单为空，都只打
+/// 警告后继续启动（不 panic），与仓库其它菜单初始化函数一致的纪律。
+#[cfg(target_os = "macos")]
+fn insert_new_window_menu_item<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+    _order: QuitReplaced,
+) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else {
+        return Ok(());
+    };
+    let top_items = menu.items()?;
+    let Some(file_submenu) = top_items.iter().find_map(|item| {
+        let submenu = item.as_submenu()?;
+        match submenu.text() {
+            Ok(text) if text == "File" => Some(submenu),
+            _ => None,
+        }
+    }) else {
+        eprintln!("警告：未找到 \"File\" 子菜单，未插入\"新建窗口\"菜单项，⌘N 不可用");
+        return Ok(());
+    };
+    let items = file_submenu.items()?;
+    let Some(insert_at) = new_window_insertion_index(items.len()) else {
+        eprintln!(
+            "警告：\"File\" 子菜单项数（{}）少于预期，未插入\"新建窗口\"菜单项，⌘N 不可用",
+            items.len()
+        );
+        return Ok(());
+    };
+    let new_window_item = MenuItem::with_id(
+        app,
+        NEW_WINDOW_MENU_ITEM_ID,
+        "新建窗口",
+        true,
+        Some("Command+N"),
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    file_submenu.insert_items(&[&new_window_item, &separator], insert_at)?;
+    Ok(())
+}
+
+/// 拖出/新建窗口级联偏移量（逻辑像素）。与前端标签拖出手势的坐标计算没有耦合关系
+/// （那条路径直接透传 `PointerEvent.screenX/screenY`，见 `create_term_window` 顶部
+/// 坐标契约注释）——这里是纯 Rust 侧「新建窗口」菜单项独立算出的起点，选 30 只是
+/// macOS 常见的窗口级联间距，没有更深的依据。
+#[cfg(target_os = "macos")]
+const NEW_WINDOW_CASCADE_OFFSET: f64 = 30.0;
+
+/// 三级都取不到参考窗口位置时的兜底坐标（逻辑像素）。`setup_macos_menu` 运行时主
+/// 窗口必然已经存在（`run()` 里 `.setup()` 在 `.build()` 之后执行，此时
+/// `tauri.conf.json` 声明的主窗口已创建完毕），因此正常运行时这个分支不会被触达；
+/// 仍显式写出、不裸写在调用点——与 `main_window_config` 的硬编码兜底值同一取舍
+/// （见其上方注释：即便"理论上不会发生"，也要写清楚"发生了怎么办"）。
+#[cfg(target_os = "macos")]
+const NEW_WINDOW_DEFAULT_POSITION: (f64, f64) = (100.0, 100.0);
+
+/// 纯函数：由"参考窗口左上角的逻辑坐标"算出新窗口应出现的位置——有原点就
+/// +30/+30 级联，没有（`None`）就退回 `NEW_WINDOW_DEFAULT_POSITION`。
+///
+/// 上层调用方（`new_window_origin`）负责按"聚焦窗口 -> 主窗口"的优先级把 origin
+/// 解出来（那一步需要真实 `AppHandle`/`WebviewWindow`，见下），这里只管拿到/拿不到
+/// origin 之后该怎么算，因此可以像 `settings_insertion_index` 一样直接单测，不需要
+/// 构造真实窗口。
+#[cfg(target_os = "macos")]
+fn new_window_cascade_position(origin: Option<(f64, f64)>) -> (f64, f64) {
+    match origin {
+        Some((x, y)) => (x + NEW_WINDOW_CASCADE_OFFSET, y + NEW_WINDOW_CASCADE_OFFSET),
+        None => NEW_WINDOW_DEFAULT_POSITION,
+    }
+}
+
+/// 一个窗口左上角的逻辑（CSS）像素坐标，取不到（`outer_position`/`scale_factor`
+/// 任一调用失败）返回 `None`。
+///
+/// `outer_position` 返回的是物理像素（`PhysicalPosition<i32>`），而
+/// `create_term_window` 的坐标契约是逻辑像素（见其上方注释），这里用
+/// `scale_factor` 转换——与 V3.4 设计文档 §2 提到的"Rust 能枚举所有窗口的屏幕矩形：
+/// webview_windows() + 位置/尺寸 + scale_factor()"是同一手法，`window_at_point` 的
+/// 命中测试复用同一套物理→逻辑换算（`physical_rect_to_logical`）。
+///
+/// **这里刻意用 `outer_position`，与 `window_at_point` 的 `inner_position` 不同**：
+/// 这个函数的用途是给新窗口算级联落点，而 `WebviewWindowBuilder::position` 设的是
+/// 窗口**外框**左上角——参考原点必须和它同一个坐标系，否则每级联一次就偏一个标题栏的
+/// 高度。`window_at_point` 要的则是内容区原点（见 `LogicalRect` 上方那段）。两处用途
+/// 不同、取值不同，都是有意的。
+#[cfg(target_os = "macos")]
+fn window_logical_origin(window: &tauri::WebviewWindow) -> Option<(f64, f64)> {
+    let physical = window.outer_position().ok()?;
+    let scale = window.scale_factor().ok()?;
+    let logical: tauri::LogicalPosition<f64> = physical.to_logical(scale);
+    Some((logical.x, logical.y))
+}
+
+/// 三级优先级解出新窗口的参考原点：聚焦窗口 -> 主窗口 -> 无（由
+/// `new_window_cascade_position` 兜底成默认坐标）。
+///
+/// 取聚焦窗口 label 复用 `focused_window_label`——同一份"绕开 `get_focused_window`
+/// 被 `unstable` feature gate"考据（见其上方注释），不再重新验证一遍。`get_webview_
+/// window`/`webview_windows` 都不受 `unstable` 门禁（已对照本机 tauri 2.11.5
+/// `src/lib.rs` 核实：标了 `#[cfg(feature = "unstable")]` 的只有 `get_window`/
+/// `get_focused_window`/`windows`/`get_webview`/`webviews` 五个方法，`get_webview_
+/// window`/`webview_windows` 没有）。
+#[cfg(target_os = "macos")]
+fn new_window_origin(app_handle: &AppHandle) -> Option<(f64, f64)> {
+    if let Some(label) = focused_window_label(app_handle) {
+        if let Some(origin) = app_handle
+            .get_webview_window(&label)
+            .as_ref()
+            .and_then(window_logical_origin)
+        {
+            return Some(origin);
+        }
+    }
+    app_handle
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .as_ref()
+        .and_then(window_logical_origin)
+}
+
+/// macOS 专属：`on_menu_event` 命中「新建窗口」时的完整处理——解出级联位置后调用
+/// `create_term_window` 建窗。
+///
+/// `create_term_window` 是 `async fn`（`#[tauri::command]` 只是给它加了 IPC 绑定，
+/// 函数本身仍是可以直接调用的普通 Rust 函数——tauri 官方文档明确支持"从 Rust 代码里
+/// 直接调用 command"这种用法），但 `on_menu_event` 的处理器是同步闭包，因此用
+/// `tauri::async_runtime::spawn` 把这次调用丢进 tauri 自己的异步运行时，不阻塞事件
+/// 循环。
+///
+/// 失败即降级：`create_term_window` 出错只 `eprintln!`，不 panic、不重试——这次点击
+/// 失败不该影响应用的其它部分，与仓库其它命令调用点一致的纪律。
+#[cfg(target_os = "macos")]
+fn handle_new_window_menu_event(app_handle: &AppHandle) {
+    let (x, y) = new_window_cascade_position(new_window_origin(app_handle));
+    let app = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = create_term_window(app, x, y).await {
+            eprintln!("警告：菜单栏\"新建窗口\"创建窗口失败：{e}");
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -830,6 +1236,12 @@ fn setup_macos_menu<R: tauri::Runtime>(app: &tauri::App<R>) {
     if let Err(e) = insert_settings_menu_item(app, quit_replaced) {
         eprintln!("警告：插入\"设置…\"菜单项失败，⌘, 将不可用：{e}");
     }
+    // File 子菜单「新建窗口」（V3.4 Task 1）：不碰 App 子菜单、不影响 Quit 的末位
+    // 下标，但仍与"设置…"一起收在 QuitReplaced 令牌链之后——见
+    // insert_new_window_menu_item 上方注释。
+    if let Err(e) = insert_new_window_menu_item(app, quit_replaced) {
+        eprintln!("警告：插入\"新建窗口\"菜单项失败，⌘N 将不可用：{e}");
+    }
     // 「主题」菜单是追加到顶层末尾的独立顶层菜单（build_theme_menu 顶部注释），与
     // 上面两步没有顺序依赖——不影响、也不需要并入 QuitReplaced 见证令牌链，因此
     // 放在这两步之后只是顺序上更自然，对调也不会破坏任何不变式。
@@ -877,6 +1289,8 @@ pub fn run() {
                     emit_close_requested(app_handle);
                 } else if event.id().as_ref() == SETTINGS_MENU_ITEM_ID {
                     emit_open_settings(app_handle);
+                } else if event.id().as_ref() == NEW_WINDOW_MENU_ITEM_ID {
+                    handle_new_window_menu_event(app_handle);
                 } else if event.id().as_ref() == THEME_MODE_DEFAULT_ID {
                     emit_theme_mode(app_handle, "default");
                 } else if event.id().as_ref() == THEME_MODE_DUAL_ID {
@@ -906,7 +1320,8 @@ pub fn run() {
             confirm_exit,
             set_theme_mode_checked,
             create_term_window,
-            destroy_term_window
+            destroy_term_window,
+            window_at_point
         ])
         .setup(|app| {
             // 状态引擎（P2b）：起文件监听 + 后台刷新线程，注册管理状态。返回的句柄
@@ -1370,6 +1785,120 @@ mod tests {
         );
     }
 
+    // ── window_at_point 命中测试（V3.4 Task 2）───────────────────────────────
+    //
+    // 两个纯函数各自独立覆盖：physical_rect_to_logical（DPR 换算）与
+    // hit_test_windows（包含判定）。window_at_point 本身是 async fn、需要真实
+    // AppHandle/WebviewWindow 才能测，未覆盖单测——与 create_term_window 同一模式
+    // （见 term_window_label_has_expected_shape 上方注释）。
+    //
+    // 下面所有矩形都是**内容区**（webview）的逻辑矩形，不是外框：命令体传给
+    // physical_rect_to_logical 的是 inner_position()/inner_size()，于是 local_x/local_y
+    // 的原点就是内容区左上角（V3.4 修复轮 R1，理由见 LogicalRect 上方那段——前端的
+    // 「标签栏落区」常量必须相对标签栏本身定义，不能把标题栏高度混进来）。这一点在
+    // 这两个纯函数里没有任何可断言的痕迹（它们只认传进来的矩形），所以只能写在这里。
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> LogicalRect {
+        LogicalRect { x, y, width, height }
+    }
+
+    #[test]
+    fn physical_rect_to_logical_divides_not_multiplies_with_dpr_two() {
+        // 四个字段互不相同的物理坐标，scale=2.0，逐字段断言——如果实现从
+        // "physical / scale" 误改成 "physical * scale"（方向写反），x/y/width/
+        // height 四个断言会同时从 100/50/200/150 变成 400/200/800/600，全部转红；
+        // 在 scale=1.0 时这个变异测不出来（乘除同值），所以必须用 scale != 1.0。
+        let out = physical_rect_to_logical(200.0, 100.0, 400.0, 300.0, 2.0);
+        assert_eq!(out.x, 100.0, "x 换算方向错误：应是物理值除以 scale");
+        assert_eq!(out.y, 50.0, "y 换算方向错误：应是物理值除以 scale");
+        assert_eq!(out.width, 200.0, "width 换算方向错误：应是物理值除以 scale");
+        assert_eq!(out.height, 150.0, "height 换算方向错误：应是物理值除以 scale");
+    }
+
+    #[test]
+    fn physical_rect_to_logical_is_identity_at_scale_one() {
+        // scale=1.0 时物理即逻辑，顺带确认换算没有混入额外的偏移/常数项。
+        let out = physical_rect_to_logical(30.0, 40.0, 500.0, 600.0, 1.0);
+        assert_eq!(out, rect(30.0, 40.0, 500.0, 600.0));
+    }
+
+    #[test]
+    fn hit_test_finds_point_inside_rect() {
+        let windows = vec![("term-1".to_string(), rect(10.0, 20.0, 100.0, 50.0))];
+        let hit =
+            hit_test_windows((60.0, 45.0), &windows, "term-source").expect("点在矩形内应命中");
+        assert_eq!(hit.label, "term-1");
+        assert_eq!(hit.local_x, 50.0, "本地坐标应是点减去矩形左上角的 x");
+        assert_eq!(hit.local_y, 25.0, "本地坐标应是点减去矩形左上角的 y");
+    }
+
+    #[test]
+    fn hit_test_misses_point_outside_rect() {
+        let windows = vec![("term-1".to_string(), rect(10.0, 20.0, 100.0, 50.0))];
+        assert_eq!(hit_test_windows((500.0, 500.0), &windows, "term-source"), None);
+    }
+
+    #[test]
+    fn hit_test_left_and_top_edges_are_inclusive() {
+        let windows = vec![("term-1".to_string(), rect(10.0, 20.0, 100.0, 50.0))];
+        // 左边界 x == rect.x：应命中，本地 x 为 0。
+        let left = hit_test_windows((10.0, 45.0), &windows, "term-source").expect("左边界应命中");
+        assert_eq!(left.local_x, 0.0);
+        // 上边界 y == rect.y：应命中，本地 y 为 0。
+        let top = hit_test_windows((60.0, 20.0), &windows, "term-source").expect("上边界应命中");
+        assert_eq!(top.local_y, 0.0);
+    }
+
+    #[test]
+    fn hit_test_right_and_bottom_edges_are_exclusive() {
+        let windows = vec![("term-1".to_string(), rect(10.0, 20.0, 100.0, 50.0))];
+        // 右边界 x == rect.x + rect.width（110.0）：不应命中，这条线属于矩形外面。
+        assert_eq!(
+            hit_test_windows((110.0, 45.0), &windows, "term-source"),
+            None,
+            "右边界（x == rect.x + rect.width）不应命中"
+        );
+        // 下边界 y == rect.y + rect.height（70.0）：同理不应命中。
+        assert_eq!(
+            hit_test_windows((60.0, 70.0), &windows, "term-source"),
+            None,
+            "下边界（y == rect.y + rect.height）不应命中"
+        );
+    }
+
+    #[test]
+    fn hit_test_excludes_the_source_window() {
+        // 源窗口自身的矩形必然包含指针当前位置（它正持有 capture）——不传 exclude
+        // 会永远命中它自己，这条测试钉住 Ruling 1。
+        let windows = vec![("term-1".to_string(), rect(0.0, 0.0, 100.0, 100.0))];
+        assert_eq!(
+            hit_test_windows((50.0, 50.0), &windows, "term-1"),
+            None,
+            "exclude 命中的窗口必须被跳过，即使点确实落在它的矩形内"
+        );
+    }
+
+    #[test]
+    fn hit_test_returns_first_match_when_windows_overlap() {
+        // term-1、term-2 的矩形在 (50,50) 处重叠——tao 不暴露 z-order，取遍历顺序
+        // 里第一个命中的（见 hit_test_windows 顶部注释的已知局限）。term-2 排在
+        // 列表更靠前，断言返回 term-2 而不是 term-1，确认是"顺序"而非某种固定
+        // 优先级/字典序决定结果。
+        let windows = vec![
+            ("term-2".to_string(), rect(0.0, 0.0, 100.0, 100.0)),
+            ("term-1".to_string(), rect(0.0, 0.0, 100.0, 100.0)),
+        ];
+        let hit =
+            hit_test_windows((50.0, 50.0), &windows, "term-source").expect("重叠区域应命中其一");
+        assert_eq!(hit.label, "term-2", "重叠时应取遍历顺序里第一个命中的窗口");
+    }
+
+    #[test]
+    fn hit_test_returns_none_when_no_windows_given() {
+        let windows: Vec<(String, LogicalRect)> = Vec::new();
+        assert_eq!(hit_test_windows((0.0, 0.0), &windows, "term-source"), None);
+    }
+
     // ── 菜单事件的定向投递（V3.3 §5.4）─────────────────────────────────────
     //
     // 下面所有用到窗口 label 的地方一律用 "term-9"，**刻意不用 "main"**：这是
@@ -1451,5 +1980,109 @@ mod tests {
             let payload = theme_mode_payload(&MenuDelivery::ToWindow("term-9".to_string()), mode);
             assert_eq!(payload.mode, mode);
         }
+    }
+
+    // ── File 菜单「新建窗口」（V3.4 Task 1）───────────────────────────────────
+    //
+    // new_window_insertion_index 本身就是 insert_new_window_menu_item 实际调用的那个
+    // 函数（见它上方的注释），不是重新抄一遍逻辑的影子实现——下面几条测试断的是生产
+    // 代码真正会跑的分支，与 settings_insertion_index 同一惯例。
+
+    #[test]
+    fn empty_file_submenu_has_no_insertion_point() {
+        // 会因为什么失败：如果实现把 0 项也当成"有 Close Window 在"处理（例如把判断
+        // 写成 `item_count < 1` 之外的什么条件、或者干脆删掉这条判断），这里就会失败。
+        assert_eq!(new_window_insertion_index(0), None);
+    }
+
+    #[test]
+    fn new_window_inserts_at_index_zero_when_close_window_present() {
+        // 会因为什么失败：如果插入下标从 0 改成了别的数（例如误改成 1，插到 Close
+        // Window 之后而不是之前——这正是"必须做的变异"之一）。File 子菜单默认只有
+        // Close Window 一项（见 new_window_insertion_index 上方注释核实过的
+        // tauri 2.11.5 `Menu::default` File 子菜单构成）。
+        assert_eq!(new_window_insertion_index(1), Some(0));
+    }
+
+    #[test]
+    fn new_window_insertion_index_always_precedes_existing_items() {
+        // 会因为什么失败：如果插入下标算成了 >= item_count（插到了原有项后面甚至
+        // 末尾），这几个不同项数下至少有一个会失败。从 1 项开始（见
+        // empty_file_submenu_has_no_insertion_point：0 项没有插入点）。
+        for item_count in [1usize, 2, 5, 50] {
+            let insert_at = new_window_insertion_index(item_count)
+                .unwrap_or_else(|| panic!("item_count={item_count} 时不应返回 None"));
+            assert!(
+                insert_at < item_count,
+                "插入点（{insert_at}）必须严格早于原有项，否则会把 Close Window 挤到\
+                 「新建窗口」前面或中间"
+            );
+        }
+    }
+
+    /// 用一个 `Vec<&str>` 模拟真实的 File 子菜单，验证 `new_window_insertion_index`
+    /// 与真实插入语义组合之后，Close Window 仍稳居子菜单最后一位；同时用另一个独立
+    /// 的 `Vec` 模拟 App 子菜单（末位是 `QUIT_MENU_ITEM_ID`），确认 File 子菜单的插入
+    /// 不会波及它——防的是"按下标找错子菜单/两个子菜单共享同一份数据"这一类实现
+    /// 错误。`Submenu::insert_items` 的插入语义已在 `settings_item_lands_before_
+    /// quit_which_stays_last` 上方核实为标准的 `Vec::insert` 语义，这里同样用连续两次
+    /// `Vec::insert` 模拟。
+    #[test]
+    fn new_window_item_lands_before_close_window_which_stays_last() {
+        let app_submenu_ids = vec![
+            "about",
+            "sep",
+            "services",
+            "sep",
+            "hide",
+            "hide-others",
+            "sep",
+            QUIT_MENU_ITEM_ID,
+        ];
+        let mut file_submenu = vec!["Close Window"];
+
+        let insert_at =
+            new_window_insertion_index(file_submenu.len()).expect("非空子菜单应有插入位置");
+        file_submenu.insert(insert_at, "新建窗口");
+        file_submenu.insert(insert_at + 1, "sep(new)");
+
+        assert_eq!(
+            file_submenu,
+            vec!["新建窗口", "sep(new)", "Close Window"],
+            "「新建窗口」应插在 Close Window 之前，并以分隔线相隔"
+        );
+        assert_eq!(
+            file_submenu.last(),
+            Some(&"Close Window"),
+            "插入「新建窗口」之后，File 子菜单最后一项仍应是 Close Window"
+        );
+        assert_eq!(
+            app_submenu_ids.last(),
+            Some(&QUIT_MENU_ITEM_ID),
+            "File 子菜单的改动不应波及 App 子菜单，Quit 仍应是它的最后一项"
+        );
+    }
+
+    // new_window_cascade_position：新窗口级联位置的纯算术部分（有/没有参考原点时该
+    // 怎么算）。解出参考原点本身（聚焦窗口 -> 主窗口两级优先级）需要真实
+    // AppHandle/WebviewWindow，未覆盖单测——与 create_term_window 本身、
+    // apply_theme_mode_checked 同一取舍（见 theme_mode_checked_states_overwrites_
+    // stale_state 上方注释），覆盖缺口留给真机验收。
+
+    #[test]
+    fn cascade_position_offsets_by_thirty_logical_pixels_from_origin() {
+        // 会因为什么失败：如果偏移量不是 30，或者只加在一个轴上（例如只加 x 不加
+        // y），这里会得到别的坐标。
+        assert_eq!(
+            new_window_cascade_position(Some((10.0, 20.0))),
+            (40.0, 50.0)
+        );
+    }
+
+    #[test]
+    fn cascade_position_falls_back_to_default_when_no_origin() {
+        // 会因为什么失败：如果 None 分支被漏掉（例如误把 None 当 (0.0, 0.0) 处理），
+        // 三级都取不到窗口时新窗口会出现在屏幕左上角原点，而不是这里定义的默认位置。
+        assert_eq!(new_window_cascade_position(None), NEW_WINDOW_DEFAULT_POSITION);
     }
 }
