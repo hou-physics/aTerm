@@ -479,6 +479,175 @@ async fn create_term_window(app: AppHandle, x: f64, y: f64) -> Result<String, St
     Ok(label)
 }
 
+/// 逻辑（CSS）像素下的窗口外接矩形：左上角 `(x, y)` + 宽高。`window_at_point` 由每个
+/// 窗口自己的 `outer_position()`/`outer_size()`（物理像素）与 `scale_factor()` 换算
+/// 得到（见 `physical_rect_to_logical`），命中判定本身（`hit_test_windows`）只认逻辑
+/// 矩形——换算的正确性和包含判定的正确性因此各自独立可测，互不牵连。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LogicalRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// `window_at_point` 命中时的返回值：命中窗口的 label，以及点相对该窗口左上角的本地
+/// 逻辑坐标。字段用 `camelCase` 序列化（`local_x`/`local_y` -> `localX`/`localY`），
+/// 与仓库其它多字段返回结构体同一约定（见 `status/installer.rs` 的
+/// `HookInstallState`/`HooksStatus` 等；`src/ipc.ts` 侧的 `WindowHit` 接口逐字段沿用
+/// 这份 camelCase，见其注释）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowHit {
+    label: String,
+    local_x: f64,
+    local_y: f64,
+}
+
+/// 纯函数：把一个窗口的物理像素外接矩形（`outer_position()`/`outer_size()` 的原始
+/// 返回值，调用方各自转成 `f64` 后传入）按它自己的 `scale_factor()` 换算成逻辑
+/// （CSS）像素矩形。
+///
+/// 换算方向是**物理 ÷ scale = 逻辑**，不是反过来——方向写反时在非 Retina 屏
+/// （`scale_factor() == 1.0`）上除和乘结果相同，完全测不出来，必须用 `scale != 1.0`
+/// 的输入才能验证方向对不对（下方 `physical_rect_to_logical_divides_not_multiplies_
+/// with_dpr_two` 单测用 scale=2.0 构造）。方向依据：`src/store/layout.ts` 的
+/// `runPanelResize`（约 190 行）踩过反方向的坑——那里是**逻辑 → 物理**，要把 CSS
+/// 像素的 `panelWidth` 乘上 `devicePixelRatio` 才能传给期望物理像素的
+/// `PhysicalPosition`（该文件注释："这一步换算漏了的话，Retina 上面板只会长出该有
+/// 宽度的一半，非 Retina 屏上又恰好正确"）；这里做的是反方向的换算（物理 → 逻辑），
+/// 所以是除不是乘。也与 `create_term_window`/`window_logical_origin` 已核实过的
+/// tauri `dpi` 换算惯例一致（已对照本机 `dpi 0.1.2` 源码核实：
+/// `PhysicalPosition::to_logical`/`PhysicalSize::to_logical` 内部同样是
+/// `self.x.into() / scale_factor`）——这里没有直接调用 `to_logical`，而是手写除法，
+/// 为的是让这段算术本身可以被单测覆盖、被变异验证（`to_logical` 是库代码，改乘改除
+/// 不会出现在这个仓库的 diff 里）。
+fn physical_rect_to_logical(
+    physical_x: f64,
+    physical_y: f64,
+    physical_width: f64,
+    physical_height: f64,
+    scale_factor: f64,
+) -> LogicalRect {
+    LogicalRect {
+        x: physical_x / scale_factor,
+        y: physical_y / scale_factor,
+        width: physical_width / scale_factor,
+        height: physical_height / scale_factor,
+    }
+}
+
+/// 纯函数：给定一个逻辑屏幕坐标点与一组窗口 `(label, 逻辑矩形)`，找出第一个包含该
+/// 点、且 label != exclude 的窗口，返回其 label 与点在其内的本地逻辑坐标（点减去
+/// 矩形左上角）。一个都不命中（含全部被 exclude 排除）返回 `None`。
+///
+/// **包含判定边界**：左/上闭区间，右/下开区间——`x` 落在
+/// `[rect.x, rect.x + rect.width)`、`y` 落在 `[rect.y, rect.y + rect.height)` 才算
+/// 命中，与 DOM `getBoundingClientRect()` 系列 API 的惯例一致：矩形右/下边界那一条
+/// 线本身不属于这个矩形（属于相邻下一个像素的起点）。四条边界分别单测：左边界与上
+/// 边界命中，右边界（`rect.x + rect.width`）与下边界（`rect.y + rect.height`）不
+/// 命中。
+///
+/// **`exclude`**（V3.4 设计 Ruling 1）：源窗口在整个拖拽手势期间持有指针 capture
+/// （`setPointerCapture`），通常也是当前聚焦窗口——它的屏幕矩形必然包含指针当前
+/// 位置，调用方（`window_at_point`）不传自身 label 作为 `exclude` 的话，这里遍历到
+/// 它时会提前命中并返回它自己，交接手势永远找不到目标窗口。
+///
+/// **重叠命中**：`windows` 里排在前面的优先——调用方 `window_at_point` 直接把
+/// `app.webview_windows()`（`HashMap`，不保证顺序、更不反映屏幕 z-order）转成的
+/// `Vec` 传进来，因此"排在前面"不代表"显示在最上层"，这是本命令的已知局限，记入真机
+/// 验收（tao/tauri 都没有暴露查询窗口 z-order 的 API），不是这个函数能修的。
+///
+/// 不接触任何 Tauri/窗口对象，因此可以像 `settings_insertion_index` 一样直接单测，
+/// 不需要构造真实 `AppHandle`/`WebviewWindow`。
+fn hit_test_windows(
+    point: (f64, f64),
+    windows: &[(String, LogicalRect)],
+    exclude: &str,
+) -> Option<WindowHit> {
+    let (px, py) = point;
+    windows.iter().find_map(|(label, rect)| {
+        if label == exclude {
+            return None;
+        }
+        let within_x = px >= rect.x && px < rect.x + rect.width;
+        let within_y = py >= rect.y && py < rect.y + rect.height;
+        if !(within_x && within_y) {
+            return None;
+        }
+        Some(WindowHit {
+            label: label.clone(),
+            local_x: px - rect.x,
+            local_y: py - rect.y,
+        })
+    })
+}
+
+/// 命中测试命令：给定一个逻辑屏幕坐标点，找出（排除 `exclude`）第一个包含它的窗口，
+/// 返回其 label 与点在其内的本地逻辑坐标；一个都不命中则 `Ok(None)`。V3.4 拖标签到
+/// 其它窗口标签栏的落点判定入口，Task 3 消费这个命令。
+///
+/// ## 坐标契约：与 `create_term_window` 完全一致——`x`/`y` 是逻辑（CSS）像素
+///
+/// 调用方不做 `devicePixelRatio` 换算，直接传 `PointerEvent.screenX`/`screenY`
+/// （依据见 `create_term_window` 顶部注释：已对照 tauri 2.11.5
+/// `WebviewWindowBuilder::position`/`inner_size` 文档字符串——"in logical
+/// pixels"——核实的同一份考据，这里不重复贴一遍）。
+///
+/// ## `exclude` 必传（V3.4 设计 Ruling 1）
+///
+/// 见 `hit_test_windows` 顶部注释——源窗口自己的矩形必然包含指针当前位置，不排除它
+/// 就永远只会命中它自己，调用方（Task 3 的拖拽手势）必须传自身 label。
+///
+/// ## 每个窗口用它自己的 `scale_factor()` 换算
+///
+/// 多显示器环境下不同窗口可能挂在不同缩放比例的屏幕上，`outer_position`/
+/// `outer_size` 各自返回该窗口所在屏幕的物理像素，不能用某一个全局/固定的 scale
+/// factor 统一换算，必须逐窗口各取各的（与 `window_logical_origin` 同一手法，见其
+/// 上方注释）。
+///
+/// ## 失败即降级
+///
+/// 遍历中任一窗口的 `outer_position()`/`outer_size()`/`scale_factor()` 读取失败，
+/// 只跳过这一个窗口，不让整个命令返回 `Err`——可能只是窗口在被查询的同时刚好正在
+/// 关闭这类竞态，不是调用方能规避的错误；命令在没有任何窗口可读、或没有任何窗口命中
+/// 时仍返回 `Ok(None)`，不是 `Err`。
+///
+/// ## 多窗口重叠、未覆盖单测
+///
+/// 重叠时的已知局限见 `hit_test_windows` 顶部注释。这个 `async fn` 本身需要构造
+/// 真实 `AppHandle`/`WebviewWindow` 才能测，未覆盖单测——与 `create_term_window` 本身
+/// 同一模式（见文件末尾 `#[cfg(test)]` 模块 `new_term_window_label` 单测上方那条
+/// 注释）；真正做判定的两个纯函数（`physical_rect_to_logical`/`hit_test_windows`）
+/// 各自独立覆盖单测。
+#[tauri::command]
+async fn window_at_point(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    exclude: String,
+) -> Result<Option<WindowHit>, String> {
+    let windows: Vec<(String, LogicalRect)> = app
+        .webview_windows()
+        .into_iter()
+        .filter_map(|(label, window)| {
+            let pos = window.outer_position().ok()?;
+            let size = window.outer_size().ok()?;
+            let scale = window.scale_factor().ok()?;
+            let rect = physical_rect_to_logical(
+                pos.x as f64,
+                pos.y as f64,
+                size.width as f64,
+                size.height as f64,
+                scale,
+            );
+            Some((label, rect))
+        })
+        .collect();
+
+    Ok(hit_test_windows((x, y), &windows, &exclude))
+}
+
 /// macOS 专属：把 Tauri 自动生成的默认菜单里那个"Quit"项换成一个自定义菜单项。
 ///
 /// 背景（已通过阅读本机 `tao 0.35.3`/`muda 0.19.3`/`tauri 2.11.5` 源码 + 核对
@@ -1108,7 +1277,8 @@ pub fn run() {
             confirm_exit,
             set_theme_mode_checked,
             create_term_window,
-            destroy_term_window
+            destroy_term_window,
+            window_at_point
         ])
         .setup(|app| {
             // 状态引擎（P2b）：起文件监听 + 后台刷新线程，注册管理状态。返回的句柄
@@ -1570,6 +1740,114 @@ mod tests {
             "除了 label/x/y，其余字段（含 min_width/min_height/resizable/decorations）\
              必须原样继承自主窗口配置"
         );
+    }
+
+    // ── window_at_point 命中测试（V3.4 Task 2）───────────────────────────────
+    //
+    // 两个纯函数各自独立覆盖：physical_rect_to_logical（DPR 换算）与
+    // hit_test_windows（包含判定）。window_at_point 本身是 async fn、需要真实
+    // AppHandle/WebviewWindow 才能测，未覆盖单测——与 create_term_window 同一模式
+    // （见 term_window_label_has_expected_shape 上方注释）。
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> LogicalRect {
+        LogicalRect { x, y, width, height }
+    }
+
+    #[test]
+    fn physical_rect_to_logical_divides_not_multiplies_with_dpr_two() {
+        // 四个字段互不相同的物理坐标，scale=2.0，逐字段断言——如果实现从
+        // "physical / scale" 误改成 "physical * scale"（方向写反），x/y/width/
+        // height 四个断言会同时从 100/50/200/150 变成 400/200/800/600，全部转红；
+        // 在 scale=1.0 时这个变异测不出来（乘除同值），所以必须用 scale != 1.0。
+        let out = physical_rect_to_logical(200.0, 100.0, 400.0, 300.0, 2.0);
+        assert_eq!(out.x, 100.0, "x 换算方向错误：应是物理值除以 scale");
+        assert_eq!(out.y, 50.0, "y 换算方向错误：应是物理值除以 scale");
+        assert_eq!(out.width, 200.0, "width 换算方向错误：应是物理值除以 scale");
+        assert_eq!(out.height, 150.0, "height 换算方向错误：应是物理值除以 scale");
+    }
+
+    #[test]
+    fn physical_rect_to_logical_is_identity_at_scale_one() {
+        // scale=1.0 时物理即逻辑，顺带确认换算没有混入额外的偏移/常数项。
+        let out = physical_rect_to_logical(30.0, 40.0, 500.0, 600.0, 1.0);
+        assert_eq!(out, rect(30.0, 40.0, 500.0, 600.0));
+    }
+
+    #[test]
+    fn hit_test_finds_point_inside_rect() {
+        let windows = vec![("term-1".to_string(), rect(10.0, 20.0, 100.0, 50.0))];
+        let hit =
+            hit_test_windows((60.0, 45.0), &windows, "term-source").expect("点在矩形内应命中");
+        assert_eq!(hit.label, "term-1");
+        assert_eq!(hit.local_x, 50.0, "本地坐标应是点减去矩形左上角的 x");
+        assert_eq!(hit.local_y, 25.0, "本地坐标应是点减去矩形左上角的 y");
+    }
+
+    #[test]
+    fn hit_test_misses_point_outside_rect() {
+        let windows = vec![("term-1".to_string(), rect(10.0, 20.0, 100.0, 50.0))];
+        assert_eq!(hit_test_windows((500.0, 500.0), &windows, "term-source"), None);
+    }
+
+    #[test]
+    fn hit_test_left_and_top_edges_are_inclusive() {
+        let windows = vec![("term-1".to_string(), rect(10.0, 20.0, 100.0, 50.0))];
+        // 左边界 x == rect.x：应命中，本地 x 为 0。
+        let left = hit_test_windows((10.0, 45.0), &windows, "term-source").expect("左边界应命中");
+        assert_eq!(left.local_x, 0.0);
+        // 上边界 y == rect.y：应命中，本地 y 为 0。
+        let top = hit_test_windows((60.0, 20.0), &windows, "term-source").expect("上边界应命中");
+        assert_eq!(top.local_y, 0.0);
+    }
+
+    #[test]
+    fn hit_test_right_and_bottom_edges_are_exclusive() {
+        let windows = vec![("term-1".to_string(), rect(10.0, 20.0, 100.0, 50.0))];
+        // 右边界 x == rect.x + rect.width（110.0）：不应命中，这条线属于矩形外面。
+        assert_eq!(
+            hit_test_windows((110.0, 45.0), &windows, "term-source"),
+            None,
+            "右边界（x == rect.x + rect.width）不应命中"
+        );
+        // 下边界 y == rect.y + rect.height（70.0）：同理不应命中。
+        assert_eq!(
+            hit_test_windows((60.0, 70.0), &windows, "term-source"),
+            None,
+            "下边界（y == rect.y + rect.height）不应命中"
+        );
+    }
+
+    #[test]
+    fn hit_test_excludes_the_source_window() {
+        // 源窗口自身的矩形必然包含指针当前位置（它正持有 capture）——不传 exclude
+        // 会永远命中它自己，这条测试钉住 Ruling 1。
+        let windows = vec![("term-1".to_string(), rect(0.0, 0.0, 100.0, 100.0))];
+        assert_eq!(
+            hit_test_windows((50.0, 50.0), &windows, "term-1"),
+            None,
+            "exclude 命中的窗口必须被跳过，即使点确实落在它的矩形内"
+        );
+    }
+
+    #[test]
+    fn hit_test_returns_first_match_when_windows_overlap() {
+        // term-1、term-2 的矩形在 (50,50) 处重叠——tao 不暴露 z-order，取遍历顺序
+        // 里第一个命中的（见 hit_test_windows 顶部注释的已知局限）。term-2 排在
+        // 列表更靠前，断言返回 term-2 而不是 term-1，确认是"顺序"而非某种固定
+        // 优先级/字典序决定结果。
+        let windows = vec![
+            ("term-2".to_string(), rect(0.0, 0.0, 100.0, 100.0)),
+            ("term-1".to_string(), rect(0.0, 0.0, 100.0, 100.0)),
+        ];
+        let hit =
+            hit_test_windows((50.0, 50.0), &windows, "term-source").expect("重叠区域应命中其一");
+        assert_eq!(hit.label, "term-2", "重叠时应取遍历顺序里第一个命中的窗口");
+    }
+
+    #[test]
+    fn hit_test_returns_none_when_no_windows_given() {
+        let windows: Vec<(String, LogicalRect)> = Vec::new();
+        assert_eq!(hit_test_windows((0.0, 0.0), &windows, "term-source"), None);
     }
 
     // ── 菜单事件的定向投递（V3.3 §5.4）─────────────────────────────────────

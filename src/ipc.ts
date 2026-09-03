@@ -38,6 +38,11 @@ export interface HooksStatus { notification: HookInstallState; stop: HookInstall
 export interface InstallOutcome { backupPath: string }
 export interface UninstallOutcome { backupPath: string; removed: boolean }
 
+// window_at_point（V3.4 Task 2）：拖标签到别的窗口标签栏时的落点命中测试。返回形状与
+// src-tauri/src/lib.rs 的 WindowHit 逐字段对应（同一份 serde rename_all = "camelCase"
+// 约定，见该 struct 注释：local_x/local_y -> localX/localY）。
+export interface WindowHit { label: string; localX: number; localY: number }
+
 export const listProjects = () => invoke<ProjectInfo[]>('list_projects')
 export const readConversation = (dirName: string, rootKey: string) =>
   invoke<Conversation>('read_conversation', { dirName, rootKey })
@@ -105,3 +110,17 @@ export const countSubagents = (dirName: string, sessionId: string) =>
 /** 在访达中打开一个文件夹。后端只接受已存在的目录，失败时 reject 的是可直接展示给
  *  用户的中文错误字符串（与 installHooks 等命令同一约定）。 */
 export const revealInFinder = (path: string) => invoke<void>('reveal_in_finder', { path })
+
+/** 命中测试：给定一个逻辑屏幕坐标点，找出（排除 `exclude` 指定的窗口）第一个包含它
+ *  的窗口，连同点在该窗口内的本地逻辑坐标；一个都不命中则 `null`。V3.4 拖标签到别的
+ *  窗口标签栏的落点判定，Task 3 消费它。
+ *
+ *  坐标契约与 `create_term_window`（`windowHandoff.ts` 的调用点）同一份：x/y 是逻辑
+ *  （CSS）像素，直接传 `PointerEvent.screenX`/`screenY`，不做 devicePixelRatio 换算
+ *  （见 src-tauri/src/lib.rs 里 window_at_point 顶部注释的坐标契约）。
+ *
+ *  `exclude` 必传（V3.4 设计 Ruling 1）：源窗口在整个拖拽手势期间持有指针 capture、
+ *  通常也是聚焦窗口，不排除它会永远命中它自己——调用方应传自身 label（见
+ *  `windowLabel.ts`）。 */
+export const windowAtPoint = (x: number, y: number, exclude: string) =>
+  invoke<WindowHit | null>('window_at_point', { x, y, exclude })
