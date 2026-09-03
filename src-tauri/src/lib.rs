@@ -541,7 +541,15 @@ fn try_replace_quit_menu_item<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::
 /// `setup_macos_menu` 一个函数，靠"顺序写死、注释紧邻"降低被无意间写错的概率，但
 /// 评审实测过函数体内部仍能被悄悄调换、`cargo build`/`cargo test` 拦不住），现在
 /// 顺序写错会直接编译不过——R2 修复，实测的编译错误逐字输出见任务报告「修复轮 R2」。
+///
+/// V3.4 起 `derive(Clone, Copy)`：`insert_new_window_menu_item`（File 子菜单「新建
+/// 窗口」）加入后，同一个令牌需要交给两个插入函数各收一份——`Copy` 只是让
+/// `setup_macos_menu` 里那一个 `quit_replaced` 变量可以被传两次，不改变"只有
+/// `replace_quit_menu_item` 能构造它"这条约束（字段仍然私有），也不减弱顺序不变式
+/// 本身：把两行调用对调仍然是"变量在声明前使用"，`cargo build` 照样报 E0425，与
+/// `Copy` 与否无关。
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
 struct QuitReplaced(());
 
 /// macOS 专属：`setup_macos_menu` 用来替换 Quit 项的入口，`QuitReplaced` 见证令牌的
@@ -633,6 +641,192 @@ fn insert_settings_menu_item<R: tauri::Runtime>(
         MenuItem::with_id(app, SETTINGS_MENU_ITEM_ID, "设置…", true, Some("Command+,"))?;
     app_submenu.insert_items(&[&separator, &settings_item], insert_at)?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+const NEW_WINDOW_MENU_ITEM_ID: &str = "aterm-new-window";
+
+/// 纯函数：给定插入前 File 子菜单的项数，算出「新建窗口」+ 分隔线该插入的下标。
+///
+/// 与 `settings_insertion_index` 同一做法（见其上方注释）：把可测的下标算术从会
+/// 触碰 muda/AppKit 对象的副作用函数（`insert_new_window_menu_item`）里摘出来，
+/// 后者直接调用这一份，测试和生产代码用的是同一个函数，不会出现两边各写一份、
+/// 彼此漂移的问题。
+///
+/// 固定插到下标 0：File 子菜单默认只有 Close Window 一项（已对照本机 tauri 2.11.5
+/// `src/menu/menu.rs` 里 `Menu::default` 的 File 子菜单构成核实——它的 cfg 是
+/// `not(any(linux, dragonfly, freebsd, netbsd, openbsd))`，macOS 不在排除名单内；
+/// 内容只有 `PredefinedMenuItem::close_window`，`quit` 那一项只在非 macOS 分支才会
+/// 出现在 File 子菜单里）。「新建窗口」要出现在 Close Window 之前，插入
+/// `[新建窗口, 分隔线]` 两项后，原来的 Close Window 自然被推到分隔线之后——不需要
+/// 先算出 Close Window 当前下标，永远插在最前面就是"它之前"。
+///
+/// 返回 `None`：`item_count` 为 0 时——插入的意图是"新项要出现在已有项之前"，空
+/// 子菜单没有可以"之前"的锚点项，插入没有意义。生产代码走到这个分支意味着 File
+/// 子菜单形状异常于预期（当前固定 1 项），与 `settings_insertion_index` 对
+/// `item_count < 2` 的处理同一动机。
+#[cfg(target_os = "macos")]
+fn new_window_insertion_index(item_count: usize) -> Option<usize> {
+    if item_count == 0 {
+        return None;
+    }
+    Some(0)
+}
+
+/// macOS 专属：在 File 子菜单里插入「新建窗口」项（⌘N），位置在 Close Window 之前、
+/// 以分隔线相隔。
+///
+/// **按标题查找 File 子菜单，不按下标**：与 `try_replace_quit_menu_item`/
+/// `insert_settings_menu_item` 用 `top_items.first()` 拿 App 子菜单不同——App 子菜单
+/// 在 tauri 默认菜单里恒是第一个顶层项，但 File 子菜单不是（顺序是 App / File / Edit /
+/// View / Window / Help），且 `Submenu::with_items` 构造它时没有传显式 id（对照
+/// `Menu::default` 源码核实：与 `THEME_SUBMENU_ID`/tauri 自己给 Window/Help 子菜单
+/// 显式指定 id 不同，File 子菜单只传了标题字符串），因此这里学 `apply_theme_mode_
+/// checked` 找"主题"子菜单那样，用 `top_items.iter().find_map` 按 `.text()` 精确匹配
+/// `"File"`，不硬编码下标——下标假设一旦被将来的 tauri 升级打破（顶层子菜单顺序
+/// 变化），按下标找会静默命中错误的子菜单（可能在 Edit/View 里插错两个不相关的菜单
+/// 项）；按标题找则会走进下面的"找不到"分支，只是功能不可用，不会插错地方。
+///
+/// 必须在 `replace_quit_menu_item` 之后调用（`_order: QuitReplaced` 同
+/// `insert_settings_menu_item` 的用法，见其上方注释）——File 子菜单的改动本身不触及
+/// App 子菜单、不影响 Quit 的末位下标，但仍与"设置…"一起走 `setup_macos_menu` 这同一
+/// 个函数，纳入同一条令牌链只是让"哪些插入步骤发生在 Quit 替换之后"这件事在编译期
+/// 有统一的证明方式，不需要为这一步单独判断"是不是真的需要在 Quit 替换之后"。
+/// `QuitReplaced` 因此改成 `Copy`（见其定义处注释）——两个插入函数都要收一份令牌。
+///
+/// 失败即降级：拿不到菜单/顶层菜单项、找不到 File 子菜单、File 子菜单为空，都只打
+/// 警告后继续启动（不 panic），与仓库其它菜单初始化函数一致的纪律。
+#[cfg(target_os = "macos")]
+fn insert_new_window_menu_item<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+    _order: QuitReplaced,
+) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else {
+        return Ok(());
+    };
+    let top_items = menu.items()?;
+    let Some(file_submenu) = top_items.iter().find_map(|item| {
+        let submenu = item.as_submenu()?;
+        match submenu.text() {
+            Ok(text) if text == "File" => Some(submenu),
+            _ => None,
+        }
+    }) else {
+        eprintln!("警告：未找到 \"File\" 子菜单，未插入\"新建窗口\"菜单项，⌘N 不可用");
+        return Ok(());
+    };
+    let items = file_submenu.items()?;
+    let Some(insert_at) = new_window_insertion_index(items.len()) else {
+        eprintln!(
+            "警告：\"File\" 子菜单项数（{}）少于预期，未插入\"新建窗口\"菜单项，⌘N 不可用",
+            items.len()
+        );
+        return Ok(());
+    };
+    let new_window_item = MenuItem::with_id(
+        app,
+        NEW_WINDOW_MENU_ITEM_ID,
+        "新建窗口",
+        true,
+        Some("Command+N"),
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    file_submenu.insert_items(&[&new_window_item, &separator], insert_at)?;
+    Ok(())
+}
+
+/// 拖出/新建窗口级联偏移量（逻辑像素）。与前端标签拖出手势的坐标计算没有耦合关系
+/// （那条路径直接透传 `PointerEvent.screenX/screenY`，见 `create_term_window` 顶部
+/// 坐标契约注释）——这里是纯 Rust 侧「新建窗口」菜单项独立算出的起点，选 30 只是
+/// macOS 常见的窗口级联间距，没有更深的依据。
+#[cfg(target_os = "macos")]
+const NEW_WINDOW_CASCADE_OFFSET: f64 = 30.0;
+
+/// 三级都取不到参考窗口位置时的兜底坐标（逻辑像素）。`setup_macos_menu` 运行时主
+/// 窗口必然已经存在（`run()` 里 `.setup()` 在 `.build()` 之后执行，此时
+/// `tauri.conf.json` 声明的主窗口已创建完毕），因此正常运行时这个分支不会被触达；
+/// 仍显式写出、不裸写在调用点——与 `main_window_config` 的硬编码兜底值同一取舍
+/// （见其上方注释：即便"理论上不会发生"，也要写清楚"发生了怎么办"）。
+#[cfg(target_os = "macos")]
+const NEW_WINDOW_DEFAULT_POSITION: (f64, f64) = (100.0, 100.0);
+
+/// 纯函数：由"参考窗口左上角的逻辑坐标"算出新窗口应出现的位置——有原点就
+/// +30/+30 级联，没有（`None`）就退回 `NEW_WINDOW_DEFAULT_POSITION`。
+///
+/// 上层调用方（`new_window_origin`）负责按"聚焦窗口 -> 主窗口"的优先级把 origin
+/// 解出来（那一步需要真实 `AppHandle`/`WebviewWindow`，见下），这里只管拿到/拿不到
+/// origin 之后该怎么算，因此可以像 `settings_insertion_index` 一样直接单测，不需要
+/// 构造真实窗口。
+#[cfg(target_os = "macos")]
+fn new_window_cascade_position(origin: Option<(f64, f64)>) -> (f64, f64) {
+    match origin {
+        Some((x, y)) => (x + NEW_WINDOW_CASCADE_OFFSET, y + NEW_WINDOW_CASCADE_OFFSET),
+        None => NEW_WINDOW_DEFAULT_POSITION,
+    }
+}
+
+/// 一个窗口左上角的逻辑（CSS）像素坐标，取不到（`outer_position`/`scale_factor`
+/// 任一调用失败）返回 `None`。
+///
+/// `outer_position` 返回的是物理像素（`PhysicalPosition<i32>`），而
+/// `create_term_window` 的坐标契约是逻辑像素（见其上方注释），这里用
+/// `scale_factor` 转换——与 V3.4 设计文档 §2 提到的"Rust 能枚举所有窗口的屏幕矩形：
+/// webview_windows() + outer_position() + outer_size() + scale_factor()"是同一手法，
+/// Task 2 的 `window_at_point` 命中测试会复用同一套换算。
+#[cfg(target_os = "macos")]
+fn window_logical_origin(window: &tauri::WebviewWindow) -> Option<(f64, f64)> {
+    let physical = window.outer_position().ok()?;
+    let scale = window.scale_factor().ok()?;
+    let logical: tauri::LogicalPosition<f64> = physical.to_logical(scale);
+    Some((logical.x, logical.y))
+}
+
+/// 三级优先级解出新窗口的参考原点：聚焦窗口 -> 主窗口 -> 无（由
+/// `new_window_cascade_position` 兜底成默认坐标）。
+///
+/// 取聚焦窗口 label 复用 `focused_window_label`——同一份"绕开 `get_focused_window`
+/// 被 `unstable` feature gate"考据（见其上方注释），不再重新验证一遍。`get_webview_
+/// window`/`webview_windows` 都不受 `unstable` 门禁（已对照本机 tauri 2.11.5
+/// `src/lib.rs` 核实：标了 `#[cfg(feature = "unstable")]` 的只有 `get_window`/
+/// `get_focused_window`/`windows`/`get_webview`/`webviews` 五个方法，`get_webview_
+/// window`/`webview_windows` 没有）。
+#[cfg(target_os = "macos")]
+fn new_window_origin(app_handle: &AppHandle) -> Option<(f64, f64)> {
+    if let Some(label) = focused_window_label(app_handle) {
+        if let Some(origin) = app_handle
+            .get_webview_window(&label)
+            .as_ref()
+            .and_then(window_logical_origin)
+        {
+            return Some(origin);
+        }
+    }
+    app_handle
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .as_ref()
+        .and_then(window_logical_origin)
+}
+
+/// macOS 专属：`on_menu_event` 命中「新建窗口」时的完整处理——解出级联位置后调用
+/// `create_term_window` 建窗。
+///
+/// `create_term_window` 是 `async fn`（`#[tauri::command]` 只是给它加了 IPC 绑定，
+/// 函数本身仍是可以直接调用的普通 Rust 函数——tauri 官方文档明确支持"从 Rust 代码里
+/// 直接调用 command"这种用法），但 `on_menu_event` 的处理器是同步闭包，因此用
+/// `tauri::async_runtime::spawn` 把这次调用丢进 tauri 自己的异步运行时，不阻塞事件
+/// 循环。
+///
+/// 失败即降级：`create_term_window` 出错只 `eprintln!`，不 panic、不重试——这次点击
+/// 失败不该影响应用的其它部分，与仓库其它命令调用点一致的纪律。
+#[cfg(target_os = "macos")]
+fn handle_new_window_menu_event(app_handle: &AppHandle) {
+    let (x, y) = new_window_cascade_position(new_window_origin(app_handle));
+    let app = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = create_term_window(app, x, y).await {
+            eprintln!("警告：菜单栏\"新建窗口\"创建窗口失败：{e}");
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -830,6 +1024,12 @@ fn setup_macos_menu<R: tauri::Runtime>(app: &tauri::App<R>) {
     if let Err(e) = insert_settings_menu_item(app, quit_replaced) {
         eprintln!("警告：插入\"设置…\"菜单项失败，⌘, 将不可用：{e}");
     }
+    // File 子菜单「新建窗口」（V3.4 Task 1）：不碰 App 子菜单、不影响 Quit 的末位
+    // 下标，但仍与"设置…"一起收在 QuitReplaced 令牌链之后——见
+    // insert_new_window_menu_item 上方注释。
+    if let Err(e) = insert_new_window_menu_item(app, quit_replaced) {
+        eprintln!("警告：插入\"新建窗口\"菜单项失败，⌘N 将不可用：{e}");
+    }
     // 「主题」菜单是追加到顶层末尾的独立顶层菜单（build_theme_menu 顶部注释），与
     // 上面两步没有顺序依赖——不影响、也不需要并入 QuitReplaced 见证令牌链，因此
     // 放在这两步之后只是顺序上更自然，对调也不会破坏任何不变式。
@@ -877,6 +1077,8 @@ pub fn run() {
                     emit_close_requested(app_handle);
                 } else if event.id().as_ref() == SETTINGS_MENU_ITEM_ID {
                     emit_open_settings(app_handle);
+                } else if event.id().as_ref() == NEW_WINDOW_MENU_ITEM_ID {
+                    handle_new_window_menu_event(app_handle);
                 } else if event.id().as_ref() == THEME_MODE_DEFAULT_ID {
                     emit_theme_mode(app_handle, "default");
                 } else if event.id().as_ref() == THEME_MODE_DUAL_ID {
@@ -1451,5 +1653,109 @@ mod tests {
             let payload = theme_mode_payload(&MenuDelivery::ToWindow("term-9".to_string()), mode);
             assert_eq!(payload.mode, mode);
         }
+    }
+
+    // ── File 菜单「新建窗口」（V3.4 Task 1）───────────────────────────────────
+    //
+    // new_window_insertion_index 本身就是 insert_new_window_menu_item 实际调用的那个
+    // 函数（见它上方的注释），不是重新抄一遍逻辑的影子实现——下面几条测试断的是生产
+    // 代码真正会跑的分支，与 settings_insertion_index 同一惯例。
+
+    #[test]
+    fn empty_file_submenu_has_no_insertion_point() {
+        // 会因为什么失败：如果实现把 0 项也当成"有 Close Window 在"处理（例如把判断
+        // 写成 `item_count < 1` 之外的什么条件、或者干脆删掉这条判断），这里就会失败。
+        assert_eq!(new_window_insertion_index(0), None);
+    }
+
+    #[test]
+    fn new_window_inserts_at_index_zero_when_close_window_present() {
+        // 会因为什么失败：如果插入下标从 0 改成了别的数（例如误改成 1，插到 Close
+        // Window 之后而不是之前——这正是"必须做的变异"之一）。File 子菜单默认只有
+        // Close Window 一项（见 new_window_insertion_index 上方注释核实过的
+        // tauri 2.11.5 `Menu::default` File 子菜单构成）。
+        assert_eq!(new_window_insertion_index(1), Some(0));
+    }
+
+    #[test]
+    fn new_window_insertion_index_always_precedes_existing_items() {
+        // 会因为什么失败：如果插入下标算成了 >= item_count（插到了原有项后面甚至
+        // 末尾），这几个不同项数下至少有一个会失败。从 1 项开始（见
+        // empty_file_submenu_has_no_insertion_point：0 项没有插入点）。
+        for item_count in [1usize, 2, 5, 50] {
+            let insert_at = new_window_insertion_index(item_count)
+                .unwrap_or_else(|| panic!("item_count={item_count} 时不应返回 None"));
+            assert!(
+                insert_at < item_count,
+                "插入点（{insert_at}）必须严格早于原有项，否则会把 Close Window 挤到\
+                 「新建窗口」前面或中间"
+            );
+        }
+    }
+
+    /// 用一个 `Vec<&str>` 模拟真实的 File 子菜单，验证 `new_window_insertion_index`
+    /// 与真实插入语义组合之后，Close Window 仍稳居子菜单最后一位；同时用另一个独立
+    /// 的 `Vec` 模拟 App 子菜单（末位是 `QUIT_MENU_ITEM_ID`），确认 File 子菜单的插入
+    /// 不会波及它——防的是"按下标找错子菜单/两个子菜单共享同一份数据"这一类实现
+    /// 错误。`Submenu::insert_items` 的插入语义已在 `settings_item_lands_before_
+    /// quit_which_stays_last` 上方核实为标准的 `Vec::insert` 语义，这里同样用连续两次
+    /// `Vec::insert` 模拟。
+    #[test]
+    fn new_window_item_lands_before_close_window_which_stays_last() {
+        let app_submenu_ids = vec![
+            "about",
+            "sep",
+            "services",
+            "sep",
+            "hide",
+            "hide-others",
+            "sep",
+            QUIT_MENU_ITEM_ID,
+        ];
+        let mut file_submenu = vec!["Close Window"];
+
+        let insert_at =
+            new_window_insertion_index(file_submenu.len()).expect("非空子菜单应有插入位置");
+        file_submenu.insert(insert_at, "新建窗口");
+        file_submenu.insert(insert_at + 1, "sep(new)");
+
+        assert_eq!(
+            file_submenu,
+            vec!["新建窗口", "sep(new)", "Close Window"],
+            "「新建窗口」应插在 Close Window 之前，并以分隔线相隔"
+        );
+        assert_eq!(
+            file_submenu.last(),
+            Some(&"Close Window"),
+            "插入「新建窗口」之后，File 子菜单最后一项仍应是 Close Window"
+        );
+        assert_eq!(
+            app_submenu_ids.last(),
+            Some(&QUIT_MENU_ITEM_ID),
+            "File 子菜单的改动不应波及 App 子菜单，Quit 仍应是它的最后一项"
+        );
+    }
+
+    // new_window_cascade_position：新窗口级联位置的纯算术部分（有/没有参考原点时该
+    // 怎么算）。解出参考原点本身（聚焦窗口 -> 主窗口两级优先级）需要真实
+    // AppHandle/WebviewWindow，未覆盖单测——与 create_term_window 本身、
+    // apply_theme_mode_checked 同一取舍（见 theme_mode_checked_states_overwrites_
+    // stale_state 上方注释），覆盖缺口留给真机验收。
+
+    #[test]
+    fn cascade_position_offsets_by_thirty_logical_pixels_from_origin() {
+        // 会因为什么失败：如果偏移量不是 30，或者只加在一个轴上（例如只加 x 不加
+        // y），这里会得到别的坐标。
+        assert_eq!(
+            new_window_cascade_position(Some((10.0, 20.0))),
+            (40.0, 50.0)
+        );
+    }
+
+    #[test]
+    fn cascade_position_falls_back_to_default_when_no_origin() {
+        // 会因为什么失败：如果 None 分支被漏掉（例如误把 None 当 (0.0, 0.0) 处理），
+        // 三级都取不到窗口时新窗口会出现在屏幕左上角原点，而不是这里定义的默认位置。
+        assert_eq!(new_window_cascade_position(None), NEW_WINDOW_DEFAULT_POSITION);
     }
 }
