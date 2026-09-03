@@ -623,6 +623,19 @@ fn hit_test_windows(
 /// 见 `LogicalRect` 上方那段：`local_y` 的原点必须是 webview 内容区顶边，前端的
 /// 「标签栏落区」常量才是一个相对标签栏本身定义的、与标题栏高度无关的数。
 ///
+/// ## 只考虑**看得见**的窗口（V3.4 修复轮 R2 / I2）
+///
+/// 最小化的窗口在 macOS 上仍然保留它的 frame，`inner_position()`/`inner_size()` 照常
+/// 返回一个正常矩形——不过滤的话，用户明明看着的是一片空桌面（以为松手会弹出一个新
+/// 窗口），标签却被交给了一个屏幕上根本不存在的窗口，随后无从找回。`is_visible()` 同理
+/// 覆盖"窗口被 hide 掉"这一类。
+///
+/// 读取失败一律**视为可见**（`is_visible` 取 `unwrap_or(true)`、`is_minimized` 取
+/// `unwrap_or(false)`）：这两个 getter 走的是与位置/尺寸同一类的窗口查询，失败通常只是
+/// 竞态。保守方向是"宁可让它参与命中"——漏掉一个其实可见的窗口会让用户明明拖到了目标
+/// 窗口标签栏上却弹出一个新窗口（一次不可见的错投），而多算一个其实不可见的窗口至多回到
+/// 修复前的行为。
+///
 /// ## 失败即降级
 ///
 /// 遍历中任一窗口的 `inner_position()`/`inner_size()`/`scale_factor()` 读取失败，
@@ -648,6 +661,13 @@ async fn window_at_point(
         .webview_windows()
         .into_iter()
         .filter_map(|(label, window)| {
+            // 看不见的窗口不参与命中（I2，理由见上方"只考虑看得见的窗口"一节）。读取
+            // 失败按"可见"处理，与下面几个 `ok()?` 的"读不到就跳过"方向刻意相反：那几个
+            // 读不到就连矩形都算不出来、没有别的选择，而这两个读不到时矩形是好的，把它
+            // 排除掉才是更坏的那一侧。
+            if !window.is_visible().unwrap_or(true) || window.is_minimized().unwrap_or(false) {
+                return None;
+            }
             let pos = window.inner_position().ok()?;
             let size = window.inner_size().ok()?;
             let scale = window.scale_factor().ok()?;

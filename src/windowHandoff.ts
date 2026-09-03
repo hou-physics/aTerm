@@ -58,7 +58,7 @@
 // alt-screen，重复的转义序列会把画面搞乱，比丢一小段更糟。
 import { invoke } from '@tauri-apps/api/core'
 import { emit, emitTo, listen } from '@tauri-apps/api/event'
-import { beginHandoff, endHandoff } from './handoffLock'
+import { abortSelfDestruct, beginHandoff, beginSelfDestruct, endHandoff, isSelfDestructing } from './handoffLock'
 import { destroyTermWindow, lastPtySize, ptyResize } from './ipc'
 import { discardBuffered, ignorePtyOutput, ptyEventsReady, seedScrollback } from './ptyBuffer'
 import { useHint } from './store/hint'
@@ -85,10 +85,24 @@ export const HANDOFF_EVENT = 'term-window-handoff'
 export const HANDOFF_ACK_EVENT = 'term-window-handoff-ack'
 
 export type HandoffReady = { label: string }
-/** ack 里的 label 是**接管方自己的** label（R2/C1 之三），不是把载荷里的 toLabel 原样
- *  回带——后者只是"发起方以为它是谁"，回带过去等于让发起方自说自话地确认自己。发起方
- *  的 ack 监听按这个 label 认领，串扰或错投的 ack 一律不认。 */
-export type HandoffAck = { label: string }
+/** ack 的两个字段，**认领要求两个都对上**（缺一条就没有区分力，见下）。
+ *
+ *  `label` 是**接管方自己的** label（R2/C1 之三），不是把载荷里的 toLabel 原样回带——
+ *  后者只是"发起方以为它是谁"，回带过去等于让发起方自说自话地确认自己。
+ *
+ *  `tabId` 是接管方从载荷里**原样回带**的、发起方那份标签的 id（V3.4 修复轮 R2 / C1）。
+ *  它和 label 的性质不同：label 是接管方对"我是谁"的自述，tabId 只是一枚关联令牌，回带
+ *  的语义正是这里要的——"我确认的是**你那一次**交接"。
+ *
+ *  **为什么只比 label 不够**：V3.3 只有 tearOutTab 一条路，它认领的是 create_term_window
+ *  刚返回的新窗口 label，每次交接都不一样、天然唯一。V3.4 的 handoffTabToWindow 认领的
+ *  却是一个**已经存在的**窗口的 label，它不随交接变化：同一个源窗口向同一个目标连着甩
+ *  两个标签时，两条 ack 监听认领同一个字符串，目标回的第一条 ack 会把两条等待一起
+ *  resolve——第二个标签于是在目标**尚未确认**时就被 removeTabKeepingPty 移除，本模块唯一
+ *  那条硬不变式（绝不允许两个窗口都没有这个标签）的证明手段被整个抽掉。tearOutTab 那条
+ *  路今天不需要 tabId 也能区分，但它照样比对：同一个交接协议只该有一套认领规则，留一条
+ *  "这条为什么不用比"的例外，下一个复用它的人就会再踩一次同样的坑。 */
+export type HandoffAck = { label: string; tabId: string }
 
 /** 交接载荷里的单个窗格。
  *
@@ -121,6 +135,13 @@ export type HandoffPane = {
 export type HandoffPayload = {
   /** 发起方（旧窗口）的 label，新窗口据此把 ack 定向发回去。 */
   fromLabel: string
+  /** **发起方那份标签的 id**，接管方在 ack 里原样回带，发起方据此认领"这是我等的那一次
+   *  交接的 ack"（V3.4 修复轮 R2 / C1，完整理由见 {@link HandoffAck}）。
+   *
+   *  它描述的是**发起方**那一侧的标签——接管方 adoptTerminalTab 会给自己新建一个 id，
+   *  两者不相等，这个字段也不该被接管方拿去当自己标签的 id 用。它在本次交接期间是唯一
+   *  的：交接锁（handoffLock.ts）保证同一个 tabId 同时最多只有一次交接在飞。 */
+  tabId: string
   /** 接管方（新窗口）的 label，即 create_term_window 的返回值。ack 里原样回带，
    *  发起方用它认领"这是我等的那次 ack"。 */
   toLabel: string
@@ -271,6 +292,7 @@ async function handoffToLabel(
   const payload: HandoffPayload = {
     fromLabel: opts.fromLabel,
     toLabel,
+    tabId,
     activePaneIndex: Math.max(0, fresh.panes.findIndex((p) => p.id === fresh.activePaneId)),
     panes: buildHandoffPanes(fresh),
   }
@@ -359,7 +381,9 @@ export async function tearOutTab(tabId: string, screenPoint: { x: number; y: num
     // 新窗口不知道是谁把它建出来的），两条挨在一起时"这条没写 target"很容易被读成"这个
     // 事件也是广播"。
     unlistenAck = await listen<HandoffAck>(HANDOFF_ACK_EVENT, (e) => {
-      if (label !== null && e.payload?.label === label) ack.resolve()
+      // 两个字段都要对上（R2 / C1）：这条路上 label 本来就足够区分（新窗口 label 每次
+      // 都不一样），tabId 是与 handoffTabToWindow 共用同一套认领规则——见 HandoffAck。
+      if (label !== null && e.payload?.label === label && e.payload?.tabId === tabId) ack.resolve()
     }, { target: fromLabel })
 
     // 第 1 步：建窗。失败（Rust 侧返回 Err）时什么窗口都没建出来，没有残留可关。
@@ -415,9 +439,16 @@ async function closeSelfIfEmptyShell(): Promise<void> {
   const label = await currentWindowLabel()
   if (!isTornOutWindow(label)) return
   if (useTabs.getState().tabs.some((t) => t.kind === 'term')) return
+  // 从这一刻起拒收交接（M1）：置位必须在 destroy 的 IPC **发出之前**——真正的空档在
+  // 那句 await 之后、销毁生效之前，完整考据见 handoffLock.ts 里这面旗上方的注释。
+  beginSelfDestruct()
   try {
     await destroyTermWindow(label)
   } catch (err) {
+    // destroy 失败 = 窗口还活着，旗子必须放下，否则这个窗口从此永远收不了任何交接——
+    // 一次失败的自毁会把它变成一个黑洞。**只在失败分支复位**：成功分支里窗口马上就没
+    // 了，复位反而会把那个空档重新打开。
+    abortSelfDestruct()
     console.warn('空壳窗口自动关闭失败', label, err)
   }
 }
@@ -456,7 +487,11 @@ export async function handoffTabToWindow(tabId: string, targetLabel: string): Pr
     // 限定 target 为本窗口）。**必须在发载荷之前挂好**：目标窗口已经就绪，emitTo 一发出
     // 去它下一刻就可能回 ack。
     unlistenAck = await listen<HandoffAck>(HANDOFF_ACK_EVENT, (e) => {
-      if (e.payload?.label === targetLabel) ack.resolve()
+      // **两个字段都要对上**（R2 / C1）：目标 label 是一个已经存在的窗口的 label，不随
+      // 交接变化——只比它的话，同一个源窗口向同一个目标连甩两个标签时，目标回的第一条
+      // ack 会把两条等待一起 resolve，第二个标签在目标尚未确认时就被移除。完整考据见
+      // HandoffAck 的注释。
+      if (e.payload?.label === targetLabel && e.payload?.tabId === tabId) ack.resolve()
     }, { target: fromLabel })
 
     await handoffToLabel(tabId, targetLabel, { fromLabel, ack: ack.promise, outcome })
@@ -504,6 +539,10 @@ export async function handleHandoff(payload: HandoffPayload): Promise<void> {
   // closeTab 会 kill 掉正在跑的会话。不是发给我的：不建标签、也**不回 ack**（回了就
   // 等于替真正的接管方给了保证，发起方会据此删掉自己的标签）。
   if (payload.toLabel !== (await currentWindowLabel())) return
+  // 本窗口已经决定自毁（M1，考据见 selfDestructing 上方）：接下来它随时会消失，而
+  // destroy 不杀 PTY——在这里接管等于把这个会话连同标签一起吞掉，两个窗口都没有它。
+  // 不建标签、也**不回 ack**，让发起方走它自己的超时回滚，标签留在原处。
+  if (isSelfDestructing()) return
   for (const pane of payload.panes) {
     if (!pane.ptyId) continue
     discardBuffered(pane.ptyId)
@@ -523,7 +562,13 @@ export async function handleHandoff(payload: HandoffPayload): Promise<void> {
   // 后者只是"发起方以为接管方是谁"，回带过去等于让发起方自说自话地确认自己。走到这里
   // 时上面那道校验已经保证两者相等，用 currentWindowLabel() 是让"谁在确认"这件事由
   // 确认者自己说出来，而不是从对方的话里抄一遍。
-  await emitTo(payload.fromLabel, HANDOFF_ACK_EVENT, { label: await currentWindowLabel() } satisfies HandoffAck)
+  await emitTo(payload.fromLabel, HANDOFF_ACK_EVENT, {
+    label: await currentWindowLabel(),
+    // 原样回带（R2 / C1）：发起方靠它分辨"你确认的是我哪一次交接"。这个字段**必须**取自
+    // 载荷、不能取本窗口刚 adoptTerminalTab 出来的那个新 id——后者是接管方自己的标签 id，
+    // 发起方那边根本没有这个 id，回带过去等于谁都认领不了，每次交接都会等到超时。
+    tabId: payload.tabId,
+  } satisfies HandoffAck)
 }
 
 /** 窗口启动时的接管入口（App.tsx 顶层 side-effect 导入触发）。

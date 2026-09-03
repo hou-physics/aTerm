@@ -487,7 +487,12 @@ describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () 
     expect(t.panes.map((p) => p.id)).toEqual(['pane-a', 'pane-b'])
   })
 
-  it('只剩一个（非主页）标签时，移出窗口边界也不进入 tearOut 状态（等于把窗口整体搬走，没有意义，退回既有行为）', async () => {
+  // V3.4 修复轮 R2 / I1 **改变了这条用例的预期**：V3.3 时 tabCount<=1 连"将离开本窗口"
+  // 的视觉状态都不给（守卫写在 pointermove 那一行里）。V3.4 之后这个标签是**可以**被拖到
+  // 别的窗口的——那正是招牌用例——于是整个拖拽过程零反馈就成了缺陷：光标下没有 ghost、
+  // 标签栏不高亮，松手前无从知道会发生什么。守卫本身没取消，它挪到了 pointerup 的
+  // allowNewWindow，只拦"建新窗口"那一路（下面那条用例把着）。
+  it('只剩一个（非主页）标签时移出窗口边界：照常进入 tearOut 状态、出 ghost 与离窗指示', async () => {
     useTabs.setState({ tabs: [HOME, TAB_A], activeId: 'tab-a' }) // 唯一的非主页标签就是被拖的这一个
     await renderApp()
     const a = tabEl('A')
@@ -497,15 +502,21 @@ describe('TabBar — 标签拖出窗口边界（V3.3 设计文档 §4.1）', () 
       fireEvent.pointerMove(a, { clientX: 2000, clientY: 10, pointerId: 1 }) // 移出窗口边界
     })
 
-    expect(useDnd.getState().tearOut).toBe(false)
-    expect(document.querySelector('.tabbar-tear-out')).toBeNull()
+    expect(useDnd.getState().tearOut).toBe(true)
+    expect(document.querySelector('.tabbar-tear-out')).not.toBeNull()
+    expect(useDragGhost.getState().visible).toBe(true) // 光标下确实有东西在跟手
+    // 次生问题的另一半：tearOut 为真时窗口内的落点状态必须清空，不能再亮起一个与实际
+    // 结果无关的窗格合并预览。
+    expect(useDnd.getState().target).toBeNull()
+    expect(useDnd.getState().tabBarIndex).toBeNull()
 
     await act(async () => {
       fireEvent.pointerUp(a, { clientX: 2000, clientY: 10, pointerId: 1 })
     })
-    // 拖的正是当前激活标签本身——这条路径本就是既有的"空操作"分支（见上面"拖到自己
-    // 标签的窗格区"用例），没有任何标签/窗格状态发生变化。
+    await act(async () => { await Promise.resolve() })
+    // 松手后仍然什么都没发生（谁都没命中 + 守卫拦住建窗那一路），标签原封不动。
     expect(useTabs.getState().tabs).toEqual([HOME, TAB_A])
+    expect(tearOutTab).not.toHaveBeenCalled()
   })
 
   // R2/M5：总览标签没有窗格、没有 PTY，tearOutTab 对它是空操作。此前它照样会进入
